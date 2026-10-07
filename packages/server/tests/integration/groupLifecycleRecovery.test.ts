@@ -240,8 +240,7 @@ for (const dialect of ['sqlite', 'pg'] as const)
                 ]
               )
             ).results[0]!
-            if (result.status === 'rejected')
-              throw new Error(`recipient edit rejected: ${JSON.stringify(result)}`)
+            expect(result.status).toBe('applied')
             return result
           }
           const initial = await recipientSave()

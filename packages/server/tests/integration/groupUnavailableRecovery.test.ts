@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { readFile, writeFile } from 'node:fs/promises'
 import { createGroupGrant, updateGroupGrant } from '../../src/auth/groupManagement.js'
 import { issueFolderKey } from '../../src/auth/folderManagement.js'
 import { prepareGroupBootstrap } from '../../src/scoped/groups/bootstrap.js'
@@ -256,6 +257,83 @@ for (const dialect of ['sqlite', 'pg'] as const)
               code: 'scope_unavailable',
             })
             expect((await f.progress()).status).toBe('unavailable')
+          } finally {
+            await f.close()
+          }
+        })
+
+      for (const damage of [
+        'missing blob',
+        'truncated envelope',
+        'bad authentication tag',
+        'source JSON syntax',
+        'source JSON shape',
+        'merge JSON syntax',
+        'cached fact JSON syntax',
+      ])
+        it(`marks confirmed evidence loss unavailable immediately (${damage})`, async () => {
+          const f = await fixture(dialect)
+          try {
+            const text = body('pending evidence')
+            const note = await f.save('Member.md', text)
+            const before = await f.progress()
+            const sha = shaOf(text)
+            if (damage === 'missing blob') await f.t.store.delete(sha)
+            else if (damage === 'truncated envelope')
+              await writeFile(f.t.store.pathFor(sha), 'broken')
+            else if (damage === 'bad authentication tag') {
+              const envelope = await readFile(f.t.store.pathFor(sha))
+              envelope[envelope.length - 1] = envelope[envelope.length - 1]! ^ 1
+              await writeFile(f.t.store.pathFor(sha), envelope)
+            } else if (damage === 'merge JSON syntax')
+              await f.t.db
+                .updateTable('versions')
+                .set({ merge: '{' })
+                .where('id', '=', note.version_id)
+                .execute()
+            else if (damage === 'cached fact JSON syntax') {
+              const version = await f.t.db
+                .selectFrom('versions')
+                .select('seq')
+                .where('id', '=', note.version_id)
+                .executeTakeFirstOrThrow()
+              await f.t.db
+                .insertInto('scope_group_parse_facts')
+                .values({
+                  vault_id: f.vault,
+                  file_id: note.file_id,
+                  version_id: note.version_id,
+                  status: 'valid',
+                  facts: '{',
+                  committed_seq: version.seq,
+                  recorded_at: f.deps.now().toISOString(),
+                })
+                .execute()
+            } else
+              await f.t.db
+                .updateTable('version_security_sources')
+                .set({ source_version_ids: damage === 'source JSON syntax' ? '{' : '{}' })
+                .where('version_id', '=', note.version_id)
+                .execute()
+            for (let retry = 0; retry < 2; retry++) {
+              const error = await processGroupDirtyPage(f.deps, f.vault).catch(
+                (error: unknown) => error
+              )
+              expect(error).toMatchObject({ code: 'scope_unavailable', details: {} })
+              expect(error).not.toMatchObject({ details: { retryable: true } })
+              expect(await f.progress()).toMatchObject({
+                status: 'unavailable',
+                processed_seq: before.processed_seq,
+              })
+            }
+            const later = await f.save('Later.md', body('later'))
+            expect(
+              await f.t.db
+                .selectFrom('scope_group_dirty')
+                .select('version_id')
+                .where('version_id', '=', later.version_id)
+                .execute()
+            ).toEqual([])
           } finally {
             await f.close()
           }

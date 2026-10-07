@@ -12,8 +12,22 @@ import { storeGroupOrigins } from './originStore.js'
 import { bindGroupToken, canonicalGroupToken, resolveGroupTarget } from './bindings.js'
 import { readAudienceApproval } from './audienceApproval.js'
 export type GroupFactDeps = ScopedUploadDeps & { parseGroups?: (text: string) => GroupFrontmatter }
-export const groupUnavailable = () =>
-  new AbeleError('scope_unavailable', 'group evidence unavailable; reviewed rebuild required')
+export const groupUnavailable = (cause?: unknown) => {
+  const error = new AbeleError(
+    'scope_unavailable',
+    'group evidence unavailable; reviewed rebuild required'
+  )
+  if (cause !== undefined) error.cause = cause
+  return error
+}
+/** Malformed committed metadata is an evidence failure, not a parser/I/O retry. */
+export function parseGroupEvidenceJson(raw: string): unknown {
+  try {
+    return JSON.parse(raw)
+  } catch (error) {
+    throw groupUnavailable(error)
+  }
+}
 const empty = (): GroupOriginState => ({ memory: {}, active: [], uncertain: false })
 export async function groupStateFor(
   tx: Transaction<Database>,
@@ -31,7 +45,7 @@ export async function groupStateFor(
     .executeTakeFirst()
   if (!fact) return null
   if (fact.facts.length > 1024 * 1024) throw groupUnavailable()
-  return JSON.parse(fact.facts) as GroupOriginState
+  return parseGroupEvidenceJson(fact.facts) as GroupOriginState
 }
 /** Shared ordered fact reducer for bootstrap and dirty replay; cached immutable
  * versions are never re-attributed from the current/final actor.
@@ -107,7 +121,16 @@ export async function processGroupVersion(
   ): Promise<GroupFrontmatter | { status: 'unknown'; groups: [] }> => {
     if (!sha) return { status: 'valid', groups: [] }
     if (size > 8 * 1024 * 1024) return { status: 'limited', groups: [] }
-    const bytes = await deps.store.get(sha)
+    let bytes: Buffer
+    try {
+      bytes = await deps.store.get(sha)
+    } catch (error) {
+      // BlobStore.get distinguishes missing bytes and invalid/unauthenticated
+      // envelopes from operational read errors. Only the latter are retryable.
+      if (error instanceof AbeleError && (error.code === 'not_found' || error.code === 'internal'))
+        throw groupUnavailable(error)
+      throw error
+    }
     if (bytes.length !== size || createHash('sha256').update(bytes).digest('hex') !== sha)
       throw groupUnavailable()
     return (deps.parseGroups ?? parseGroupFrontmatter)(bytes.toString('utf8'))
@@ -122,7 +145,7 @@ export async function processGroupVersion(
   const status = tokens.length !== parsed.groups.length ? ('invalid' as const) : parsed.status
   let previous = await groupStateFor(tx, vaultId, fileId, version.prev_version_id)
   if (!previous && version.prev_version_id) previous = { ...empty(), uncertain: true }
-  const ids: unknown = JSON.parse(security.source_version_ids)
+  const ids = parseGroupEvidenceJson(security.source_version_ids)
   if (!Array.isArray(ids) || ids.length > 8 || ids.some((id) => typeof id !== 'string'))
     throw groupUnavailable()
   const sources: GroupOriginState[] = []
@@ -161,7 +184,7 @@ export async function processGroupVersion(
     return result
   }
   if (version.merge) {
-    const merge = JSON.parse(version.merge) as {
+    const merge = parseGroupEvidenceJson(version.merge) as {
       incoming_sha: string
       base_version_id: string | null
     }

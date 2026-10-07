@@ -6,6 +6,7 @@ import { versionFolderFile } from '../admissionPolicy.js'
 import { scopedSecurityEligibility, type SecurityOptions } from '../folderSecurity.js'
 import type { GroupOriginState } from './origins.js'
 import { readAudienceApproval } from './audienceApproval.js'
+import { parseGroupEvidenceJson } from './versionFacts.js'
 const unavailable = () => new AbeleError('scope_unavailable', 'group view evidence unavailable')
 /** Project one certified intermediate watermark using indexed bound-target
  * reverse relations. No parsing, basename resolution or whole-vault inventory scan.
@@ -53,7 +54,7 @@ export async function publishGroupViews(
       .where('version_id', '=', versionId)
       .executeTakeFirst()
     if (!fact || fact.status !== 'valid' || fact.facts.length > 1024 * 1024) return null
-    return JSON.parse(fact.facts) as GroupOriginState
+    return parseGroupEvidenceJson(fact.facts) as GroupOriginState
   }
   for (const grant of grants) {
     if (!grant.root_file_id) throw unavailable()

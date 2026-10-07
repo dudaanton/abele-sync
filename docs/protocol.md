@@ -140,9 +140,11 @@ An interrupted worker page (for example, a storage or lock failure) returns
 unchanged. Retry preparation; the background worker also retries prepared vaults.
 Personal commits keep collecting evidence meanwhile, and scoped reads remain
 held while progress trails the vault head. Proven evidence gaps still set the
-durable `unavailable` status and require the recovery above. Retries do not renew
-pins or leases; evidence that expires or exceeds a backlog bound can still
-require a new baseline.
+durable `unavailable` status and require the recovery above. Missing committed
+blobs, invalid/unauthenticated blob envelopes and malformed stored evidence JSON
+are evidence failures, not operational read failures; they do not carry
+`retryable: true`. Retries do not renew pins or leases; evidence that expires or
+exceeds a backlog bound can still require a new baseline.
 
 ## CLI boundaries
 
