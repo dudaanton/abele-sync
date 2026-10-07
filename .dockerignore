@@ -1,0 +1,19 @@
+# What the build context must not carry: anything the image builds for itself,
+# anything belonging to this machine, and anything holding a secret or a vault.
+node_modules
+**/node_modules
+**/dist
+.git
+.gitignore
+.superpowers
+.llm
+.orca
+CLAUDE.md
+.claude
+data
+pgdata
+caddy
+**/*.db*
+**/*.tsbuildinfo
+**/coverage
+.env

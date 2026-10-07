@@ -1,0 +1,34 @@
+{
+  "name": "abele-sync",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -b packages/protocol packages/server packages/core packages/cli",
+    "types": "tsc -b packages/protocol packages/server packages/core packages/cli && tsc -p packages/protocol/tsconfig.test.json --noEmit && tsc -p packages/server/tsconfig.test.json --noEmit && tsc -p packages/core/tsconfig.test.json --noEmit && tsc -p packages/cli/tsconfig.test.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:sql": "node scripts/test-sql.mjs",
+    "test:sql:disposable": "bash scripts/test-sql-disposable.sh",
+    "upgrade:preflight": "npm run build && node scripts/upgrade-preflight.mjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "prettier": "3.9.6",
+    "typescript": "5.9.3",
+    "vitest": "5.0.2"
+  },
+  "overrides": {
+    "ajv": {
+      "fast-uri": "3.1.8"
+    }
+  }
+}

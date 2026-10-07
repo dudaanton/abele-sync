@@ -1,0 +1,39 @@
+{
+  "name": "@abele/sync-server",
+  "version": "0.0.0",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "bin": {
+    "abele-sync-server": "./dist/index.js",
+    "abele-sync-admin": "./dist/admin-cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@abele/sync-protocol": "0.0.0",
+    "fastify": "5.12.5",
+    "@fastify/websocket": "11.3.0",
+    "@fastify/rate-limit": "10.3.0",
+    "kysely": "0.29.5",
+    "better-sqlite3": "11.10.0",
+    "pg": "8.23.0",
+    "zod": "3.25.76",
+    "node-diff3": "3.2.1",
+    "diff-match-patch": "1.0.5",
+    "yaml": "2.9.0",
+    "commander": "13.1.0",
+    "async-mutex": "0.5.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "7.6.13",
+    "@types/pg": "8.23.1",
+    "@types/diff-match-patch": "1.0.36",
+    "fast-check": "3.23.2",
+    "ws": "8.21.3",
+    "@types/ws": "8.18.1"
+  }
+}

@@ -1,0 +1,5 @@
+# Terminating TLS in front of the server. ABELE_DOMAIN names the host this
+# server answers on; Caddy gets the certificate for it on its own.
+{$ABELE_DOMAIN} {
+	reverse_proxy server:{$ABELE_PORT}
+}

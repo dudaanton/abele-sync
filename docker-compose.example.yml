@@ -1,0 +1,66 @@
+# Local build by default. Released images: ghcr.io/dudaanton/abele-sync:<version>
+# Copy this file to compose.yml and .env.example to .env; fill in all secrets.
+# Host-side reverse proxy: use 127.0.0.1:8787. Container-side Caddy: --profile tls.
+services:
+  server:
+    image: ${ABELE_IMAGE:-abele-sync:local}
+    build:
+      context: .
+      dockerfile: packages/server/Dockerfile
+      target: server
+    env_file: .env
+    environment:
+      ABELE_DATABASE_URL: postgres://${ABELE_PG_USER:-abele}:${ABELE_PG_PASSWORD:?set ABELE_PG_PASSWORD}@postgres:5432/${ABELE_PG_DATABASE:-abele}
+      ABELE_BLOB_DIR: /data/blobs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - '${ABELE_BIND:-127.0.0.1}:${ABELE_PORT:-8787}:${ABELE_PORT:-8787}'
+    volumes:
+      - server-data:/data
+    restart: unless-stopped
+    stop_grace_period: 60s
+
+  postgres:
+    # Multi-platform PostgreSQL 16 index, resolved 2026-10-07.
+    image: postgres:16-bookworm@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
+    environment:
+      POSTGRES_USER: ${ABELE_PG_USER:-abele}
+      POSTGRES_PASSWORD: ${ABELE_PG_PASSWORD:?set ABELE_PG_PASSWORD}
+      POSTGRES_DB: ${ABELE_PG_DATABASE:-abele}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  # Optional TLS. Set ABELE_DOMAIN/PUBLIC_URL/TRUST_PROXY as described in docs/deploy.md.
+  caddy:
+    # Multi-platform Caddy 2 index, resolved 2026-10-07.
+    image: caddy:2@sha256:f2a1290d0463aad60660d4ec134943f183ee2a5f6c3eb7bf32dd984f2f020772
+    profiles: [tls]
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      ABELE_DOMAIN: ${ABELE_DOMAIN:-localhost}
+      ABELE_PORT: ${ABELE_PORT:-8787}
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
+volumes:
+  server-data:
+  postgres-data:
+  caddy-data:
+  caddy-config:
