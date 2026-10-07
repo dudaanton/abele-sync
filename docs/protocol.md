@@ -109,6 +109,25 @@ Errors such as `scope_updating`, `scope_unavailable`, `scoped_unavailable` and
 valid empty scope. Do not treat them as success, bypass the scoped fence, or
 switch to a broader token.
 
+### Group preparation recovery
+
+When every previous group grant is revoked or expired, creating a new group
+share (or renewing an expired one) starts a fresh, paged baseline at the current
+committed vault head. This also recovers a vault marked `unavailable`. Revoke
+**all** unexpired group grants first if replacing a failed preparation; creating
+another grant while one remains live does not reset shared evidence. Revocation
+retires the old recipients' authority: a replacement grant needs new invitations
+or keys.
+
+The new audience stays `preparing` until the baseline and subsequent committed
+evidence are certified. Its admission starts at creation/renewal, not at earlier
+queued or private-gap versions. Immutable introducer facts and stable bindings
+are preserved; missing historical proof is not invented. Abandoned preparation
+queues and pins are retired only when there is no remaining live group audience.
+This is a new baseline, not a promise to restore lost history or automatically
+approve uncertain group relations. A still-live audience's unavailable evidence
+requires explicit recovery rather than silently skipping its membership gaps.
+
 ## CLI boundaries
 
 Personal mode watches one vault root, applies selective settings and holds large

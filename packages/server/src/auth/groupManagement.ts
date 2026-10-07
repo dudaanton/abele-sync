@@ -17,7 +17,10 @@ import {
 import { versionFolderFile } from '../scoped/admissionPolicy.js'
 import { scopedSecurityEligibility } from '../scoped/folderSecurity.js'
 import { closeExpiredGrantIntervals } from '../scoped/admissionState.js'
-import { setGroupAdmissionStart } from '../scoped/groups/grantBaseline.js'
+import {
+  restartRetiredGroupBaseline,
+  setGroupAdmissionStart,
+} from '../scoped/groups/grantBaseline.js'
 const id = z.string().min(1).max(200),
   role = z.enum(['reader', 'editor'])
 export async function groupGrantRow(
@@ -82,6 +85,12 @@ export async function createGroupGrant(
       }).eligible
     )
       throw new AbeleError('settings_forbidden', 'group root is not eligible')
+    const head = await tx
+      .selectFrom('vault_seq')
+      .select('head_seq')
+      .where('vault_id', '=', vaultId)
+      .executeTakeFirstOrThrow()
+    await restartRetiredGroupBaseline(tx, vaultId, head.head_seq, at)
     const grantId = newId()
     await tx
       .insertInto('scope_grants')
@@ -106,11 +115,6 @@ export async function createGroupGrant(
       .insertInto('scope_feed_state')
       .values({ grant_id: grantId, updated_at: at.toISOString() })
       .execute()
-    const head = await tx
-      .selectFrom('vault_seq')
-      .select('head_seq')
-      .where('vault_id', '=', vaultId)
-      .executeTakeFirstOrThrow()
     await setGroupAdmissionStart(tx, vaultId, grantId, head.head_seq, at)
     await managementAudit(tx, session.accountId, vaultId, 'scope.group.create', grantId, at)
     futureExpiry(expiry, authNow(deps))
@@ -159,6 +163,7 @@ export async function updateGroupGrant(
         .select('head_seq')
         .where('vault_id', '=', vaultId)
         .executeTakeFirstOrThrow()
+      await restartRetiredGroupBaseline(tx, vaultId, head.head_seq, at)
       // Renewal is audience-local. The shared worker must still replay other
       // live grants' queued departures/private gaps, not jump to this head.
       await setGroupAdmissionStart(tx, vaultId, grantId, head.head_seq, at, true)

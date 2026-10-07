@@ -49,7 +49,7 @@ for (const dialect of ['sqlite', 'pg'] as const)
   describe.skipIf(dialect === 'pg' && !hasPgTestDb)(
     `group unavailable recovery (${dialect})`,
     () => {
-      for (const state of ['ready', 'unavailable', 'expired'] as const)
+      for (const state of ['ready', 'unavailable', 'expired', 'renewed'] as const)
         it(`starts a proven current baseline after the last group retires (${state})`, async () => {
           const f = await fixture(dialect)
           try {
@@ -63,7 +63,7 @@ for (const dialect of ['sqlite', 'pg'] as const)
               })
               expect((await f.progress()).status).toBe('unavailable')
             }
-            if (state === 'expired')
+            if (state === 'expired' || state === 'renewed')
               await f.t.db
                 .updateTable('scope_grants')
                 .set({ expires_at: '2029-12-31T23:59:59.000Z' })
@@ -93,7 +93,13 @@ for (const dialect of ['sqlite', 'pg'] as const)
                 .where('version_id', '=', current.version_id)
                 .execute()
             ).toEqual([])
-            const next = await f.add()
+            const next =
+              state === 'renewed'
+                ? await updateGroupGrant(f.deps, f.owner.accountToken, f.vault, f.first.id, {
+                    expected_revision: 0,
+                    expires_at: '2030-01-02T00:00:00.000Z',
+                  })
+                : await f.add()
             expect((await f.progress()).generation).toBe(before.generation + 1)
             expect((await f.progress()).status).toBe('preparing')
             expect(
