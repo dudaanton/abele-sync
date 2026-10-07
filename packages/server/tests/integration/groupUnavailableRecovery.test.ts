@@ -262,6 +262,60 @@ for (const dialect of ['sqlite', 'pg'] as const)
           }
         })
 
+      for (const reader of ['predecessor', 'projection'])
+        for (const facts of [
+          '{}',
+          'null',
+          '{"memory":{"root.md":{}},"active":["root.md"],"uncertain":false}',
+          '{"memory":{},"active":["root.md"],"uncertain":false}',
+        ])
+          it(`rejects structurally corrupt ${reader} facts (${facts})`, async () => {
+            const f = await fixture(dialect)
+            try {
+              const note = await f.save('Member.md', body('original'))
+              await processGroupDirtyPage(f.deps, f.vault)
+              const before = await f.progress()
+              await f.t.db
+                .updateTable('scope_group_parse_facts')
+                .set({ facts })
+                .where('version_id', '=', note.version_id)
+                .execute()
+              if (reader === 'predecessor') {
+                const text = body('edited')
+                await putBlob(f.t.app, f.device.deviceToken, text)
+                await commit(f.t.app, f.device.deviceToken, f.vault, [
+                  {
+                    op: 'modify',
+                    file_id: note.file_id,
+                    base_version_id: note.version_id,
+                    sha: shaOf(text),
+                    size: Buffer.byteLength(text),
+                    mtime: 2,
+                  },
+                ])
+              } else await f.save('Other.md', 'unrelated change')
+              const error = await processGroupDirtyPage(f.deps, f.vault).catch(
+                (error: unknown) => error
+              )
+              expect(error).toMatchObject({ code: 'scope_unavailable' })
+              expect(error).not.toMatchObject({ details: { retryable: true } })
+              expect(await f.progress()).toMatchObject({
+                status: 'unavailable',
+                processed_seq: before.processed_seq,
+              })
+              const later = await f.save('Later.md', 'later')
+              expect(
+                await f.t.db
+                  .selectFrom('scope_group_dirty')
+                  .select('version_id')
+                  .where('version_id', '=', later.version_id)
+                  .execute()
+              ).toEqual([])
+            } finally {
+              await f.close()
+            }
+          })
+
       for (const damage of [
         'missing blob',
         'truncated envelope',
@@ -269,6 +323,7 @@ for (const dialect of ['sqlite', 'pg'] as const)
         'source JSON syntax',
         'source JSON shape',
         'merge JSON syntax',
+        'merge JSON shape',
         'cached fact JSON syntax',
       ])
         it(`marks confirmed evidence loss unavailable immediately (${damage})`, async () => {
@@ -285,10 +340,10 @@ for (const dialect of ['sqlite', 'pg'] as const)
               const envelope = await readFile(f.t.store.pathFor(sha))
               envelope[envelope.length - 1] = envelope[envelope.length - 1]! ^ 1
               await writeFile(f.t.store.pathFor(sha), envelope)
-            } else if (damage === 'merge JSON syntax')
+            } else if (damage === 'merge JSON syntax' || damage === 'merge JSON shape')
               await f.t.db
                 .updateTable('versions')
-                .set({ merge: '{' })
+                .set({ merge: damage === 'merge JSON syntax' ? '{' : '{}' })
                 .where('id', '=', note.version_id)
                 .execute()
             else if (damage === 'cached fact JSON syntax') {

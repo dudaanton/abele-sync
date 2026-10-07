@@ -1,4 +1,5 @@
 import { AbeleError } from '@abele/sync-protocol'
+import { z } from 'zod'
 import { createHash } from 'node:crypto'
 import type { Transaction } from 'kysely'
 import type { Database } from '../../db/schema.js'
@@ -7,11 +8,20 @@ import { getVaultSettings } from '../../vault/vaults.js'
 import type { ScopedUploadDeps } from '../uploads.js'
 import { scopedSecurityEligibility } from '../folderSecurity.js'
 import { parseGroupFrontmatter, type GroupFrontmatter } from './frontmatter.js'
-import { reduceGroupOrigins, type GroupOriginState, type GroupWriter } from './origins.js'
+import {
+  GroupOriginStateSchema,
+  reduceGroupOrigins,
+  type GroupOriginState,
+  type GroupWriter,
+} from './origins.js'
 import { storeGroupOrigins } from './originStore.js'
 import { bindGroupToken, canonicalGroupToken, resolveGroupTarget } from './bindings.js'
 import { readAudienceApproval } from './audienceApproval.js'
 export type GroupFactDeps = ScopedUploadDeps & { parseGroups?: (text: string) => GroupFrontmatter }
+const MergeEvidence = z.object({
+  incoming_sha: z.string().regex(/^[0-9a-f]{64}$/),
+  base_version_id: z.string().min(1).max(200).nullable(),
+})
 export const groupUnavailable = (cause?: unknown) => {
   const error = new AbeleError(
     'scope_unavailable',
@@ -27,6 +37,17 @@ export function parseGroupEvidenceJson(raw: string): unknown {
   } catch (error) {
     throw groupUnavailable(error)
   }
+}
+/** Stored states must satisfy the same nested schema as reducer inputs. A cast
+ * would turn malformed metadata into a retryable TypeError (or silently reuse it).
+ */
+export function parseGroupState(raw: string): GroupOriginState {
+  if (Buffer.byteLength(raw) > 1024 * 1024) throw groupUnavailable()
+  const parsed = GroupOriginStateSchema.safeParse(parseGroupEvidenceJson(raw))
+  if (!parsed.success) throw groupUnavailable(parsed.error)
+  if (!parsed.data.active.every((key) => Object.hasOwn(parsed.data.memory, key)))
+    throw groupUnavailable()
+  return parsed.data
 }
 const empty = (): GroupOriginState => ({ memory: {}, active: [], uncertain: false })
 export async function groupStateFor(
@@ -44,8 +65,7 @@ export async function groupStateFor(
     .where('version_id', '=', versionId)
     .executeTakeFirst()
   if (!fact) return null
-  if (fact.facts.length > 1024 * 1024) throw groupUnavailable()
-  return parseGroupEvidenceJson(fact.facts) as GroupOriginState
+  return parseGroupState(fact.facts)
 }
 /** Shared ordered fact reducer for bootstrap and dirty replay; cached immutable
  * versions are never re-attributed from the current/final actor.
@@ -184,10 +204,9 @@ export async function processGroupVersion(
     return result
   }
   if (version.merge) {
-    const merge = parseGroupEvidenceJson(version.merge) as {
-      incoming_sha: string
-      base_version_id: string | null
-    }
+    const decoded = MergeEvidence.safeParse(parseGroupEvidenceJson(version.merge))
+    if (!decoded.success) throw groupUnavailable(decoded.error)
+    const merge = decoded.data
     const base = (await groupStateFor(tx, vaultId, fileId, merge.base_version_id)) ?? {
       ...empty(),
       uncertain: true,

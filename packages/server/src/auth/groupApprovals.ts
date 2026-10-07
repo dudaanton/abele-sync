@@ -11,6 +11,7 @@ import { scopedSecurityEligibility } from '../scoped/folderSecurity.js'
 import { publishGroupViews } from '../scoped/groups/views.js'
 import { newId } from '../ids.js'
 import { audienceApproval, approvalBindingKey } from '../scoped/groups/audienceApproval.js'
+import { parseGroupState } from '../scoped/groups/versionFacts.js'
 const id = z.string().min(1).max(200)
 /** Fresh owner + an actual owner-personal device, exact source/target preview.
  * Approval is standalone audited evidence; it never rewrites parse provenance.
@@ -97,7 +98,7 @@ export function approveGroupRelation(
       .executeTakeFirst()
     if (!fact || fact.facts.length > 1024 * 1024)
       throw new AbeleError('scope_unavailable', 'source token proof unavailable')
-    const state = JSON.parse(fact.facts) as { active: string[] }
+    const state = parseGroupState(fact.facts)
     if (!state.active.includes(body.token_key))
       throw new AbeleError('conflict', 'source token preview changed')
     const originId = newId()

@@ -29,7 +29,7 @@ const Edge = z
     removedByOwner: id.nullable(),
   })
   .strict()
-const State = z
+export const GroupOriginStateSchema = z
   .object({
     memory: z.record(Edge),
     active: z.array(key).max(256),
@@ -37,7 +37,7 @@ const State = z
     limited: z.boolean().optional(),
   })
   .strict()
-export type GroupOriginState = z.infer<typeof State>
+export type GroupOriginState = z.infer<typeof GroupOriginStateSchema>
 export type GroupEdge = z.infer<typeof Edge>
 const Input = z
   .object({
@@ -47,8 +47,8 @@ const Input = z
     operation: z.string().max(20),
     status: z.enum(['valid', 'invalid', 'unknown', 'limited']),
     tokens: z.array(z.object({ key, targetId: id.nullable() }).strict()).max(256),
-    previous: State.optional(),
-    sources: z.array(State).max(8).default([]),
+    previous: GroupOriginStateSchema.optional(),
+    sources: z.array(GroupOriginStateSchema).max(8).default([]),
     nativeRoot: z.object({ key, targetId: id, grantId: id }).strict().optional(),
     approvedKeys: z.array(key).max(256).default([]),
   })
