@@ -128,6 +128,13 @@ This is a new baseline, not a promise to restore lost history or automatically
 approve uncertain group relations. A still-live audience's unavailable evidence
 requires explicit recovery rather than silently skipping its membership gaps.
 
+Starting a new vault-wide baseline, including an explicit reviewed rebuild,
+retires previous audience-specific relation approvals. A bounded bootstrap may
+not prove whether an owner withdrew a token in the intervening history, so an
+old approval cannot authorize an uncertain reappearance. Approve the new
+certified source/target preview again after preparation. Audience-local renewal
+while another group remains live does not reset shared evidence or approvals.
+
 An interrupted worker page (for example, a storage or lock failure) returns
 `scope_unavailable` with `details.retryable: true` and leaves its durable progress
 unchanged. Retry preparation; the background worker also retries prepared vaults.

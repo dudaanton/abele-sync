@@ -1,9 +1,11 @@
 import { sql, type Transaction } from 'kysely'
 import type { Database } from '../../db/schema.js'
+import { retireGroupApprovals } from './audienceApproval.js'
 /** Called under the owner mutation's vault lock, before creating/renewing the
  * first live group audience. No evidence is collected while all groups are
  * retired, so the old replay watermark is not a baseline for this audience.
- * Preserve immutable provenance/bindings; only retire abandoned capture work.
+ * Preserve immutable provenance/bindings, but retire old audience approvals
+ * whose continuity across the abandoned capture work is no longer proven.
  * An existing unexpired authority (even unavailable) must never be skipped.
  */
 export async function restartRetiredGroupBaseline(
@@ -22,6 +24,7 @@ export async function restartRetiredGroupBaseline(
     .limit(1)
     .executeTakeFirst()
   if (live) return
+  await retireGroupApprovals(tx, vault)
   await tx
     .updateTable('scope_group_progress')
     .set({

@@ -4,7 +4,7 @@ import { hasPgTestDb } from '../helpers/tempDb.js'
 import { commit, create, putBlob, shaOf } from '../helpers/ops.js'
 import { createGroupGrant, updateGroupGrant } from '../../src/auth/groupManagement.js'
 import { issueFolderKey } from '../../src/auth/folderManagement.js'
-import { prepareGroupBootstrap } from '../../src/scoped/groups/bootstrap.js'
+import { prepareGroupBootstrap, rebuildGroupBootstrap } from '../../src/scoped/groups/bootstrap.js'
 import { processGroupDirtyPage } from '../../src/scoped/groups/worker.js'
 import { prepareFolderAdmissions, requireFolderVersion } from '../../src/scoped/admissions.js'
 import { approveGroupRelation } from '../../src/auth/groupApprovals.js'
@@ -203,6 +203,135 @@ for (const dialect of ['sqlite', 'pg'] as const)
           await f.close()
         }
       })
+    for (const recovery of ['renewal', 'reviewed rebuild'] as const)
+      it(`requires fresh audience approval after an unproven history gap (${recovery})`, async () => {
+        const f = await fixture(dialect)
+        try {
+          await prepareFolderAdmissions(f.deps, f.owner.accountToken, f.vault, f.grant.id)
+          let attempt = 0
+          const recipientSave = async (previous?: { file_id: string; version_id: string }) => {
+            const text = body(`recipient edit ${attempt++}`)
+            await uploadScopedBlob(
+              f.deps,
+              f.folderKey.key_token,
+              f.vault,
+              f.grant.id,
+              shaOf(text),
+              Buffer.from(text)
+            )
+            const result = (
+              await commitScoped(
+                f.deps,
+                f.folderKey.key_token,
+                f.vault,
+                f.grant.id,
+                `recipient-${attempt}`,
+                [
+                  previous
+                    ? {
+                        op: 'modify',
+                        file_id: previous.file_id,
+                        base_version_id: previous.version_id,
+                        sha: shaOf(text),
+                        size: Buffer.byteLength(text),
+                        mtime: attempt,
+                      }
+                    : create('Agents/Note.md', text),
+                ]
+              )
+            ).results[0]!
+            if (result.status === 'rejected')
+              throw new Error(`recipient edit rejected: ${JSON.stringify(result)}`)
+            return result
+          }
+          const initial = await recipientSave()
+          await processGroupDirtyPage(f.deps, f.vault)
+          const approve = (source: typeof initial, revision: number) =>
+            approveGroupRelation(f.deps, f.owner.accountToken, f.vault, f.a.grant.id, {
+              device_token: f.device.deviceToken,
+              expected_revision: revision,
+              source_file_id: source.file_id,
+              source_version_id: source.version_id,
+              target_file_id: f.root.file_id,
+              target_version_id: f.root.version_id,
+              token_key: 'root.md',
+            })
+          await approve(initial, 0)
+          await requireFolderVersion(
+            f.deps,
+            f.a.key.key_token,
+            f.vault,
+            f.a.grant.id,
+            initial.file_id,
+            initial.version_id
+          )
+          if (recovery === 'renewal') {
+            await updateGroupGrant(f.deps, f.owner.accountToken, f.vault, f.a.grant.id, {
+              expected_revision: 1,
+              expires_at: '2030-01-01T00:01:00.000Z',
+            })
+            f.setClock('2030-01-01T00:02:00.000Z')
+          }
+          // Owner withdrawal is followed by recipient reintroduction, outside
+          // the next bootstrap's 128-version chain. The folder grant stays live.
+          let current = await f.modify(initial, 'owner withdrew the group token')
+          for (let index = 0; index < 130; index++) current = await recipientSave(current)
+          if (recovery === 'renewal') {
+            expect(
+              await f.t.db
+                .selectFrom('scope_group_dirty')
+                .select('version_id')
+                .where('version_id', '=', current.version_id)
+                .execute()
+            ).toEqual([])
+            await updateGroupGrant(f.deps, f.owner.accountToken, f.vault, f.a.grant.id, {
+              expected_revision: 2,
+              expires_at: '2030-01-02T00:00:00.000Z',
+            })
+          } else await rebuildGroupBootstrap(f.deps, f.owner.accountToken, f.vault, 0)
+          await prepareGroupBootstrap(f.deps, f.owner.accountToken, f.vault)
+          expect((await processGroupDirtyPage(f.deps, f.vault)).ready).toBe(true)
+          expect(
+            await f.t.db
+              .selectFrom('scope_group_parse_facts')
+              .select('status')
+              .where('version_id', '=', current.version_id)
+              .executeTakeFirstOrThrow()
+          ).toEqual({ status: 'unknown' })
+          current = await recipientSave(current)
+          await processGroupDirtyPage(f.deps, f.vault)
+          const fact = await f.t.db
+            .selectFrom('scope_group_parse_facts')
+            .select(['status', 'facts'])
+            .where('version_id', '=', current.version_id)
+            .executeTakeFirstOrThrow()
+          expect(fact.status).toBe('valid')
+          expect(JSON.parse(fact.facts).memory['root.md'].origin.kind).toBe('unknown')
+          await expect(
+            requireFolderVersion(
+              f.deps,
+              f.a.key.key_token,
+              f.vault,
+              f.a.grant.id,
+              current.file_id,
+              current.version_id
+            )
+          ).rejects.toMatchObject({ code: 'not_found' })
+          // A fresh exact-preview approval is allowed, without upgrading provenance.
+          await approve(current, recovery === 'renewal' ? 3 : 1)
+          await requireFolderVersion(
+            f.deps,
+            f.a.key.key_token,
+            f.vault,
+            f.a.grant.id,
+            current.file_id,
+            current.version_id
+          )
+        } finally {
+          await f.close()
+        }
+      }, 120_000)
+
     it('bootstrap proves the historical target identity despite a later ordinary root-body edit', async () => {
       const f = await scopedFixture(dialect)
       try {

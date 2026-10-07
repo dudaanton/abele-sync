@@ -7,6 +7,7 @@ import { closeExpiredGrantIntervals } from '../admissionState.js'
 import { headAtStart } from '../folderPreparation.js'
 import { processGroupVersion, groupUnavailable, type GroupFactDeps } from './versionFacts.js'
 import { setGroupAdmissionStart } from './grantBaseline.js'
+import { retireGroupApprovals } from './audienceApproval.js'
 import { SCOPED_RESOURCE_LIMITS } from '../resourceLimits.js'
 export type GroupBootstrapDeps = GroupFactDeps & OwnerManagementDeps
 /** Explicit reviewed owner recovery, never an automatic lease renewal. */
@@ -39,6 +40,7 @@ export function rebuildGroupBootstrap(
       .limit(65)
       .execute()
     if (grants.length > 64) throw groupUnavailable()
+    await retireGroupApprovals(tx, vaultId)
     for (const grant of grants) {
       await closeExpiredGrantIntervals(tx, grant.id, at)
       await setGroupAdmissionStart(tx, vaultId, grant.id, head.head_seq, at, true)
