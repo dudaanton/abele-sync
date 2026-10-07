@@ -142,9 +142,16 @@ Personal commits keep collecting evidence meanwhile, and scoped reads remain
 held while progress trails the vault head. Proven evidence gaps still set the
 durable `unavailable` status and require the recovery above. Missing committed
 blobs, invalid/unauthenticated blob envelopes and malformed stored evidence JSON
+(including structurally invalid states, merge metadata or bootstrap cursors)
 are evidence failures, not operational read failures; they do not carry
-`retryable: true`. Retries do not renew pins or leases; evidence that expires or
-exceeds a backlog bound can still require a new baseline.
+`retryable: true`. Both dirty replay and bootstrap persist a durable
+`unavailable` marker when they prove such a failure. Bootstrap rolls back the
+failed page's facts and pins using a savepoint, then commits only the terminal
+marker under the same owner/vault lock—even on the first page, when no progress
+row existed before the request. Operational failures still roll back the whole
+page transaction without recording terminal loss. Retries do not renew pins or
+leases; evidence that expires or exceeds a backlog bound can still require a
+new baseline.
 
 ## CLI boundaries
 
