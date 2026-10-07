@@ -5,7 +5,13 @@ import type { Database } from '../db/schema.js'
 import type { Dialect } from '../db/connect.js'
 import { newId } from '../ids.js'
 import { authNow } from './accounts.js'
-import { withOwnerManagement, liveAt, freshOwnerSession, requireFreshOwner } from './freshOwner.js'
+import {
+  activeFirst,
+  withOwnerManagement,
+  liveAt,
+  freshOwnerSession,
+  requireFreshOwner,
+} from './freshOwner.js'
 import {
   requireGrantSlot,
   request,
@@ -124,6 +130,25 @@ export async function createGroupGrant(
       .where('id', '=', grantId)
       .executeTakeFirstOrThrow()
   })
+}
+/** Mirror the folder catalogue: bounded safe projection, including retired grants. */
+export async function listOwnerGroupGrants(
+  deps: FolderManagementDeps,
+  token: string,
+  vaultId: string
+) {
+  return withOwnerManagement(deps, token, vaultId, (tx) =>
+    tx
+      .selectFrom('scope_grants')
+      .select(GRANT_FIELDS)
+      .where('vault_id', '=', vaultId)
+      .where('selector_kind', '=', 'group')
+      .orderBy(activeFirst(authNow(deps)))
+      .orderBy('created_at')
+      .orderBy('id')
+      .limit(64)
+      .execute()
+  )
 }
 export async function updateGroupGrant(
   deps: FolderManagementDeps,

@@ -96,6 +96,61 @@ content. Revocation invalidates relevant authority, feed/snapshot state and
 publication; compact outcome records allow safe retry without retaining all
 payloads indefinitely.
 
+### Owner grant catalogues
+
+`GET /v1/vaults/:v/grants` lists folder grants; `GET
+/v1/vaults/:v/grants/groups` lists group grants. Both require a fresh account
+session belonging to the actual vault owner (less than five minutes since
+password authentication), return `Cache-Control: no-store`, and are behind the
+scoped-sharing deployment switch. Non-owner account sessions receive `403
+forbidden`; missing, stale or non-account credentials (including device and
+machine tokens) receive `401 unauthorized`.
+
+Each response is a JSON array of stored grant records, with the same safe fields
+as grant creation/update: `id`, `vault_id`, `label`, `selector_kind`,
+`folder_prefix`, `root_file_id`, `role`, `state`, `acl_revision`, `scope_revision`,
+`publication_revision`, `created_at`, `expires_at` and `revoked_at`. A group has
+`selector_kind: "group"`, `folder_prefix: null`, and its stable `root_file_id` and
+stored display name in `label`; the list does not reparse or prepare the group.
+No credential hashes, owner-session evidence, member tokens or invitation
+secrets are returned. Only the requested vault and selector kind are listed.
+
+Both lists include revoked, expired, preparing and unavailable grants. They
+return at most 64 entries, putting unrevoked, unexpired grants first, then sorting
+by `created_at` and `id` ascending within each lifecycle bucket. The returned
+`state` is the stored state, not a substitute for checking `revoked_at` and
+`expires_at`. There is currently no pagination for retired grants beyond that
+bound.
+
+For example, a group list response is:
+
+```json
+[
+  {
+    "id": "group-grant-id",
+    "vault_id": "vault-id",
+    "label": "Project team",
+    "selector_kind": "group",
+    "folder_prefix": null,
+    "root_file_id": "root-file-id",
+    "role": "editor",
+    "state": "active",
+    "acl_revision": 3,
+    "scope_revision": 1,
+    "publication_revision": 0,
+    "created_at": "2030-01-01T00:00:00.000Z",
+    "expires_at": null,
+    "revoked_at": null
+  }
+]
+```
+
+Use the current `acl_revision` as `expected_revision` in `PATCH
+/v1/vaults/:v/grants/groups/:g`, for example
+`{"expected_revision":3,"revoke":true}` to stop sharing. A concurrent authority
+change makes an old revision fail with `409 conflict`; refresh the list before
+retrying. Listing never requires a local catalogue of group IDs.
+
 ### Negotiated ceilings
 
 The current capability ceilings are 64 live grants, 32 operations per scoped

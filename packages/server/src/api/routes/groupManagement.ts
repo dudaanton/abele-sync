@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify'
 import { authDeps, bearerOf } from '../../auth/hooks.js'
 import {
   createGroupGrant,
+  listOwnerGroupGrants,
   updateGroupGrant,
   revokeGroupMember,
 } from '../../auth/groupManagement.js'
@@ -92,6 +93,10 @@ export function registerGroupManagementRoutes(app: FastifyInstance, deps: AppDep
     if (!value) throw new AbeleError('unauthorized', 'an account session is required')
     return value
   }
+  app.get<{ Params: { v: string } }>('/v1/vaults/:v/grants/groups', async (request, reply) => {
+    reply.header('cache-control', 'no-store')
+    return listOwnerGroupGrants(management, token(request.headers.authorization), request.params.v)
+  })
   app.post<{ Params: { v: string } }>('/v1/vaults/:v/grants/groups', async (request, reply) => {
     reply.header('cache-control', 'no-store')
     const owner = token(request.headers.authorization)

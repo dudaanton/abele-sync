@@ -55,6 +55,8 @@
   "PATCH /v1/vaults/:v/grants/:g/keys/:k": "management",
   "POST /v1/vaults/:v/grants/:g/prepare": "management",
   "POST /v1/vaults/:v/grants/groups/prepare": "management",
+  "GET /v1/vaults/:v/grants/groups": "management",
+  "HEAD /v1/vaults/:v/grants/groups": "management",
   "POST /v1/vaults/:v/grants/groups": "management",
   "PATCH /v1/vaults/:v/grants/groups/:g": "management",
   "POST /v1/vaults/:v/grants/groups/:g/approve": "management",
