@@ -62,8 +62,14 @@ export function registerGroupManagementRoutes(app: FastifyInstance, deps: AppDep
       for (const { vault_id } of vaults) {
         try {
           await processGroupDirtyPage(management, vault_id)
-        } catch {
-          app.log.error({ vaultId: vault_id }, 'scoped group view requires reviewed recovery')
+        } catch (error) {
+          app.log.error(
+            {
+              vaultId: vault_id,
+              retryable: error instanceof AbeleError && error.details.retryable === true,
+            },
+            'scoped group preparation failed'
+          )
         }
       }
     }

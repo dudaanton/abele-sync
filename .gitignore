@@ -16,3 +16,4 @@ pgdata
 caddy/data
 caddy/config
 /compose.yml
+/.scratch/

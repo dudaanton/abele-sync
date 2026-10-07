@@ -5,6 +5,7 @@ import { prepareGroupBootstrap } from '../../src/scoped/groups/bootstrap.js'
 import { processGroupDirtyPage } from '../../src/scoped/groups/worker.js'
 import { requireFolderVersion } from '../../src/scoped/admissions.js'
 import { scopedFixture } from '../helpers/scopedFixture.js'
+import { liveScopedServer } from '../helpers/liveScopedServer.js'
 import { hasPgTestDb } from '../helpers/tempDb.js'
 import { commit, create, putBlob, shaOf } from '../helpers/ops.js'
 
@@ -37,12 +38,12 @@ async function fixture(dialect: 'sqlite' | 'pg') {
     await putBlob(f.t.app, f.device.deviceToken, text)
     return (await commit(f.t.app, f.device.deviceToken, f.vault, [create(path, text)])).results[0]
   }
-  const revoke = (id: string) =>
+  const revokeGroup = (id: string) =>
     updateGroupGrant(f.deps, f.owner.accountToken, f.vault, id, {
       expected_revision: 0,
       revoke: true,
     })
-  return { ...f, add, prepare, first, progress, save, revoke }
+  return { ...f, root, add, prepare, first, progress, save, revokeGroup }
 }
 
 for (const dialect of ['sqlite', 'pg'] as const)
@@ -69,7 +70,7 @@ for (const dialect of ['sqlite', 'pg'] as const)
                 .set({ expires_at: '2029-12-31T23:59:59.000Z' })
                 .where('id', '=', f.first.id)
                 .execute()
-            else await f.revoke(f.first.id)
+            else await f.revokeGroup(f.first.id)
             // Personal commits deliberately do not collect group evidence with no live audience.
             const before = await f.progress()
             const text = body('current audience')
@@ -163,9 +164,9 @@ for (const dialect of ['sqlite', 'pg'] as const)
           const second = await f.add()
           expect(await f.progress()).toEqual(before)
           await expect(f.prepare()).rejects.toMatchObject({ code: 'scope_unavailable' })
-          await f.revoke(f.first.id)
+          await f.revokeGroup(f.first.id)
           await expect(f.prepare()).rejects.toMatchObject({ code: 'scope_unavailable' })
-          await f.revoke(second.id)
+          await f.revokeGroup(second.id)
           await f.add()
           expect((await f.prepare()).ready).toBe(true)
         } finally {
@@ -173,23 +174,132 @@ for (const dialect of ['sqlite', 'pg'] as const)
         }
       })
 
+      it('recovers through owner revoke/create/prepare HTTP actions without a database repair', async () => {
+        const f = await fixture(dialect)
+        try {
+          await f.save('Gap.md', 'gap')
+          await f.t.db.deleteFrom('scope_group_dirty').where('vault_id', '=', f.vault).execute()
+          await expect(processGroupDirtyPage(f.deps, f.vault)).rejects.toMatchObject({
+            code: 'scope_unavailable',
+          })
+          const live = await liveScopedServer(f)
+          try {
+            const base = `${live.base}/v1/vaults/${f.vault}/grants/groups`
+            const send = async (
+              path: string,
+              input: unknown,
+              method = 'POST',
+              token = f.owner.accountToken
+            ) => {
+              const response = await fetch(base + path, {
+                method,
+                headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+                body: JSON.stringify(input),
+              })
+              return { status: response.status, body: await response.json() }
+            }
+            const input = {
+              label: 'Replacement',
+              root_file_id: f.root.file_id,
+              expected_root_version: f.root.version_id,
+              role: 'reader',
+            }
+            const blocked = await send('', input)
+            expect(blocked).toMatchObject({
+              status: 200,
+              body: {
+                state: 'preparing',
+                preparation: { ok: false, error: { code: 'scope_unavailable' } },
+              },
+            })
+            for (const id of [f.first.id, blocked.body.id])
+              expect(
+                (await send(`/${id}`, { expected_revision: 0, revoke: true }, 'PATCH')).status
+              ).toBe(200)
+            await f.save('Idle.md', body('committed while retired'))
+            const before = await f.progress()
+            expect((await send('', input, 'POST', f.device.deviceToken)).status).toBe(401)
+            expect(await f.progress()).toEqual(before)
+            expect(await send('', input)).toMatchObject({
+              status: 200,
+              body: { state: 'active', preparation: { ok: true, state: 'active' } },
+            })
+            expect(await send('/prepare', {})).toMatchObject({ status: 200, body: { ready: true } })
+          } finally {
+            await live.close()
+          }
+        } finally {
+          await f.close()
+        }
+      })
+
+      for (const lineage of ['{', 'null', '{"version":null}', 'nonboolean-complete'])
+        it(`keeps malformed durable lineage unavailable (${lineage})`, async () => {
+          const f = await fixture(dialect)
+          try {
+            await f.save('Member.md', body('pending'))
+            const row = await f.t.db
+              .selectFrom('scope_group_dirty')
+              .selectAll()
+              .where('vault_id', '=', f.vault)
+              .executeTakeFirstOrThrow()
+            const corrupted =
+              lineage === 'nonboolean-complete'
+                ? JSON.stringify({ ...JSON.parse(row.lineage), complete: 'true' })
+                : lineage
+            await f.t.db
+              .updateTable('scope_group_dirty')
+              .set({ lineage: corrupted })
+              .where('vault_id', '=', f.vault)
+              .execute()
+            await expect(processGroupDirtyPage(f.deps, f.vault)).rejects.toMatchObject({
+              code: 'scope_unavailable',
+            })
+            expect((await f.progress()).status).toBe('unavailable')
+          } finally {
+            await f.close()
+          }
+        })
+
       for (const code of ['EIO', 'SQLITE_BUSY', '40P01'])
         it(`retries an operational failure (${code}) without losing subsequent committed evidence`, async () => {
           const f = await fixture(dialect)
           try {
+            const key = await issueFolderKey(f.deps, f.owner.accountToken, f.vault, f.first.id, {
+              attempt_id: 'retry-reader',
+              name: 'retry-reader',
+              role: 'reader',
+              expires_at: '2030-01-02T00:00:00.000Z',
+            })
             const note = await f.save('Member.md', body('pending'))
             const before = await f.progress()
-            const read = vi
-              .spyOn(f.deps.store, 'get')
-              .mockRejectedValueOnce(Object.assign(new Error('temporary read failure'), { code }))
+            const error = Object.assign(new Error('temporary infrastructure failure'), { code })
+            const interrupted =
+              code === 'EIO'
+                ? vi.spyOn(f.deps.store, 'get').mockRejectedValueOnce(error)
+                : vi.spyOn(f.deps.db, 'transaction').mockImplementationOnce(() => {
+                    throw error
+                  })
             try {
               await expect(processGroupDirtyPage(f.deps, f.vault)).rejects.toMatchObject({
                 code: 'scope_unavailable',
+                details: { retryable: true },
+                cause: { code },
               })
             } finally {
-              read.mockRestore()
+              interrupted.mockRestore()
             }
             expect(await f.progress()).toEqual(before)
+            await expect(
+              requireFolderVersion(
+                f.deps,
+                key.key_token,
+                f.vault,
+                f.first.id,
+                note.file_id,
+                note.version_id
+              )
+            ).rejects.toMatchObject({ code: 'scope_updating' })
             const later = await f.save('Later.md', body('later'))
             expect(
               await f.t.db

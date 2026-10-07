@@ -128,6 +128,15 @@ This is a new baseline, not a promise to restore lost history or automatically
 approve uncertain group relations. A still-live audience's unavailable evidence
 requires explicit recovery rather than silently skipping its membership gaps.
 
+An interrupted worker page (for example, a storage or lock failure) returns
+`scope_unavailable` with `details.retryable: true` and leaves its durable progress
+unchanged. Retry preparation; the background worker also retries prepared vaults.
+Personal commits keep collecting evidence meanwhile, and scoped reads remain
+held while progress trails the vault head. Proven evidence gaps still set the
+durable `unavailable` status and require the recovery above. Retries do not renew
+pins or leases; evidence that expires or exceeds a backlog bound can still
+require a new baseline.
+
 ## CLI boundaries
 
 Personal mode watches one vault root, applies selective settings and holds large
