@@ -1,6 +1,6 @@
 import { createCipheriv, hkdfSync } from 'node:crypto'
 import { writeFile } from 'node:fs/promises'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { buildTestApp } from '../helpers/testApp.js'
 import { shaOf } from '../helpers/ops.js'
 
@@ -12,8 +12,12 @@ describe('streamed external blob verification', () => {
         const sha = shaOf(bytes)
         expect(await t.store.verify(sha)).toBeNull()
         await t.store.put(bytes)
+        const fullBuffer = vi
+          .spyOn(t.store, 'get')
+          .mockRejectedValue(new Error('must not allocate full content'))
         expect(await t.store.verify(sha)).toEqual({ sha, size: bytes.length })
         expect(await t.store.intact(sha)).toBe(true)
+        expect(fullBuffer).not.toHaveBeenCalled()
       } finally {
         await t.close()
       }

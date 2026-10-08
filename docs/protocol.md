@@ -71,6 +71,84 @@ and quotas are separate from each client's size/selection settings. Changes to
 retention spans or quota require the acting account's current password in the
 settings request, including increases and removal of limits.
 
+## External-files verification extension
+
+This is an independent version-1 extension. The strict `/v1/capabilities` response
+and both existing sync protocols are unchanged. It adds no server representation
+state, device pins, quota exemptions, retention promises or UI.
+
+`GET /v1/external-files/capabilities` (public, `Cache-Control: no-store`) returns:
+
+```json
+{
+  "extension_version": 1,
+  "projection_schema": 1,
+  "personal": true,
+  "scoped": true,
+  "verification": {
+    "live_head": true,
+    "sha256": true,
+    "actual_size": true,
+    "authorization_rechecked": true
+  },
+  "max_file_size": 209715200
+}
+```
+
+`scoped` follows the existing deployment switch; the size ceiling is the smaller
+of the configured server ceiling and 200 MiB. Unknown, absent, disabled or
+incomplete extension support must refuse new eviction, keeping the original.
+Existing remote-only state must remain protected; authorized, version-bound
+historical downloads can still be used for non-destructive rescue.
+
+New personal operations require `x-abele-external-files-version: 1`:
+
+- `GET /v1/vaults/:v/files/:f/head`: live metadata in the existing `ManifestItem`
+  shape (`file_id`, `version_id`, `path`, `kind`, `seq`, `sha`, `size`, `mtime`).
+  **Metadata alone is not blob verification.**
+- `POST /v1/vaults/:v/files/:f/external/verify`: verifies the exact live version.
+
+Scoped verification is `POST
+/v1/scoped/vaults/:v/grants/:g/files/:f/external/verify`. It requires both
+`x-abele-scoped-version: 4` and `x-abele-external-files-version: 1`, the usual
+scoped-sharing activation, and current reader or editor authority. It never
+falls back to a personal route. The existing scoped head route is unchanged.
+
+Both verification bodies are strictly `{ "version_id": "...", "path": "...",
+"sha": "<64 lowercase hex characters>", "size": 123 }`. Success is exactly
+`{ "verified": true, "file_id": "...", "version_id": "...", "path": "...",
+"sha": "...", "size": 123 }`. All new route responses are `no-store`.
+
+Verification checks current authorization and authoritative file/vault ownership,
+non-deletion, live-head identity, canonical path, SHA and size. Scoped admission
+and materialized membership must agree with the authoritative live head; stale
+admitted versions are not sufficient. The encrypted blob is authenticated and
+SHA-256 hashed in pieces, counting **actual decrypted bytes**, not trusting SQL
+size metadata. No full-file verification buffer or client blob download is used.
+
+The transaction holds the established account → vault → authority → blob-row
+lock order through the final authorization recheck. Concurrent mutations,
+revocation, account disable and retention serialize; scoped deadlines are checked
+after the content read and at transaction completion. Wrong/missing/inaccessible
+file versions or blobs share a generic `404 not_found`; bad extension versions
+return `400 invalid_request`, credential failures retain `401`/`403`, and scoped
+activation/preparation refusals retain their existing codes.
+
+This is a **point-in-time proof, not a lease**. After the response, another author
+may modify/delete the file or access may end. Eviction must still follow the
+client's publication, journal, use/open checks and final local SHA/size checks.
+Historical versions remain subject to ordinary retention; local eviction does
+not change server quota or retention.
+
+Core `VaultClient` and `ScopedClient` expose `externalFilesCapabilities()` and
+`verifyExternalFile(fileId, { version_id, path, sha, size })`. Verification first
+negotiates complete support for its own facet and the size ceiling, sends the
+version header(s), and rejects a response that does not echo the exact requested
+identity and bytes. Unsupported extension support reports
+`external_files_unavailable`; offline/access failures remain distinct.
+`VaultClient.head(fileId)` reads personal live metadata with the extension header.
+These APIs do not perform any local filesystem mutation.
+
 ## Scoped sync
 
 `GET /v1/capabilities` advertises whether scoped sync is enabled. It is **off by

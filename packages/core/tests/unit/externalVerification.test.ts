@@ -124,8 +124,14 @@ for (const mode of ['personal', 'scoped'] as const)
   })
 it('BUG: personal head sends extension version and decodes existing manifest metadata', async () => {
   const head = { file_id: 'file', ...expected, kind: 'attachment', seq: 1, mtime: 1 }
-  const fetch = vi.fn(async () => new Response(JSON.stringify(head)))
+  const fetch = vi.fn(
+    async (_input: string | URL | Request, _init?: RequestInit) =>
+      new Response(JSON.stringify(head))
+  )
   const c = await client('personal', fetch as typeof globalThis.fetch)
   expect(await c.head('file')).toEqual(head)
-  expect(fetch.mock.calls[0]).toBeDefined()
+  expect(fetch.mock.calls[0]![0]).toBe(
+    'https://issuer.example.test/v1/vaults/vault/files/file/head'
+  )
+  expect(fetch.mock.calls[0]![1]!.headers).toMatchObject({ 'x-abele-external-files-version': '1' })
 })

@@ -5,6 +5,7 @@ import { api } from '../helpers/client.js'
 import { commit, create, putBlob, shaOf } from '../helpers/ops.js'
 import { scopedFixture } from '../helpers/scopedFixture.js'
 import { hasPgTestDb } from '../helpers/tempDb.js'
+import { buildTestApp } from '../helpers/testApp.js'
 
 const headers = { 'x-abele-external-files-version': '1', 'x-abele-scoped-version': '4' }
 for (const dialect of ['sqlite', 'pg'] as const) {
@@ -83,6 +84,48 @@ for (const dialect of ['sqlite', 'pg'] as const) {
           await f.close()
         }
       })
+      it('accepts a personal reader membership, then refuses lost membership without relying on enrollment', async () => {
+        const f = await fixture()
+        try {
+          const member = await f.t.account()
+          await f.t.db
+            .insertInto('vault_members')
+            .values({ vault_id: f.vault, account_id: member.accountId, role: 'reader' })
+            .execute()
+          const device = await f.t.device(member.accountToken, f.vault)
+          expect(
+            (await api(f.t.app, device.deviceToken).post(url(f, 'personal'), f.expected, headers))
+              .status
+          ).toBe(200)
+          await f.t.db
+            .deleteFrom('vault_members')
+            .where('vault_id', '=', f.vault)
+            .where('account_id', '=', member.accountId)
+            .execute()
+          expect(
+            (await api(f.t.app, device.deviceToken).post(url(f, 'personal'), f.expected, headers))
+              .status
+          ).toBe(403)
+        } finally {
+          await f.close()
+        }
+      })
+      it('advertises disabled scoped support and the configured size ceiling without opening scoped routes', async () => {
+        const t = await buildTestApp({ dialect, maxFileBytes: 1024 })
+        try {
+          const res = await api(t.app).get('/v1/external-files/capabilities')
+          expect(res.body).toMatchObject({ personal: true, scoped: false, max_file_size: 1024 })
+          const denied = await api(t.app).post(
+            '/v1/scoped/vaults/v/grants/g/files/f/external/verify',
+            {},
+            headers
+          )
+          expect(denied.status).toBe(503)
+          expect(denied.body.error.code).toBe('scoped_unavailable')
+        } finally {
+          await t.close()
+        }
+      })
       for (const mode of ['personal', 'scoped'] as const) {
         it(`BUG: valid ${mode} reader verification passes and requires exact version headers`, async () => {
           const f = await fixture()
@@ -105,6 +148,32 @@ for (const dialect of ['sqlite', 'pg'] as const) {
                 (await client.post(path, f.expected, { 'x-abele-external-files-version': '1' }))
                   .status
               ).toBe(400)
+          } finally {
+            await f.close()
+          }
+        })
+        it(`${mode} rejects malformed, oversized and noncanonical expectations`, async () => {
+          const f = await fixture()
+          try {
+            for (const patch of [
+              { size: -1 },
+              { size: 0.5 },
+              { size: 200 * 1024 * 1024 + 1 },
+              { version_id: '' },
+              { sha: 'INVALID' },
+              { unexpected: true },
+              { path: '../a.bin' },
+            ]) {
+              expect(
+                (
+                  await api(f.t.app, token(f, mode)).post(
+                    url(f, mode),
+                    { ...f.expected, ...patch },
+                    headers
+                  )
+                ).status
+              ).toBe(400)
+            }
           } finally {
             await f.close()
           }
