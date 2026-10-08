@@ -123,24 +123,33 @@ export class BlobStore {
    * not answer is not the same thing, and throws.
    */
   async intact(sha: string): Promise<boolean> {
+    return (await this.verify(sha)) !== null
+  }
+
+  /** Authenticated SHA and actual decrypted length in one bounded-memory read.
+   * Null means absent/corrupt; I/O failures still throw. Never trusts SQL or envelope length
+   * as the plaintext count. The open descriptor binds header, body and tag to one file.
+   */
+  async verify(sha: string): Promise<{ sha: string; size: number } | null> {
     let handle: FileHandle
     try {
       handle = await open(this.pathFor(sha), 'r')
     } catch (error) {
-      if (codeOf(error) === 'ENOENT') return false
+      if (codeOf(error) === 'ENOENT') return null
       throw error
     }
     try {
       const { size } = await handle.stat()
-      if (size < HEADER_BYTES + TAG_BYTES) return false
+      if (size < HEADER_BYTES + TAG_BYTES) return null
       const header = Buffer.alloc(HEADER_BYTES)
       const tag = Buffer.alloc(TAG_BYTES)
       await handle.read(header, 0, HEADER_BYTES, 0)
       await handle.read(tag, 0, TAG_BYTES, size - TAG_BYTES)
-      if (!header.subarray(0, MAGIC.length).equals(MAGIC)) return false
+      if (!header.subarray(0, MAGIC.length).equals(MAGIC)) return null
       const decipher = createDecipheriv(ALGORITHM, this.keyFor(sha), header.subarray(MAGIC.length))
       decipher.setAuthTag(tag)
       const hash = createHash('sha256')
+      let actualSize = 0
       // Do not create a stream for an empty ciphertext: a reversed range can close the
       // FileHandle under us even with autoClose false, before the tag is checked.
       if (size > HEADER_BYTES + TAG_BYTES) {
@@ -149,14 +158,20 @@ export class BlobStore {
           end: size - TAG_BYTES - 1,
           autoClose: false,
         })
-        for await (const chunk of body) hash.update(decipher.update(chunk as Buffer))
+        for await (const chunk of body) {
+          const bytes = decipher.update(chunk as Buffer)
+          hash.update(bytes)
+          actualSize += bytes.length
+        }
       }
       try {
-        hash.update(decipher.final())
+        const tail = decipher.final()
+        hash.update(tail)
+        actualSize += tail.length
       } catch {
-        return false
+        return null
       }
-      return hash.digest('hex') === sha
+      return hash.digest('hex') === sha ? { sha, size: actualSize } : null
     } finally {
       await handle.close()
     }

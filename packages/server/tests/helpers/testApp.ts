@@ -23,6 +23,7 @@ export interface TestAppOptions {
   wsHelloTimeoutMs?: number
   trustProxy?: boolean | string[]
   configurationDirectories?: readonly string[]
+  scopedSharing?: boolean
   /** `pg` runs the server on `ABELE_TEST_PG_URL`, in a schema of its own; SQLite by default. */
   dialect?: Dialect
 }
@@ -68,6 +69,7 @@ export async function buildTestApp(opts: TestAppOptions = {}): Promise<TestApp> 
   })
   const config: Config = {
     ...base,
+    ...(opts.scopedSharing === undefined ? {} : { scopedSharing: opts.scopedSharing }),
     ...(opts.partBytes === undefined ? {} : { partBytes: opts.partBytes }),
     ...(opts.simpleUploadBytes === undefined ? {} : { simpleUploadBytes: opts.simpleUploadBytes }),
     ...(opts.maxFileBytes === undefined ? {} : { maxFileBytes: opts.maxFileBytes }),

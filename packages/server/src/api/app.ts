@@ -13,6 +13,7 @@ import { recordIdempotent } from './idempotency.js'
 import { registerAuthRoutes } from './routes/auth.js'
 import { registerBlobRoutes } from './routes/blobs.js'
 import { registerCapabilityRoutes } from './routes/capabilities.js'
+import { registerExternalFilesRoutes } from './routes/externalFiles.js'
 import { registerFolderGrantRoutes } from './routes/folderGrants.js'
 import { registerScopedContentRoutes } from './routes/scopedContent.js'
 import { registerScopedUploadRoutes } from './routes/scopedUploads.js'
@@ -103,6 +104,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
 
   registerScopedFence(app, deps.config.scopedSharing)
   registerCapabilityRoutes(app, deps.config.scopedSharing)
+  registerExternalFilesRoutes(app, deps)
   registerAuthRoutes(app, deps)
   registerVaultRoutes(app, deps)
   registerFolderGrantRoutes(app, deps)

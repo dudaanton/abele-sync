@@ -6,9 +6,9 @@ import {
 import { TEST_TOKEN_PEPPER, buildTestApp } from './testApp.js'
 import type { Dialect } from '../../src/db/connect.js'
 
-export async function scopedFixture(dialect: Dialect) {
+export async function scopedFixture(dialect: Dialect, scopedSharing = false) {
   let clock = new Date('2030-01-01T00:00:00.000Z')
-  const t = await buildTestApp({ dialect, now: () => clock })
+  const t = await buildTestApp({ dialect, scopedSharing, now: () => clock })
   try {
     const owner = await t.account(),
       vault = (await t.vault(owner.accountToken)).vaultId
