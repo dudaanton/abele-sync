@@ -321,14 +321,19 @@ describe('decide', () => {
       head({ baseIsKnown: 'unknown', baseSha: null, basePath: null, ...o })
     const modify = { op: 'modify' as const, file_id: 'f', base_version_id: 'zz', sha: S1, size: 1 }
 
-    it('modify of a note merges from an empty base, or copies aside in conflict-file mode', () => {
-      expect(decide({ ...modify, mtime: 9 }, gone(), settings('merge'), false)).toMatchObject({
-        kind: 'merge',
-        path: 'a.md',
-      })
+    it('modify of a note copies aside in either conflict mode, even after an old no-base merge', () => {
+      for (const mode of ['merge', 'conflict-file'] as const) {
+        for (const incoming of [null, 'version', 'merged'] as const) {
+          expect(
+            decide({ ...modify, mtime: 9 }, gone({ incoming }), settings(mode), false)
+          ).toEqual({ kind: 'conflict-file', status: 'conflict' })
+        }
+      }
+    })
+    it('a known base with no content cannot support a note merge either', () => {
       expect(
-        decide({ ...modify, mtime: 9 }, gone(), settings('conflict-file'), false)
-      ).toMatchObject({ kind: 'conflict-file' })
+        decide({ ...modify, mtime: 9 }, gone({ baseIsKnown: 'yes' }), settings('merge'), false)
+      ).toEqual({ kind: 'conflict-file', status: 'conflict' })
     })
     it('modify of an attachment goes to the newer mtime', () => {
       const image = gone({ kind: 'attachment', path: 'a.png' })

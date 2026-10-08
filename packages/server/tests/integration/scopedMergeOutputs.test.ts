@@ -102,6 +102,51 @@ for (const dialect of ['sqlite', 'pg'] as const)
         await f.close()
       }
     })
+    it('keeps the head and publishes exact incoming bytes as an authorized conflict copy after base pruning', async () => {
+      const current = 'current note\n',
+        incoming = 'removed text\nstale note\n'
+      const f = await setup('removed text\nbase note\n', current, incoming)
+      try {
+        await f.t.db.deleteFrom('versions').where('id', '=', f.head.version_id).execute()
+        const result = await commitScopedModify(f.deps, f.a.key_token, f.vault, f.grant.id, f.input)
+        expect(result).toMatchObject({
+          status: 'conflict',
+          version_id: f.latest.version_id,
+          sha: shaOf(current),
+        })
+        if (result.status !== 'conflict') throw new Error('expected unknown-base conflict copy')
+        expect(result).not.toHaveProperty('seq')
+        expect(result.conflict_path.startsWith('Agents/')).toBe(true)
+        await requireFolderVersion(
+          f.deps,
+          f.a.key_token,
+          f.vault,
+          f.grant.id,
+          result.conflict_file_id,
+          result.conflict_version_id
+        )
+        const copy = await f.t.db
+          .selectFrom('versions')
+          .select('blob_sha')
+          .where('id', '=', result.conflict_version_id)
+          .executeTakeFirstOrThrow()
+        expect(copy.blob_sha).toBe(shaOf(incoming))
+        expect((await f.deps.store.get(copy.blob_sha!)).toString()).toBe(incoming)
+        expect(
+          await f.t.db
+            .selectFrom('files')
+            .select('head_version_id')
+            .where('id', '=', f.head.file_id)
+            .executeTakeFirstOrThrow()
+        ).toEqual({ head_version_id: f.latest.version_id })
+        const versions = await f.t.db.selectFrom('versions').select(['op', 'blob_sha']).execute()
+        expect(versions).toHaveLength(2)
+        expect(versions).toContainEqual({ op: 'conflict', blob_sha: shaOf(incoming) })
+        expect(versions.some((v) => v.op === 'merge')).toBe(false)
+      } finally {
+        await f.close()
+      }
+    })
     it('uses the personal invalid-YAML conflict fallback and attributes the new copy only to its originating grant', async () => {
       const titled = (title: string) => `---\ntitle: ${title}\n---\nbody\n`
       const f = await setup(titled('a'), titled('b'), titled('c'))

@@ -94,7 +94,7 @@ for (const dialect of ['sqlite', 'pg'] as const) {
           await f.close()
         }
       })
-      it('uses empty-base personal fallback only for a proven admitted base whose payload was pruned', async () => {
+      it('prepares a conflict copy for a proven admitted base whose payload was pruned', async () => {
         const f = await scopedFixture(dialect)
         try {
           const base = 'a\nb\nc\n',
@@ -132,8 +132,8 @@ for (const dialect of ['sqlite', 'pg'] as const) {
             size: incoming.length,
             mtime: 3,
           })
-          expect(result.decision).toBe('merge')
-          expect(result.text).toBe(mergeText('', current, incoming).text)
+          expect(result.decision).toBe('conflict-file')
+          expect(result).not.toHaveProperty('text')
         } finally {
           await f.close()
         }
