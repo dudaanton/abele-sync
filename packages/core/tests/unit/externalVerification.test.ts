@@ -111,6 +111,21 @@ for (const mode of ['personal', 'scoped'] as const)
       })
       expect(fetch).toHaveBeenCalledTimes(1)
     })
+    for (const status of [401, 403])
+      for (const body of ['<html>Access denied by proxy</html>', '{"message":"Access denied"}'])
+        it(`BUG: preserves non-envelope HTTP ${status} access refusal (${body})`, async () => {
+          const fetch = vi.fn(async () => new Response(body, { status }))
+          const c = await client(mode, fetch as typeof globalThis.fetch)
+          const removeOriginal = vi.fn()
+          await expect(
+            c.verifyExternalFile('file', expected).then(removeOriginal)
+          ).rejects.toMatchObject({
+            code: status === 401 ? 'unauthorized' : 'forbidden',
+            status,
+          })
+          expect(removeOriginal).not.toHaveBeenCalled()
+          expect(fetch).toHaveBeenCalledTimes(1)
+        })
     it('BUG: preserves offline and access failures rather than falling back to personal verification', async () => {
       const fetch = vi.fn(async () => {
         throw new Error('network down')

@@ -18,3 +18,18 @@ export class EngineError extends Error {
     this.name = 'EngineError'
   }
 }
+
+/** A non-envelope HTTP refusal keeps its transport status. It is still an
+ * EngineError for existing callers, but negotiation must not infer unsupported
+ * features merely from its generic protocol code (for example a proxy's 403).
+ */
+export class HttpError extends EngineError {
+  constructor(
+    readonly status: number,
+    code: EngineErrorCode,
+    message: string
+  ) {
+    super(code, message)
+    this.name = 'HttpError'
+  }
+}

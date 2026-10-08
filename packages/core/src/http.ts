@@ -1,6 +1,6 @@
 import { AbeleError, ERROR_STATUS, ErrorCodeSchema, type ErrorCode } from '@abele/sync-protocol'
 import { z } from 'zod'
-import { EngineError } from './errors.js'
+import { EngineError, HttpError } from './errors.js'
 
 /**
  * The transport under the client (see `client.ts`): one request made, its token and its query
@@ -218,9 +218,14 @@ async function failure(response: Response, method: string, path: string): Promis
     }
   }
   if (response.status === 401) {
-    return new EngineError('unauthorized', `${method} ${path} was refused: the token is no good`)
+    return new HttpError(
+      response.status,
+      'unauthorized',
+      `${method} ${path} was refused: the token is no good`
+    )
   }
-  return new EngineError(
+  return new HttpError(
+    response.status,
     'protocol',
     `${method} ${path} answered ${response.status} without an error envelope`
   )
