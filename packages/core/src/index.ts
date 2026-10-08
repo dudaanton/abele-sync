@@ -15,6 +15,9 @@ export * from './scanner.js'
 export * from './selective.js'
 export * from './staging.js'
 export * from './state.js'
+export * from './external/records.js'
+export * from './external/state.js'
+export * from './external/sqliteState.js'
 export * from './ownerHooks.js'
 export {
   PersonalNoteEvents,
