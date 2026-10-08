@@ -1,4 +1,8 @@
 import {
+  EXTERNAL_FILES_VERSION_HEADER,
+  ExternalVerifyRequestSchema,
+  ExternalVerifyResponseSchema,
+  type ExternalVerifyRequest,
   CapabilitiesResponseSchema,
   AbeleError,
   ScopedHistoryPageSchema,
@@ -18,6 +22,7 @@ import {
 import { Http, type SendInit, type WireSchema } from './http.js'
 import { z } from 'zod'
 import { EngineError } from './errors.js'
+import { checkedExternalVerification, negotiateExternalFiles } from './externalVerification.js'
 import {
   scopedIdentity,
   type ScopedClientOptions,
@@ -72,6 +77,28 @@ export class ScopedClient {
   }
   private async json<T>(schema: WireSchema<T>, method: string, path: string, init: SendInit = {}) {
     return this.http.decode(schema, await this.send(method, path, init), method, path)
+  }
+  async externalFilesCapabilities() {
+    return negotiateExternalFiles(
+      () => this.json(z.unknown(), 'GET', '/v1/external-files/capabilities'),
+      'scoped'
+    )
+  }
+  async verifyExternalFile(fileId: string, input: ExternalVerifyRequest) {
+    const expected = ExternalVerifyRequestSchema.parse(input)
+    const support = await this.externalFilesCapabilities()
+    if (expected.size > support.max_file_size)
+      throw new AbeleError('too_large', 'external verification size bound reached')
+    const response = await this.json(
+      ExternalVerifyResponseSchema,
+      'POST',
+      `${this.root}/files/${segment(fileId)}/external/verify`,
+      {
+        json: expected,
+        headers: { [EXTERNAL_FILES_VERSION_HEADER]: '1' },
+      }
+    )
+    return checkedExternalVerification(fileId, expected, response)
   }
   async negotiate() {
     const capabilities = requireScopedCapabilities(

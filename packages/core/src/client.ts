@@ -1,5 +1,10 @@
 import {
   AbeleError,
+  EXTERNAL_FILES_VERSION_HEADER,
+  ExternalVerifyRequestSchema,
+  ExternalVerifyResponseSchema,
+  ManifestItemSchema,
+  type ExternalVerifyRequest,
   credentialFacet,
   ChangeItemSchema,
   ChangesResponseSchema,
@@ -40,6 +45,7 @@ import {
 } from '@abele/sync-protocol'
 import { z } from 'zod'
 import { EngineError } from './errors.js'
+import { checkedExternalVerification, negotiateExternalFiles } from './externalVerification.js'
 import { sha256, encodeText } from './hash.js'
 import { envelopeOf, Http, idempotency, textOf, type ClientOptions } from './http.js'
 
@@ -204,6 +210,40 @@ export class VaultClient {
     readonly vaultId: string
   ) {
     this.base = `/v1/vaults/${segment(vaultId)}`
+  }
+
+  async externalFilesCapabilities() {
+    return negotiateExternalFiles(
+      () => this.http.json(z.unknown(), 'GET', '/v1/external-files/capabilities'),
+      'personal'
+    )
+  }
+
+  /** A point-in-time proof only, never permission to delete later without local rechecks. */
+  async verifyExternalFile(fileId: string, input: ExternalVerifyRequest) {
+    const expected = ExternalVerifyRequestSchema.parse(input)
+    const support = await this.externalFilesCapabilities()
+    if (expected.size > support.max_file_size)
+      throw new AbeleError('too_large', 'external verification size bound reached')
+    const response = await this.http.json(
+      ExternalVerifyResponseSchema,
+      'POST',
+      `${this.file(fileId)}/external/verify`,
+      {
+        json: expected,
+        headers: { [EXTERNAL_FILES_VERSION_HEADER]: '1', 'cache-control': 'no-store' },
+      }
+    )
+    return checkedExternalVerification(fileId, expected, response)
+  }
+
+  async head(fileId: string) {
+    const head = await this.http.json(ManifestItemSchema, 'GET', `${this.file(fileId)}/head`, {
+      headers: { [EXTERNAL_FILES_VERSION_HEADER]: '1', 'cache-control': 'no-store' },
+    })
+    if (head.file_id !== fileId)
+      throw new EngineError('protocol', 'personal head identity mismatch')
+    return head
   }
 
   async state(): Promise<VaultState> {
