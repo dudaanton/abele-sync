@@ -87,6 +87,45 @@ revisions and finite expiry. Runtime authorization, aggregate budgets, role and
 sponsor liveness, fresh-password checks and safe projection remain necessary.
 Installing the tables does not enable scoped sharing.
 
+## CLI external-file state
+
+The CLI's normal `SqliteStateStore` implements core's `ExternalStatePort` on its
+**own existing SQLite connection**. Its private connection remains private; no
+second production connection, external head table or separate recovery database
+is opened. Core exports the shared `ExternalState` facade, record schemas,
+phase validation and `SqliteExternalStateStore` adapter from `external/`. Hosts
+should consume these exports together rather than mix a prototype facade/error
+class with the shared adapter.
+
+Opening `ExternalState` on a legacy ledger lazily initializes a schema-1 document
+at `meta['daemon:external-files']`, using an expected-absent revision check.
+Existing entries, cursor, publication journal and daemon/scoped metadata are
+preserved. This is a versioned document migration within the existing metadata
+schema, not a server SQL migration or a CLI downgrade fence. Missing state must
+still be handled by the activation/recovery barrier before production eviction.
+Malformed or unsupported persisted documents are held for recovery, not replaced.
+
+Each phase commits the document, relevant entry puts/deletes, personal cursor
+and scoped metadata changes in one `BEGIN IMMEDIATE` transaction. Revision and
+connection-binding checks run against the committed document read **inside**
+that transaction. File and operation revisions, immutable operation parameters,
+artifact ownership and pending dependencies' earlier proven local base are
+validated by the shared facade. The existing scoped ledger remains the only
+server-head/checkpoint authority.
+
+Only a confirmed SQL `COMMIT` yields `{ status: 'committed', revision }`. There
+are no filesystem/network callbacks inside a phase transaction. External calls
+reject an active outer transaction instead of inheriting the ordinary ledger's
+legacy nesting behavior. A statement abort rolls back the document and ledger
+changes together. An uncertain COMMIT yields `commit-unknown` and blocks further
+phase writes on both the facade and that connection's adapter, even through a
+new facade. Close/reopen the ledger and inspect its durable phase before recovery;
+never turn uncertainty into a destructive retry. Memory stores, including a real
+SQLite `:memory:` ledger, cannot serve as production external persistence.
+
+This persistence port does not itself enable eviction, implement projection
+filesystem effects or provide the startup/lifecycle/downgrade gates.
+
 ## Upgrade procedure
 
 Stop all old server, collector and admin writers before an upgrade; also stop

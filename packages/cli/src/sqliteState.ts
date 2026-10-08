@@ -1,7 +1,15 @@
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import SqliteDatabase, { type Database, type Statement } from 'better-sqlite3'
-import { EngineError, type Journal, type StateEntry, type StateStore } from '@abele/sync-core'
+import {
+  EngineError,
+  SqliteExternalStateStore,
+  type ExternalPhaseBatch,
+  type ExternalStatePort,
+  type Journal,
+  type StateEntry,
+  type StateStore,
+} from '@abele/sync-core'
 
 const SCHEMA = `
 create table if not exists entries (
@@ -49,11 +57,17 @@ interface Row {
  * crash between the put and the delete cannot leave two rows claiming one file.
  *
  * better-sqlite3 is synchronous, so every method resolves without ever yielding the loop; the
- * `async` signatures are the `StateStore` contract, not a promise of concurrency. Every call into
- * the driver is wrapped, so the engine sees `EngineError` and nothing else: a locked database is
- * `'conflict'` (retry later), and anything else — a closed connection, a corrupt file — is `'io'`.
+ * `async` signatures are the `StateStore` contract, not a promise of concurrency. Ordinary ledger
+ * calls wrap driver errors as `EngineError`: a locked database is `'conflict'` (retry later), and
+ * anything else — a closed connection, a corrupt file — is `'io'`. External phase calls use the
+ * shared port's `ExternalStateError` semantics, including aborted and unknown commit outcomes.
  */
-export class SqliteStateStore implements StateStore {
+export class SqliteStateStore implements StateStore, ExternalStatePort {
+  readonly externalDurability = 'durable' as const
+  /** One shared adapter over this exact connection, retaining unknown-outcome holds.
+   * Lazy creation leaves ordinary memory stores and read-only snapshots unchanged.
+   */
+  private external: SqliteExternalStateStore | undefined
   private readonly selectByPath: Statement
   private readonly selectByFileId: Statement
   private readonly selectAll: Statement
@@ -126,6 +140,28 @@ export class SqliteStateStore implements StateStore {
 
   close(): void {
     guard('cannot close the state database', () => this.db.close())
+  }
+
+  private externalPort(): SqliteExternalStateStore {
+    const db = this.db
+    return (this.external ??= new SqliteExternalStateStore({
+      get inTransaction() {
+        return db.inTransaction
+      },
+      exec: (sql) => db.exec(sql),
+      // Select the positional-binding overload of better-sqlite3's generic API.
+      prepare: (sql) => db.prepare<(string | number | null)[]>(sql),
+    }))
+  }
+
+  async getExternalState(): Promise<string | null> {
+    return this.externalPort().getExternalState()
+  }
+
+  async commitExternalPhase(batch: ExternalPhaseBatch): Promise<void> {
+    // Never use transaction(): its supported legacy nesting could return an
+    // external effect receipt before the outer ledger transaction commits.
+    return this.externalPort().commitExternalPhase(batch)
   }
 
   async get(path: string): Promise<StateEntry | null> {
