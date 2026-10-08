@@ -152,6 +152,7 @@ for (const dialect of ['sqlite', 'pg'] as const)
                     })[key] ?? 'missing'
                 )
                 const headers: Record<string, string> = {
+                  'x-abele-external-files-version': '1',
                   'x-abele-scoped-version': '4',
                   'content-type': 'application/json',
                 }
@@ -206,6 +207,7 @@ for (const dialect of ['sqlite', 'pg'] as const)
                 url,
                 headers: {
                   authorization: `Bearer ${f.device.deviceToken}`,
+                  'x-abele-external-files-version': '1',
                   'content-type': 'application/json',
                 },
                 ...(['POST', 'PATCH', 'PUT', 'DELETE'].includes(method) ? { payload: '{}' } : {}),
