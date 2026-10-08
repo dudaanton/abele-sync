@@ -2,16 +2,26 @@ import { describe, expect, it } from 'vitest'
 import { buildTestApp } from '../helpers/testApp.js'
 import { commit, create, putBlob, shaOf } from '../helpers/ops.js'
 import { hasPgTestDb } from '../helpers/tempDb.js'
+import { mergeOp } from '../../src/oplog/commitWrite.js'
+import { loadHead } from '../../src/oplog/commitHead.js'
+import { getVaultSettings } from '../../src/vault/vaults.js'
+import type { Ctx } from '../../src/oplog/commitCtx.js'
 
 for (const dialect of ['sqlite', 'pg'] as const) {
   describe.skipIf(dialect === 'pg' && !hasPgTestDb)(`missing modify base (${dialect})`, () => {
-    for (const missing of ['pruned', 'unknown', 'contentless'] as const) {
-      it(`keeps the live note and copies incoming bytes when the base is ${missing}`, async () => {
+    for (const [missing, direct] of [
+      ['pruned', false],
+      ['unknown', false],
+      ['contentless', false],
+      ['pruned', true],
+      ['contentless', true],
+    ] as const) {
+      it(`keeps the live note and copies incoming bytes when the base is ${missing}${direct ? ' via mergeOp directly' : ''}`, async () => {
         const t = await buildTestApp({ dialect })
         try {
           const { accountToken } = await t.account()
           const { vaultId } = await t.vault(accountToken)
-          const { deviceToken } = await t.device(accountToken, vaultId)
+          const { deviceToken, deviceId } = await t.device(accountToken, vaultId)
           const send = async (ops: unknown[]) =>
             (await commit(t.app, deviceToken, vaultId, ops)).results[0]
           const base = 'removed text\nbase note\n',
@@ -42,16 +52,29 @@ for (const dialect of ['sqlite', 'pg'] as const) {
           if (missing === 'unknown') baseId = 'never-in-this-vault'
           const before = await t.db.selectFrom('versions').select('id').execute()
           await putBlob(t.app, deviceToken, incoming)
-          const result = await send([
-            {
-              op: 'modify',
-              file_id: first.file_id,
-              base_version_id: baseId,
-              sha: shaOf(incoming),
-              size: Buffer.byteLength(incoming),
-              mtime: 3,
-            },
-          ])
+          const op = {
+            op: 'modify' as const,
+            file_id: first.file_id,
+            base_version_id: baseId,
+            sha: shaOf(incoming),
+            size: Buffer.byteLength(incoming),
+            mtime: 3,
+          }
+          const result = direct
+            ? await t.db.transaction().execute(async (trx) => {
+                const ctx: Ctx = {
+                  trx,
+                  store: t.store,
+                  vaultId,
+                  actor: { kind: 'device', id: deviceId, name: 'offline' },
+                  settings: await getVaultSettings({ db: trx }, vaultId),
+                  at: new Date(),
+                }
+                const head = await loadHead(ctx, op)
+                if (!head) throw new Error('expected live head')
+                return mergeOp(ctx, op, head)
+              })
+            : await send([op])
           expect(result).toMatchObject({
             status: 'conflict',
             version_id: latest.version_id,

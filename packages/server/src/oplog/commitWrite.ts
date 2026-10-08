@@ -72,10 +72,10 @@ export async function applyOp(
 }
 
 /**
- * Three-way merge of a note: the base the device edited from (nothing, for a
- * create, or for a base the vault no longer has), the head it did not see, and
- * what it sent. A merge that breaks the frontmatter is not written; the bytes go
- * to a conflict copy instead.
+ * Three-way merge of a note: the base the device edited from (nothing only for a
+ * create), the head it did not see, and what it sent. A modify without known base
+ * content cannot be merged, even if a caller bypassed the decision table. Its bytes,
+ * like a merge that breaks the frontmatter, go to a conflict copy instead.
  *
  * When the merge is not exactly what was sent, the sent text is first written as
  * a version of its own, as a losing binary is (`keepLoser`), and the merge after
@@ -86,6 +86,8 @@ export async function applyOp(
  * version holds and the copy does not.
  */
 export async function mergeOp(ctx: Ctx, op: ContentOp, head: LoadedHead): Promise<CommitOpResult> {
+  if (op.op === 'modify' && (head.baseIsKnown !== 'yes' || head.baseSha === null))
+    return keepBothSides(ctx, op, head)
   const baseSha = op.op === 'modify' ? head.baseSha : null
   const base = baseSha === null ? '' : (await storedBlob(ctx, baseSha, 'base')).toString('utf8')
   const current = (await storedBlob(ctx, requireSha(head), 'head')).toString('utf8')
@@ -110,7 +112,7 @@ export async function mergeOp(ctx: Ctx, op: ContentOp, head: LoadedHead): Promis
     no: before.no + 1,
     prevVersionId: before.versionId,
     merge: {
-      // The base the merge really ran from: none, when the vault no longer had it.
+      // A text merge has no base version only for a create, never for a stale modify.
       base_version_id: mergeBase(op, head.baseIsKnown),
       head_version_id: head.versionId,
       incoming_sha: op.sha,
@@ -140,9 +142,10 @@ async function overLimits(ctx: Ctx, head: LoadedHead, size: number): Promise<boo
 }
 
 /**
- * Both sides kept, where a merge is too large to write, breaks the frontmatter, or the vault
- * copies conflicts aside: neither side is lost and nothing over a limit is written. The
- * head stays where it is, and the incoming text goes into a conflict copy beside it — a file
+ * Both sides kept, where a modify has no base content, a merge is too large to write,
+ * breaks the frontmatter, or the vault copies conflicts aside: neither side is lost and
+ * nothing over a limit is written. The head stays where it is, and the incoming text
+ * goes into a conflict copy beside it — a file
  * the user sees — provided the copy fits the quota: it is within the file limit, since the
  * incoming bytes passed it. When it does not fit (and a merge over the quota usually means a
  * copy is over it too, a copy being all of the incoming text beside all of the head), the

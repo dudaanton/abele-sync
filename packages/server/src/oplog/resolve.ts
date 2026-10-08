@@ -168,7 +168,12 @@ function decideModify(
   if (head.versionId === op.base_version_id) return apply('modify', head.path, op)
   // Row 7: modification wins over deletion; the file comes back with the new content.
   if (head.deleted) return apply('modify', head.path, op)
-  // Row 23: a base the vault no longer has is a head that changed, from an empty base.
+  // Row 23: without the actual base content, a note cannot be safely merged. Keep the
+  // head and copy the incoming bytes aside, regardless of conflict mode or old merge metadata.
+  // A known delete version has no content either; only creates have a genuine empty base.
+  if (head.kind === 'note' && (head.baseIsKnown === 'unknown' || head.baseSha === null))
+    return { kind: 'conflict-file', status: 'conflict' }
+  // Non-notes still resolve an unknown base by the newer-mtime rule.
   if (head.baseIsKnown === 'unknown') return contentRace(op, head, settings)
   // Row 8: the head only moved since the base; the edit lands at the new path.
   if (head.sha === head.baseSha) return apply('modify', head.path, op)

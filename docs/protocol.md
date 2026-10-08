@@ -47,6 +47,18 @@ ordering rather than text merge. Quota and file-size bounds apply to results too
 retaining an original in history does not guarantee that an oversized merged
 result becomes the current head.
 
+Resolution-table row 23: if a live note's modify base is unknown (for example,
+pruned by retention), keep the current head and put the incoming bytes in a
+conflict copy, even with `conflict: "merge"`. A known version without content
+also cannot be used as a text-merge base. Personal and authorized scoped edits
+follow the same rule; scoped edits still require retained admission and security
+proof for a pruned base. If quota or scoped destination rules prevent a copy,
+keep the incoming original in history under the unchanged head content instead.
+Non-note kinds retain their newer-mtime rule, and modification of a deleted file
+still restores it. Only concurrent creates may use an implicit empty merge base;
+null `merge.base_version_id` on a head-preserving history pick does not mean a
+text merge ran from an empty base.
+
 A client journals an in-flight commit before sending it and replays the same
 operation identity after an uncertain response. Routes accepting an
 `Idempotency-Key` bind that key to the actual request body; reusing it with a

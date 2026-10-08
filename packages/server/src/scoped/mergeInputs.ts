@@ -40,8 +40,9 @@ export async function prepareScopedModify(
       (baseVersion?.size ?? 0) > MAX_NOTE_BYTES
     )
       throw new AbeleError('too_large', 'scoped note preparation bound reached')
-    const read = async (sha: string | null, size: number) => {
-      if (!sha) return ''
+    // A modify merge must have actual base content, never an invented empty base.
+    if (head.baseIsKnown !== 'yes' || head.baseSha === null || current.sha === null) throw missing()
+    const read = async (sha: string, size: number) => {
       try {
         const bytes = await deps.store.get(sha)
         if (bytes.length !== size) throw missing()
@@ -133,7 +134,7 @@ export async function loadScopedModify(
       throw missing()
     }
   } else {
-    // Pruned payload is the personal empty-base fallback only with retained
+    // A pruned payload can use the personal conflict-copy fallback only with retained
     // current-interval admission AND complete file-local negative security facts.
     const facts = await tx
       .selectFrom('version_security_sources')

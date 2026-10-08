@@ -239,17 +239,25 @@ describe('retention', () => {
     expect(await versionIds(note.fileId)).toEqual([note.versions[2]])
     expect(await versionIds(image.fileId)).toEqual([image.versions[2]])
 
-    // A device that last synced at v1 edits from it: both texts survive, the merge ran from nothing.
+    // A device that last synced at v1 edits from it: keep the head and copy the offline edit.
     await putBlob('v1, edited offline\n')
-    const merged = await commit([modify(note.fileId, note.versions[0]!, 'v1, edited offline\n', 9)])
-    expect(merged.results[0]).toMatchObject({ status: 'merged', path: 'n.md' })
-    expect((await t.store.get(merged.results[0].sha)).toString()).toBe('v3\nv1, edited offline\n')
-    const provenance = await t.db
+    const conflict = await commit([
+      modify(note.fileId, note.versions[0]!, 'v1, edited offline\n', 9),
+    ])
+    expect(conflict.results[0]).toMatchObject({
+      status: 'conflict',
+      path: 'n.md',
+      version_id: note.versions[2],
+    })
+    expect((await t.store.get(conflict.results[0].sha)).toString()).toBe('v3\n')
+    const copy = await t.db
       .selectFrom('versions')
-      .select('merge')
-      .where('id', '=', merged.results[0].version_id)
+      .select(['merge', 'op', 'blob_sha'])
+      .where('id', '=', conflict.results[0].conflict_version_id)
       .executeTakeFirstOrThrow()
-    expect(JSON.parse(provenance.merge ?? 'null')).toMatchObject({ base_version_id: null })
+    expect(copy).toEqual({ merge: null, op: 'conflict', blob_sha: shaOf('v1, edited offline\n') })
+    expect((await t.store.get(copy.blob_sha!)).toString()).toBe('v1, edited offline\n')
+    expect(await versionIds(note.fileId)).toEqual([note.versions[2]])
 
     // An attachment goes to the newer mtime; the head's is 3.
     await putBlob('a1, edited offline')
@@ -263,7 +271,7 @@ describe('retention', () => {
     const gone = await commit([
       { op: 'delete', file_id: note.fileId, base_version_id: note.versions[0] },
     ])
-    expect(gone.results[0]).toMatchObject({ status: 'merged', sha: merged.results[0].sha })
+    expect(gone.results[0]).toMatchObject({ status: 'merged', sha: conflict.results[0].sha })
     const moved = await commit([
       { op: 'move', file_id: note.fileId, base_version_id: note.versions[0], to_path: 'moved.md' },
     ])

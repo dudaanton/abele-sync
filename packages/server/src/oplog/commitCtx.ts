@@ -64,7 +64,11 @@ export interface NewVersion {
   securitySourceVersionIds?: readonly string[]
 }
 
-/** The base a merge of this op records: the op's own, when the vault still has it. */
+/**
+ * The base a merge/pick records: the op's own, when the vault still has it.
+ * Null is metadata, not permission to text-merge a modify from an empty base:
+ * creates and keepLoser's head-preserving picks can record null; mergeOp guards modifies.
+ */
 export const mergeBase = (op: CommitOp, baseIsKnown: BaseKnowledge): string | null =>
   op.op === 'modify' && baseIsKnown === 'yes' ? op.base_version_id : null
 
