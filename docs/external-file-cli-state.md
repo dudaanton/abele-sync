@@ -185,6 +185,12 @@ phases. It retains the physical instance, never bootstraps or adopts unresolved
 records. A foreign endpoint/vault clears ordinary entries and progress instead
 of reusing them; legacy foreign ledgers are retired as before. A persisted
 retirement acknowledgement permits cleanup recovery without a second revoke.
+After that acknowledgement, one SQLite transaction retires the disconnect receipt
+and installation proofs. Activated connections retain their empty, descriptor-bound
+external document; legacy connections retire the empty transitional document so
+its incremented generation cannot conflict with the config's implicit generation 1.
+The switch marker fences this cleanup until it is committed, including recovery
+after a lost COMMIT acknowledgement, before credential/switch files are removed.
 
 Valid staging interrupted before marker creation can reconstruct the marker only
 after checking its recorded old config and physical ledger identity and repeating

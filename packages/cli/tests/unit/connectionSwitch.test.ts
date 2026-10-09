@@ -10,6 +10,9 @@ import { replaceConnection, resumeConnectionSwitch } from '../../src/connectionS
 import { activateExternalFiles, assertLocalSafety } from '../../src/externalSafety.js'
 import { readConfigDescriptor } from '../../src/config.js'
 import { materializeForDisconnect } from '../../src/externalMaterialization.js'
+import { runInit } from '../../src/commands/init.js'
+import { runRun } from '../../src/commands/run.js'
+import { buildTestApp, TEST_PASSWORD } from '@abele/sync-server/tests/helpers/testApp.js'
 
 const roots: string[] = []
 afterEach(() => {
@@ -36,6 +39,51 @@ function fixture() {
   state.close()
   return { dir, old, target, instance }
 }
+it('ordinary run accepts force enrollment from a legacy config with an empty matching external document', async () => {
+  const f = fixture(),
+    t = await buildTestApp()
+  try {
+    const email = 'legacy-switch@test.io',
+      owner = await t.account(email),
+      vault = await t.vault(owner.accountToken),
+      device = await t.device(owner.accountToken, vault.vaultId),
+      serverUrl = await t.app.listen({ host: '127.0.0.1', port: 0 })
+    const old = { ...f.old, serverUrl, vaultId: vault.vaultId, ...device }
+    writeConfig(f.dir, old)
+    const raw = SqliteStateStore.open(join(stateFolder(f.dir), 'state.db'))
+    await ExternalState.open(raw, 'legacy-ledger', personalBinding(old))
+    raw.close()
+    expect(readConfigDescriptor(f.dir)).toBeNull()
+    const ctx = { fetch, env: {}, revokeTimeoutMs: 1000, io: { out: vi.fn(), err: vi.fn() } }
+    expect(
+      await runInit(
+        {
+          dir: f.dir,
+          server: serverUrl,
+          email,
+          password: TEST_PASSWORD,
+          force: true,
+          prefer: 'merge',
+        },
+        ctx
+      )
+    ).toBe(0)
+    expect(await runRun({ dir: f.dir, once: true }, ctx)).toBe(0)
+    const reopened = SqliteStateStore.open(join(stateFolder(f.dir), 'state.db'))
+    try {
+      expect(reopened.readExternalInstanceId()).toBe(f.instance)
+      expect(reopened.getMeta('external-disconnect-ready')).toBeNull()
+      const value = await reopened.getExternalState()
+      if (value !== null)
+        expect(JSON.parse(value).binding).toEqual(personalBinding(readConfig(f.dir)!))
+    } finally {
+      reopened.close()
+    }
+  } finally {
+    await t.close()
+  }
+})
+
 for (const phase of [
   'credentials-written',
   'prepared',
@@ -127,6 +175,80 @@ for (const phase of [
     expect(revoke).toHaveBeenCalledTimes(1)
   })
 }
+for (const activated of [false, true]) {
+  for (const interruption of ['retired', 'inventory-retired', 'cleanup-commit-unknown'] as const) {
+    it(`recovers ${activated ? 'activated' : 'legacy'} inventory cleanup after ${interruption} without another revoke`, async () => {
+      const f = fixture(),
+        revoke = vi.fn(async () => {}),
+        file = join(stateFolder(f.dir), 'state.db'),
+        raw = SqliteStateStore.open(file)
+      if (activated) await activateExternalFiles(f.dir, raw, f.old, () => true)
+      else await ExternalState.open(raw, 'legacy-ledger', personalBinding(f.old))
+      await raw.setCursor(7)
+      raw.close()
+      await materializeForDisconnect(
+        f.dir,
+        'state.db',
+        personalBinding(f.old),
+        {
+          scriptsFolder: 'Scripts',
+          verify: async () => {},
+          download: async () => new Uint8Array(),
+        },
+        () => {}
+      )
+      if (interruption === 'cleanup-commit-unknown') {
+        const exec = SqliteDatabase.prototype.exec
+        vi.spyOn(SqliteDatabase.prototype, 'exec').mockImplementation(function (
+          this: SqliteDatabase.Database,
+          sql
+        ) {
+          const cleanup =
+            sql === 'COMMIT' &&
+            !this.prepare(
+              "SELECT value FROM meta WHERE key = 'daemon:external-disconnect-ready'"
+            ).get()
+          const result = exec.call(this, sql)
+          if (cleanup) throw new Error('lost cleanup acknowledgement')
+          return result
+        })
+      }
+      const pending = replaceConnection(
+        f.dir,
+        f.target,
+        true,
+        () => {},
+        revoke,
+        (phase) => {
+          if (phase === interruption) throw new Error('termination')
+        }
+      )
+      if (interruption === 'cleanup-commit-unknown')
+        await expect(pending).rejects.toMatchObject({ reason: 'commit-unknown' })
+      else await expect(pending).rejects.toThrow('termination')
+      expect(revoke).toHaveBeenCalledTimes(1)
+      expect(() => assertLocalSafety(f.dir)).toThrow()
+      vi.restoreAllMocks()
+      await resumeConnectionSwitch(f.dir, f.target.serverUrl, () => {}, revoke)
+      expect(revoke).toHaveBeenCalledTimes(1)
+      const final = SqliteStateStore.open(file)
+      try {
+        expect(final.readExternalInstanceId()).toBe(f.instance)
+        expect(await final.getCursor()).toBe(7)
+        expect(final.getMeta('external-disconnect-ready')).toBeNull()
+        const value = await final.getExternalState()
+        if (activated) expect(JSON.parse(value!).binding).toEqual(personalBinding(f.target, 2))
+        else {
+          expect(value).toBeNull()
+          expect(() => assertLocalSafety(f.dir)).not.toThrow()
+        }
+      } finally {
+        final.close()
+      }
+    })
+  }
+}
+
 it('a lost activated binding COMMIT acknowledgement stops before config writes or revoke and resolves only after reopen', async () => {
   const f = fixture(),
     revoke = vi.fn(async () => {}),

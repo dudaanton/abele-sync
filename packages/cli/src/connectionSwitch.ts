@@ -79,6 +79,7 @@ type WriteBoundary =
   | 'active-connection-written'
   | 'ledger-bound-written'
   | 'activation-written'
+  | 'inventory-retired'
 const hash = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex')
 function readEvidence(file: string, limit: number): Buffer {
   const stat = lstatSync(file)
@@ -327,12 +328,13 @@ export async function resumeConnectionSwitch(
             : ledgerIdentity(dir) !== null)
         )
           refuse()
-        switchInventory(dir, record.external, true)
+        switchInventory(dir, record.external, true, true)
       }
       checkRetired()
       const target = readConfig(dir)
       if (!target || normalizeServerUrl(target.serverUrl) !== normalizeServerUrl(server)) refuse()
       await inspectProjectionInventory(dir, { guard: checkRetired })
+      retireSwitchInventory(dir, record.external, checkRetired)
       checkRetired()
       rmSync(join(stateFolder(dir), CREDENTIALS), { force: true })
       checkRetired()
@@ -384,7 +386,7 @@ async function finish(
     if (stamp !== record.oldStamp && stamp !== record.targetStamp) refuse()
     const identity = ledgerIdentity(dir)
     if (identity !== record.ledgerIdentity && (record.keepLedger || identity !== null)) refuse()
-    switchInventory(dir, record.external, true)
+    switchInventory(dir, record.external, true, record.phase === 'retired')
   }
   check()
   await inspectProjectionInventory(dir, { guard: check, selective: credentials.old?.selective })
@@ -427,6 +429,8 @@ async function finish(
   check()
   if (credentials.old !== null) await revoke(credentials.old, check)
   phase('retired')
+  retireSwitchInventory(dir, record.external, check)
+  afterWrite('inventory-retired')
   check()
   rmSync(join(stateFolder(dir), CREDENTIALS))
   guard()
@@ -514,19 +518,51 @@ function validateExternalPlan(credentials: Credentials): void {
 function switchInventory(
   dir: string,
   external: ExternalSwitch | null | undefined,
-  recoveringSwitch: boolean
+  recoveringSwitch: boolean,
+  retired = false
 ): void {
   if (!external) {
     assertLocalSafety(dir, true, true, false, false, recoveringSwitch)
     return
   }
   validateExternalSwitch(external)
-  assertPreparedInventory(
-    dir,
-    'state.db',
-    [external.oldBinding, external.targetBinding],
-    recoveringSwitch
-  )
+  const raw = SqliteStateStore.openReadOnlySnapshot(join(stateFolder(dir), 'state.db'))
+  try {
+    if (retired && raw.getMeta(READY_KEY) === null) {
+      // Cleanup was committed after retirement acknowledgement. Never infer this
+      // state before that phase, or accept an old/nonempty inventory without proofs.
+      const value = raw.getMeta('external-files')
+      if (external.targetDescriptor) {
+        const doc = decodeExternalDocument(value ?? '')
+        if (
+          !sameConnection(doc.binding, external.targetBinding) ||
+          doc.ledgerId !== external.targetDescriptor.ledgerId ||
+          doc.files.length ||
+          doc.operations.length
+        )
+          refuse()
+      } else if (value !== null) refuse()
+      assertLocalSafety(
+        dir,
+        true,
+        true,
+        false,
+        false,
+        recoveringSwitch,
+        external.targetDescriptor
+          ? { ledgerFile: 'state.db', binding: external.targetBinding, projections: new Set() }
+          : undefined
+      )
+    } else
+      assertPreparedInventory(
+        dir,
+        'state.db',
+        [external.oldBinding, external.targetBinding],
+        recoveringSwitch
+      )
+  } finally {
+    raw.close()
+  }
   const file = join(stateFolder(dir), ACTIVATION_FILE)
   if (external.targetDescriptor) {
     if (!existsSync(file)) refuse()
@@ -548,6 +584,44 @@ function switchInventory(
     }
   } else if (existsSync(file)) refuse()
 }
+/** Release lifecycle-only evidence only after the recorded retirement acknowledgement.
+ * Legacy config has no generation descriptor, so retire its empty external document
+ * rather than leave the transitional incremented binding for ordinary startup.
+ * The retired marker fences crash/unknown-COMMIT recovery of this atomic cleanup.
+ */
+function retireSwitchInventory(
+  dir: string,
+  external: ExternalSwitch | null | undefined,
+  check: () => void
+): void {
+  if (!external) return
+  check()
+  const db = new SqliteDatabase(join(stateFolder(dir), 'state.db'), { fileMustExist: true })
+  let committing = false
+  try {
+    db.exec('BEGIN IMMEDIATE')
+    check()
+    if (!db.prepare('SELECT value FROM meta WHERE key = ?').get(`daemon:${READY_KEY}`)) {
+      db.exec('ROLLBACK')
+      return
+    }
+    db.prepare('DELETE FROM meta WHERE key = ? OR key LIKE ?').run(
+      `daemon:${READY_KEY}`,
+      'daemon:external-install:%'
+    )
+    if (!external.targetDescriptor)
+      db.prepare('DELETE FROM meta WHERE key = ?').run('daemon:external-files')
+    check()
+    committing = true
+    db.exec('COMMIT')
+  } catch (cause) {
+    if (db.inTransaction) db.exec('ROLLBACK')
+    throw new ExternalStateError(committing ? 'commit-unknown' : 'aborted', { cause })
+  } finally {
+    db.close()
+  }
+}
+
 /** Deliberate empty-inventory transition, not a bootstrap or token-rotation shortcut.
  * It uses the bound physical database and one SQLite transaction. Any ambiguous COMMIT
  * stops this invocation; only a reopened connection may resolve the recorded old/target.
