@@ -246,7 +246,7 @@ export async function openAgentVault(dir: string, ctx: CommandContext): Promise<
     const client = await agentClient(cfg, { ...ctx, fetch: fence.fetch(ctx.fetch) })
     fence.assertOwner()
     await fence.settlePredecessors()
-    raw = SqliteStateStore.open(file, { effectGuard: fence.assertOwner })
+    raw = SqliteStateStore.open(file, { effectGuard: fence.assertOwner, effectOwner: fence.effectOwner })
     fence.attach(raw, file)
     const state = await ScopedState.open(raw, cfg.binding),
       disk = new NodeFileSystem(root, {

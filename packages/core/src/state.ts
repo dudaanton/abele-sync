@@ -30,6 +30,8 @@ export interface Journal {
  * the engine and its tests use `MemoryStateStore`.
  */
 export interface StateStore {
+  /** Optional host claim attribution for durable in-flight installation intents. */
+  effectOwner?(): string | undefined
   get(path: string): Promise<StateEntry | null>
   byFileId(fileId: string): Promise<StateEntry | null>
   all(): AsyncIterable<StateEntry>

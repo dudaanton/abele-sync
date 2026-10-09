@@ -256,6 +256,7 @@ export class ScopedState {
         throw new EngineError('protocol', 'personal progress is unavailable on scoped state')
       }
     return {
+      effectOwner: () => store.effectOwner?.(),
       get: async (path) => {
         await owner.read()
         return store.get(path)

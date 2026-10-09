@@ -102,7 +102,7 @@ const publicationRecovery = new WeakMap<OpenVault, (disk: FileSystem) => Promise
 
 export function openVault(dir: string, ctx: CommandContext, held?: () => boolean): OpenVault {
   if (held && !held()) throw new EngineError('lost', 'vault lock lost before recovery inspection')
-  assertLocalSafety(dir, false, true, held !== undefined)
+  assertLocalSafety(dir, false, true, held !== undefined, held === undefined)
   const cfg = requireConfig(dir)
   const fence = new EffectFence(dir, held, () => personalStamp(dir))
   let attached = false
@@ -125,7 +125,7 @@ export function openVault(dir: string, ctx: CommandContext, held?: () => boolean
     state = SqliteStateStore.open(stateDbFile(dir), { effectGuard: () => {
       if (!held && attached) fence.assertReady()
       else fence.assertOwner()
-    } })
+    }, effectOwner: fence.effectOwner })
   } catch (error) {
     fence?.close()
     throw error

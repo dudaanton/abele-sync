@@ -39,6 +39,7 @@ export interface SqliteStateStoreOptions {
   busyTimeoutMs?: number
   /** Host ownership/binding/generation check at actual ledger effects, including COMMIT. */
   effectGuard?: () => void
+  effectOwner?: () => string | undefined
 }
 
 interface Row {
@@ -88,7 +89,8 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
   private constructor(
     private readonly db: Database,
     private readonly effectGuard?: () => void,
-    private readonly openedFile?: string
+    private readonly openedFile?: string,
+    private readonly pullOwner?: () => string | undefined
   ) {
     if (openedFile && openedFile !== ':memory:') {
       const stat = lstatSync(openedFile, { bigint: true })
@@ -126,7 +128,7 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
       db.pragma('journal_mode = WAL')
       db.pragma(`busy_timeout = ${options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS}`)
       db.exec(SCHEMA)
-      return new SqliteStateStore(db, options.effectGuard, file)
+      return new SqliteStateStore(db, options.effectGuard, file, options.effectOwner)
     } catch (cause) {
       throw new EngineError('io', `cannot open the state database at ${file}`, cause)
     }
@@ -264,6 +266,8 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
    * one string under one key, or `null` when nothing was written under it. The cursor and
    * the journal have their own accessors and cannot be reached through here.
    */
+  effectOwner(): string | undefined { return this.pullOwner?.() }
+
   metadataKeys(prefix: string): string[] {
     const name = own(prefix)
     const rows = guard('cannot inspect ledger metadata keys', () =>

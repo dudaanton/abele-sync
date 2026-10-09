@@ -7,6 +7,7 @@ import { PullPlacer } from './pullPlace.js'
 import type { StateEntry, StateStore } from './state.js'
 
 interface Intent {
+  owner?: string
   fileId: string
   versionId: string
   wirePath: string
@@ -21,6 +22,7 @@ interface Intent {
 export function decodePullIntent(raw: string, fileId: string): Intent {
   try {
     const value = JSON.parse(raw) as Intent
+    if (value?.owner !== undefined && (typeof value.owner !== 'string' || !value.owner || value.owner.length > 128)) throw new Error('invalid intent owner')
     if (
       !value ||
       value.fileId !== fileId ||

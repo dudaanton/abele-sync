@@ -28,6 +28,15 @@ const change: ChangeItem = {
 }
 
 describe('pending pull write authority', () => {
+  it('records the preparing host claim and does not retroactively reattribute an existing intent', async () => {
+    let owner = 'original-claim'
+    const state = Object.assign(new MemoryStateStore(), { effectOwner: () => owner })
+    const writes = new PendingPullWrites(state)
+    await writes.prepare(change, base, 'note.md', null)
+    owner = 'successor-claim'
+    expect(JSON.parse((await state.getMeta('pull-write:file'))!).owner).toBe('original-claim')
+    expect(await writes.matching(change, base)).not.toBeNull()
+  })
   it('matches only the exact recorded version, even when another version has identical bytes', async () => {
     const writes = new PendingPullWrites(new MemoryStateStore())
     await writes.prepare(change, base, 'note.md', null)

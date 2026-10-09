@@ -36,6 +36,7 @@ import {
   type LocalDescriptor,
 } from './config.js'
 import { SqliteStateStore } from './sqliteState.js'
+import { liveDaemonIdentity, lockIdentity } from './lock.js'
 
 export const ACTIVATION_FILE = 'external-activation.json'
 export const SWITCH_FILE = 'external-connection-switch.json'
@@ -177,7 +178,8 @@ export function assertLocalSafety(
   dir: string,
   retirement = false,
   scan = true,
-  allowPullRecovery = false
+  allowPullRecovery = false,
+  observer = false
 ): void {
   const folder = stateFolder(dir)
   const scopedSources = new Set<string>()
@@ -225,8 +227,9 @@ export function assertLocalSafety(
             }
           }
           if (row.key.startsWith('daemon:pull-write:')) {
-            decodePullIntent(row.value, row.key.slice('daemon:pull-write:'.length))
-            if (retirement || (scan && !allowPullRecovery))
+            const intent = decodePullIntent(row.value, row.key.slice('daemon:pull-write:'.length))
+            const live = observer && intent.owner !== undefined && intent.owner === liveDaemonIdentity(dir)
+            if (retirement || ((scan || observer) && !allowPullRecovery && !live))
               hold('unfinished pull installation intent')
           }
           if ((scan || retirement) && row.key.startsWith('daemon:scoped-placement:pull-write:'))
@@ -383,7 +386,7 @@ export class EffectFence {
     if (held) { group.add(this); runtimes.set(this.key, group) }
     this.recovery = new RecoveryBarrier(() => {
       this.assertOwner()
-      assertLocalSafety(dir, false, false)
+      assertLocalSafety(dir, false, false, false, !this.held)
     })
   }
   private readonly initialStamp: string
@@ -424,6 +427,11 @@ export class EffectFence {
   }
   assertReady = (): void => {
     this.recovery.assertReady()
+  }
+  effectOwner = (): string | undefined => {
+    if (!this.held) return undefined
+    this.assertOwner()
+    return lockIdentity(this.dir)
   }
   track = <T>(work: () => Promise<T>): Promise<T> => {
     this.assertOwner()
