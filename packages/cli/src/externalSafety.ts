@@ -167,6 +167,12 @@ function journal(raw: unknown): void {
  * Startup permits a valid ordinary publication journal to replay AFTER recovery;
  * retirement cannot drop that unresolved publication association.
  */
+function hasRetainedFiles(path: string): boolean {
+  const stat = lstatSync(path)
+  if (!stat.isDirectory() || stat.isSymbolicLink()) return true
+  return readdirSync(path).some((name) => hasRetainedFiles(join(path, name)))
+}
+
 export function assertLocalSafety(
   dir: string,
   retirement = false,
@@ -332,7 +338,7 @@ export function assertLocalSafety(
     if (retirement)
       for (const name of ['tmp', 'code-approvals', 'external', 'recovery', 'scoped-outbox']) {
         const path = join(folder, name)
-        if (existsSync(path) && (!lstatSync(path).isDirectory() || readdirSync(path).length))
+        if (existsSync(path) && (name === 'scoped-outbox' ? hasRetainedFiles(path) : !lstatSync(path).isDirectory() || readdirSync(path).length))
           hold(`retained ${name} artifacts`)
       }
     if (scan) inspectProjections(dir)

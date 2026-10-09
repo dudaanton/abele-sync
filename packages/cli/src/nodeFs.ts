@@ -288,9 +288,12 @@ export class NodeFileSystem implements FileSystem {
    */
   private async pruneAbove(path: string): Promise<void> {
     const segments = path.split('/').slice(0, -1)
+    const scopedStaging = path.startsWith(`${STATE_DIR}/scoped-outbox/`)
     while (segments.length > 0) {
       const folder = segments.join('/')
-      if (this.isIgnored(folder)) return
+      // Only the operation-owned scoped outbox is eligible for internal pruning;
+      // never climb into the state root or remove any nonempty staging directory.
+      if (folder === STATE_DIR || (this.isIgnored(folder) && !scopedStaging)) return
       try {
         const target = await this.contained(folder)
         this.checkEffect()

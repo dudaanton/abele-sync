@@ -7,6 +7,7 @@ import {
   statSync,
   unlinkSync,
   readdirSync,
+  existsSync,
 } from 'node:fs'
 import SqliteDatabase from 'better-sqlite3'
 import { spawnSync } from 'node:child_process'
@@ -150,6 +151,18 @@ function fixture(prefix = 'Agents/') {
     )
   return { dir, out, err, requests, io, setup, fetchMock }
 }
+it('BUG: successful scoped publication prunes empty staging directories and permits ordinary disconnect', async () => {
+  const f = fixture()
+  expect(await f.setup()).toBe(0)
+  writeFileSync(join(f.dir, 'Agents', 'published.md'), 'published content')
+  expect(await runCli(['agent', 'run', '--dir', f.dir, '--once'], {}, f.io)).toBe(0)
+  const raw = new SqliteDatabase(join(f.dir, '.abele-sync', 'agent.sqlite'), { readonly: true })
+  try { expect(JSON.parse((raw.prepare("SELECT value FROM meta WHERE key = 'daemon:scoped-v4-state'").get() as { value: string }).value).journal).toBeNull() }
+  finally { raw.close() }
+  expect(existsSync(join(f.dir, '.abele-sync', 'scoped-outbox'))).toBe(false)
+  expect(await runCli(['agent', 'disconnect', '--dir', f.dir], {}, f.io)).toBe(0)
+  expect(readFileSync(join(f.dir, 'Agents', 'published.md'), 'utf8')).toBe('published content')
+})
 for (const phase of ['state', 'feed', 'uploads', 'commit'])
   it(`stops with a distinct revoked status during ${phase}, preserving local and pending work`, async () => {
     const f = fixture()
