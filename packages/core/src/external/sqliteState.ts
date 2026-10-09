@@ -43,9 +43,14 @@ export class SqliteExternalStateStore implements ExternalStatePort {
     this.assertBoundary()
     return this.read()
   }
-  async commitExternalPhase(batch: ExternalPhaseBatch): Promise<void> {
+  /** Host-side marker/filesystem effects cannot bypass a poisoned adapter via a fresh facade. */
+  assertExternalEffectsAllowed(): void {
     if (this.unknownCommit) throw new ExternalStateError('recovery-required')
     this.assertBoundary()
+  }
+
+  async commitExternalPhase(batch: ExternalPhaseBatch): Promise<void> {
+    this.assertExternalEffectsAllowed()
     let began = false,
       committing = false
     try {

@@ -26,7 +26,14 @@ export function guarded<T extends { client: VaultClient; fs: FileSystem; state: 
   }
   return {
     ...opts,
-    client: checking(opts.client, check, { commitRaw: 'commit', commit: 'commit' }),
+    client: checking(opts.client, check, {
+      commitRaw: 'commit',
+      commit: 'commit',
+      putBlob: 'upload',
+      restore: 'restore',
+      restoreDeleted: 'restore',
+      restoreDeletedMany: 'restore',
+    }),
     fs: checking(opts.fs, check, { writeAtomic: 'write', move: 'write', remove: 'write' }),
     state: checking(opts.state, check, {
       put: 'record',
@@ -57,7 +64,16 @@ export function stoppableClient(
       return (...args: unknown[]): unknown => {
         const signal = signalFor()
         if (signal.aborted) throw new EngineError('offline', 'sync stopped')
-        const mutating = key === 'commitRaw' || key === 'commit' || key === 'putBlob'
+        const mutating = [
+          'commitRaw',
+          'commit',
+          'putBlob',
+          'restore',
+          'restoreDeleted',
+          'restoreDeletedMany',
+          'updateSettings',
+          'revokeVaultDevice',
+        ].includes(String(key))
         if (mutating) activeWrites.count++
         let result: unknown
         try {

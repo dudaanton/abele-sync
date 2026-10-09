@@ -108,7 +108,13 @@ export class SyncEngine {
   private readonly activeWrites = { count: 0 }
 
   constructor(opts: EngineOptions) {
-    const hands = opts.stillHeld === undefined ? opts : guarded(opts, opts.stillHeld)
+    const hands =
+      opts.stillHeld === undefined && opts.recovery === undefined
+        ? opts
+        : guarded(opts, () => {
+            opts.recovery?.assertReady()
+            return opts.stillHeld?.() ?? true
+          })
     this.opts = {
       ...hands,
       client: stoppableClient(hands.client, () => this.cancellation.signal, this.activeWrites),
@@ -144,15 +150,17 @@ export class SyncEngine {
     this.staging = this.cycle.staging
     // Built on a scope is where the scope is recorded: a host rebuilds the engine on a change,
     // paused or not, and may run nothing on it before the next change.
-    void this.recordScope().catch(noop)
+    if (opts.recovery === undefined) void this.recordScope().catch(noop)
     // Staged by an earlier process: the status says so before the first sync does.
-    void this.countStaged().catch((error: unknown) =>
-      this.log(`sync: staged changes not read: ${messageOf(error)}`)
-    )
+    if (opts.recovery === undefined)
+      void this.countStaged().catch((error: unknown) =>
+        this.log(`sync: staged changes not read: ${messageOf(error)}`)
+      )
     // Held by an earlier process: likewise, since a paused or offline one may not reach the check.
-    void this.cycle
-      .countHeld()
-      .catch((error: unknown) => this.log(`sync: held deletes not read: ${messageOf(error)}`))
+    if (opts.recovery === undefined)
+      void this.cycle
+        .countHeld()
+        .catch((error: unknown) => this.log(`sync: held deletes not read: ${messageOf(error)}`))
   }
 
   /**
@@ -160,7 +168,8 @@ export class SyncEngine {
    * engine is built, when it starts and at the start of every run; a host may call it too, and
    * a run waits for the last one to finish. A failure is logged, and the next run marks again.
    */
-  recordScope(): Promise<void> {
+  async recordScope(): Promise<void> {
+    this.opts.recovery?.assertReady()
     return this.cycle.recordScope()
   }
 
@@ -204,6 +213,11 @@ export class SyncEngine {
    * prompted the call. However many ask while one runs, one more run follows.
    */
   sync(): Promise<SyncReport> {
+    try {
+      this.opts.recovery?.assertReady()
+    } catch (error) {
+      return Promise.reject(error)
+    }
     if (this.running !== null) {
       this.queued ??= deferred<SyncReport>()
       return this.queued.promise
@@ -218,6 +232,11 @@ export class SyncEngine {
    * Everything the device already has is known by its version and passed over.
    */
   rescan(): Promise<SyncReport> {
+    try {
+      this.opts.recovery?.assertReady()
+    } catch (error) {
+      return Promise.reject(error)
+    }
     this.cycle.rewind = true
     return this.sync()
   }
@@ -239,6 +258,7 @@ export class SyncEngine {
     kind: DeleteDecision['kind'],
     fileIds: readonly string[]
   ): Promise<{ decided: number; report: SyncReport | null }> {
+    this.opts.recovery?.assertReady()
     const shown = new Set(fileIds)
     const holds = this.cycle.holds
     const decided = (await holds.list()).map((one) => one.fileId).filter((id) => shown.has(id))
@@ -246,6 +266,14 @@ export class SyncEngine {
     await holds.decide({ kind, fileIds: decided, at: new Date(this.now()).toISOString() })
     if (this.paused || this.halted) return { decided: decided.length, report: null }
     return { decided: decided.length, report: await this.sync() }
+  }
+
+  /** Authorized server Restore, serialized and recovery-gated like deferred writes. */
+  restore(fileId: string, versionId: string, requestId?: string) {
+    return this.exclusive(() => this.opts.client.restore(fileId, versionId, requestId))
+  }
+  restoreDeleted(fileId: string, requestId?: string) {
+    return this.exclusive(() => this.opts.client.restoreDeleted(fileId, requestId))
   }
 
   /* ── Staged changes ──────────────────────────────────────────────────── */
@@ -341,7 +369,9 @@ export class SyncEngine {
 
   /** A host's job on the engine's state, run in the sync queue rather than beside a sync. */
   private async exclusive<T>(job: () => Promise<T>): Promise<T> {
+    this.opts.recovery?.assertReady()
     while (this.running !== null) await this.running.then(noop, noop)
+    this.opts.recovery?.assertReady()
     return this.occupy(job())
   }
 
@@ -349,6 +379,7 @@ export class SyncEngine {
     this.heard = null
     this.set({ state: 'syncing' })
     try {
+      this.opts.recovery?.assertReady()
       const report = await this.cycle.cycle()
       this.wake.succeeded()
       this.set({
@@ -403,6 +434,7 @@ export class SyncEngine {
    * Run on the server's events, on the watcher's reports, on a clock, and once now.
    */
   start(): void {
+    this.opts.recovery?.assertReady()
     if (this.started) return
     this.stopping = false
     // Subscribe before launching the first sync, so renew a stopped connection here too.
@@ -444,6 +476,7 @@ export class SyncEngine {
 
   /** Forget the pause and any refused token, take the triggers back, and sync now. */
   resume(): void {
+    this.opts.recovery?.assertReady()
     this.paused = false
     this.halted = false
     this.set({ state: this.running === null ? 'idle' : 'syncing', lastError: null })

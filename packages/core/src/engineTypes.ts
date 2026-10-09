@@ -11,6 +11,7 @@ import type { SelectiveSettings } from './selective.js'
 import type { StateStore } from './state.js'
 import type { OwnerPushHooks } from './ownerHooks.js'
 import type { PersonalNoteHook } from './personalNoteEvents.js'
+import type { RecoveryReadiness } from './external/recovery.js'
 
 /**
  * What the engine is told and what it tells: its options, its status, the report of one sync,
@@ -120,6 +121,11 @@ export interface EngineOptions extends OwnerPushHooks {
    * hands in its lock's; a host with no lock leaves it out and nothing is asked.
    */
   stillHeld?: () => boolean
+  /** Opt-in explicit host recovery. With this port the constructor performs no
+   * scope/status work, and mutating entry points/effects require readiness.
+   * Omitted preserves legacy hosts until they adopt their recovery barrier.
+   */
+  recovery?: RecoveryReadiness
   /**
    * When a scan's deletes are held rather than sent (see `deletes.ts`):
    * 50 deletes, or 10 that are a quarter of the synced files, unless a test says otherwise.

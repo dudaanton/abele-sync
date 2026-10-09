@@ -1,6 +1,7 @@
 import { AbeleError, ERROR_STATUS, ErrorCodeSchema, type ErrorCode } from '@abele/sync-protocol'
 import { z } from 'zod'
 import { EngineError, HttpError } from './errors.js'
+import { ExternalStateError } from './external/state.js'
 
 /**
  * The transport under the client (see `client.ts`): one request made, its token and its query
@@ -121,6 +122,13 @@ export class Http {
         ...(body === undefined ? {} : { body }),
       })
     } catch (cause) {
+      // Host effect fences deliberately refuse before the transport is invoked.
+      // A retired/unrecovered runtime is not a network outage and must not retry.
+      if (
+        cause instanceof ExternalStateError ||
+        (cause instanceof EngineError && cause.code === 'lost')
+      )
+        throw cause
       throw new EngineError('offline', `${method} ${path} never reached the server`, cause)
     }
 
