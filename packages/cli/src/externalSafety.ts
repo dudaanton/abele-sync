@@ -368,20 +368,19 @@ export class EffectFence {
   private closed = false
   private state?: SqliteStateStore
   private fileIdentity?: string
-  private instance?: string
+  private instance?: string | null
   private readonly pending = new Set<Promise<unknown>>()
   private readonly predecessors: EffectFence[]
   constructor(
     readonly dir: string,
-    private readonly held: () => boolean,
+    private readonly held: (() => boolean) | undefined,
     private readonly stamp: () => string
   ) {
     this.initialStamp = stamp()
     this.key = realpathSync(dir)
     const group = runtimes.get(this.key) ?? new Set<EffectFence>()
-    this.predecessors = [...group]
-    group.add(this)
-    runtimes.set(this.key, group)
+    this.predecessors = held ? [...group] : []
+    if (held) { group.add(this); runtimes.set(this.key, group) }
     this.recovery = new RecoveryBarrier(() => {
       this.assertOwner()
       assertLocalSafety(dir, false, false)
@@ -393,7 +392,8 @@ export class EffectFence {
     this.assertOwner()
     if (!state.isLedgerFile(file))
       hold('ledger handle no longer names the expected physical database')
-    this.instance = state.getExternalInstanceId()
+    // A borrowed command must not manufacture/rotate the live owner's identity.
+    this.instance = this.held ? state.getExternalInstanceId() : state.readExternalInstanceId()
     const stat = lstatSync(file)
     this.fileIdentity = `${stat.dev}:${stat.ino}`
     this.file = file
@@ -402,7 +402,7 @@ export class EffectFence {
   private file?: string
   assertOwner = (): void => {
     if (this.closed) throw new EngineError('lost', 'runtime has been retired')
-    if (!this.held()) {
+    if (this.held && !this.held()) {
       this.closed = true
       throw new EngineError('lost', 'runtime lost its vault claim')
     }
@@ -448,6 +448,7 @@ export class EffectFence {
   close(): void {
     this.closed = true
     this.recovery.hold()
+    if (!this.held) return
     const key = this.key
     // Retain a retired predecessor until its already-issued effects settle.
     void this.settle().then(() => {

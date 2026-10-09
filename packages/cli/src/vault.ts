@@ -104,12 +104,16 @@ export function openVault(dir: string, ctx: CommandContext, held?: () => boolean
   if (held && !held()) throw new EngineError('lost', 'vault lock lost before recovery inspection')
   assertLocalSafety(dir, false, true, held !== undefined)
   const cfg = requireConfig(dir)
-  const fence = held ? new EffectFence(dir, held, () => personalStamp(dir)) : undefined
+  const fence = new EffectFence(dir, held, () => personalStamp(dir))
+  let attached = false
   // Hidden folders are not walked or watched: the filter below would pass over all of it.
   const disk = new NodeFileSystem(dir, {
     skipHidden: true,
-    effectGuard: fence?.assertReady,
-    effectTracker: fence?.track,
+    effectGuard: () => {
+      if (!held) throw new EngineError('lost', 'filesystem mutation requires an owned vault lock')
+      fence.assertReady()
+    },
+    effectTracker: fence.track,
   })
   const fs = new SettlingFileSystem(disk)
   const ignoreText = readIgnoreText(dir)
@@ -118,13 +122,18 @@ export function openVault(dir: string, ctx: CommandContext, held?: () => boolean
   const ignore = anyOf([HIDDEN, ...(rules === null ? [] : [rules]), fs])
   let state: SqliteStateStore
   try {
-    state = SqliteStateStore.open(stateDbFile(dir), { effectGuard: fence?.assertOwner })
+    state = SqliteStateStore.open(stateDbFile(dir), { effectGuard: () => {
+      if (!held && attached) fence.assertReady()
+      else fence.assertOwner()
+    } })
   } catch (error) {
     fence?.close()
     throw error
   }
   try {
-    fence?.attach(state, stateDbFile(dir))
+    fence.attach(state, stateDbFile(dir))
+    if (!held) fence.recovery.activate()
+    attached = true
     const owner = statedVault(state)
     if (owner !== null && owner !== cfg.vaultId) {
       throw new UsageError(
@@ -137,14 +146,14 @@ export function openVault(dir: string, ctx: CommandContext, held?: () => boolean
       disk,
       fs,
       state,
-      client: vaultClient(cfg, fence ? { ...ctx, fetch: fence.fetch(ctx.fetch) } : ctx),
+      client: vaultClient(cfg, { ...ctx, fetch: fence.fetch(ctx.fetch) }),
       ignore,
       ignoreText,
       filter: {
         excluded: (path, size) =>
           isExcluded(path, size, cfg.selective, SCRIPTS_FOLDER) || ignore.ignores(path),
       },
-      ...(fence ? { fence, recovery: fence.recovery } : {}),
+      fence, recovery: fence.recovery,
       close: () => {
         fence?.close()
         state.close()
@@ -153,8 +162,8 @@ export function openVault(dir: string, ctx: CommandContext, held?: () => boolean
     const replay = vaultClient(cfg, {
       ...ctx,
       fetch: (input, init) => {
-        fence?.assertOwner()
-        return fence ? fence.track(() => ctx.fetch(input, init)) : ctx.fetch(input, init)
+        fence.assertOwner()
+        return fence.track(() => ctx.fetch(input, init))
       },
     })
     publicationRecovery.set(vault, async (disk) => {
