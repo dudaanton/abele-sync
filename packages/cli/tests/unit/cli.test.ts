@@ -855,7 +855,7 @@ describe('init --force', () => {
         'init',
         '--force',
         '--server',
-        'https://s',
+        'https://sync.example.com',
         '--dir',
         dir,
         '--email',

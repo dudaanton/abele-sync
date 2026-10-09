@@ -199,9 +199,11 @@ async function setUp(
       revokeReplaced(old, { ...ctx, fetch: guardedFetch(ctx.fetch, switchCheck) })
   )
   ctx.io.out(
-    previous === vault.id && replaced?.serverUrl === opts.server
+    previous === vault.id
       ? 'kept state.db: the same vault'
-      : 'retired foreign state.db after safety preparation'
+      : previous === null
+        ? 'removed state.db: it did not say which vault it described'
+        : 'removed state.db: it described another vault'
   )
 
   acceptConfig()

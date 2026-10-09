@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, rmSync, lstatSync } from 'node:fs'
 import { join } from 'node:path'
 import SqliteDatabase from 'better-sqlite3'
-import { EngineError } from '@abele/sync-core'
+import { EngineError, ExternalStateError } from '@abele/sync-core'
 import { normalizeServerUrl } from '@abele/sync-protocol'
 import {
   readConfig,
@@ -74,10 +74,9 @@ function ledgerIdentity(dir: string): string | null {
   }
 }
 function refuse(): never {
-  throw new EngineError(
-    'lost',
-    'connection switch requires recovery; credentials and inventory were preserved'
-  )
+  const error = new ExternalStateError('recovery-required')
+  error.message = 'connection switch requires recovery; credentials and inventory were preserved'
+  throw error
 }
 
 /** Only a cleared retirement inventory can enter this bounded replacement protocol.
@@ -112,9 +111,9 @@ export async function replaceConnection(
   const oldStamp = configStamp(dir)
   const keepLedger =
     sameVault &&
-    old !== null &&
-    normalizeServerUrl(old.serverUrl) === normalizeServerUrl(target.serverUrl) &&
-    old.vaultId === target.vaultId
+    (old === null ||
+      (normalizeServerUrl(old.serverUrl) === normalizeServerUrl(target.serverUrl) &&
+        old.vaultId === target.vaultId))
   const identity = ledgerIdentity(dir)
   const targetBytes = `${JSON.stringify(target, null, 2)}\n`
   const plan: Credentials['plan'] = {
