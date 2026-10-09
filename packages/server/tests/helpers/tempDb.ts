@@ -90,8 +90,28 @@ async function tempPgDb(migrate: Migrate): Promise<TempDb> {
   if (!hasPgTestDb) throw new Error('ABELE_TEST_PG_URL is not set')
   // Hex, so the name needs no quoting rules beyond the ones below and never collides.
   const schema = `t_${randomBytes(8).toString('hex')}`
-  const url = withSearchPath(await fileDatabaseUrl(), schema)
+  const databaseUrl = await fileDatabaseUrl()
+  const url = withSearchPath(databaseUrl, schema)
   const handle = createDb(url)
+  // Closing can be repeated by teardown after a setup failure, or follow db.destroy().
+  // Drain this pool first, then drop through an independent pool: a destroyed
+  // Kysely driver cannot execute even DROP SCHEMA IF EXISTS.
+  let closing: Promise<void> | undefined
+  const close = (): Promise<void> => {
+    closing ??= (async () => {
+      try {
+        await handle.close()
+      } finally {
+        const cleanup = createDb(databaseUrl)
+        try {
+          await sql.raw(`drop schema if exists "${schema}" cascade`).execute(cleanup.db)
+        } finally {
+          await cleanup.close()
+        }
+      }
+    })()
+    return closing
+  }
   try {
     await sql.raw(`create schema "${schema}"`).execute(handle.db)
     // If the startup parameter never arrived, every table would go to `public`
@@ -105,8 +125,9 @@ async function tempPgDb(migrate: Migrate): Promise<TempDb> {
     }
     await migrate(handle.db, schema)
   } catch (error) {
-    // Nothing may be left holding a pool open when the caller never got a handle.
-    await handle.close().catch(() => undefined)
+    // Release both the pool and any partial schema before rejecting. Keep the
+    // migration failure as the primary error if cleanup also fails.
+    await close().catch(() => undefined)
     throw error
   }
 
@@ -114,13 +135,7 @@ async function tempPgDb(migrate: Migrate): Promise<TempDb> {
     ...handle,
     schema,
     url,
-    async close() {
-      try {
-        await sql.raw(`drop schema if exists "${schema}" cascade`).execute(handle.db)
-      } finally {
-        await handle.close()
-      }
-    },
+    close,
   }
 }
 
