@@ -3,7 +3,9 @@
 This implements the CLI/core side of the initial recovery barrier, instance and
 ownership fencing, activation migration and conservative lifecycle inventory. It
 adds no UI, automatic eviction, attachment filesystem installer, materialization
-API or old/target credential-switch workflow. Production external eviction is
+API. Legacy personal enrollment now stages replacement credentials and records
+the old/target switch before retiring a safe ledger or replacing the connection.
+Production external eviction is
 still disabled until the later classification and attachment APIs are wired.
 
 ## Startup and effects
@@ -129,6 +131,35 @@ downloads and unavailable/detached records. `--force` is not an exception. Offli
 space, approval or access blockers preserve the connection and evidence; there is
 no automatic materialization in this foundation. A later preparation API must
 prove and persist readiness before relaxing these refusals.
+
+Retirement refusals include the recorded file identity, representation,
+availability and blocker (up to eight records). Offline, no-space, version-change,
+approval and lost-access dependencies remain in the real SQLite inventory,
+including tombstones. Neither personal nor scoped force retirement bypasses this
+inventory. This checkout has no safe disconnect materializer: external-enabled
+connections and descriptor replacement continue to require recovery rather than
+guessing that equal bytes or a deleted server head resolve a dependency.
+
+Personal `init` writes replacement credentials to the private
+`external-switch-credentials.json` file and a bounded phase record to
+`external-connection-switch.json`. The marker contains hashes and ledger identity,
+not tokens. Normal startup and destructive commands hold either surviving file.
+For a valid marker, `init --force --server <recorded target>` resumes the staged
+target without login/enrollment. It validates the active config stamp, the staged
+credential digest and the original physical SQLite/instance identity, repeats the
+safety inventory, finishes the recorded connection write, confirms it, and only
+then attempts old-device revocation. Same vault IDs on different server endpoints
+do not retain the old ledger. A persisted retirement acknowledgement permits
+cleanup recovery without a second revoke.
+
+Valid staging interrupted before marker creation can reconstruct the marker only
+after checking its recorded old config and physical ledger identity and repeating
+the safety inventory. Malformed evidence, replaced ledger,
+changed active credentials, or external activation/descriptor evidence remains a
+recovery hold. Do not delete those files to force an empty bootstrap. Staged
+credentials are separate from the active slot but still private bearer secrets;
+retain the whole state directory when arranging recovery. This is process-crash
+recovery using the existing atomic JSON writer, not a new power-loss/fsync guarantee.
 
 An ordinary pre-activation connection with an empty inventory retains its prior
 CLI behavior, including local forced forgetting of an unsafe/unreachable address

@@ -12,6 +12,7 @@ import { runRestore } from '../../src/commands/restore.js'
 import { runCode } from '../../src/commands/code.js'
 import { runDeletes } from '../../src/commands/deletes.js'
 import { acquireLock } from '../../src/lock.js'
+import { assertLocalSafety } from '../../src/externalSafety.js'
 import type { CommandContext } from '../../src/context.js'
 
 let dir: string
@@ -129,16 +130,33 @@ describe('initial CLI recovery and lifecycle holds', () => {
         state.close()
       }
     })
-  for (const blocker of ['offline', 'no-space', 'approval-required', 'unavailable'])
+  for (const blocker of [
+    'offline',
+    'no-space',
+    'version-changed',
+    'approval-required',
+    'access-revoked',
+    'unavailable',
+  ])
     it(`preserves config, token and retained bytes for ${blocker} retirement holds`, async () => {
       await dependency('active', blocker)
+      expect(() => assertLocalSafety(dir, true)).toThrow(blocker)
       await writeFile(join(dir, 'retained.bin'), 'retained content')
       const before = readFileSync(join(stateFolder(dir), 'config.json')),
         ctx = context()
       await expect(commands.disconnect(ctx)).rejects.toMatchObject({ reason: 'recovery-required' })
+      await expect(commands.disconnect(ctx)).rejects.toThrow(blocker)
       expect(ctx.fetch).not.toHaveBeenCalled()
       expect(readFileSync(join(stateFolder(dir), 'config.json'))).toEqual(before)
       expect(readFileSync(join(dir, 'retained.bin'), 'utf8')).toBe('retained content')
+      const reopened = SqliteStateStore.open(dbFile())
+      try {
+        expect(JSON.parse((await reopened.getExternalState())!).files[0].blockingReason).toBe(
+          blocker
+        )
+      } finally {
+        reopened.close()
+      }
     })
   for (const availability of ['deleted', 'detached', 'unavailable'] as const)
     it(`BUG: ${availability} dependencies cannot be retired even with force`, async () => {

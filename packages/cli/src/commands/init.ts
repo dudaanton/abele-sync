@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { hostname } from 'node:os'
 import { basename, join } from 'node:path'
@@ -9,18 +9,18 @@ import {
   inspectProjectionInventory,
   guardedFetch,
 } from '../externalSafety.js'
-import { serverUrlProblem, type JoinPrefer, type VaultInfo } from '@abele/sync-protocol'
 import {
-  readConfig,
-  stateFolder,
-  writeConfig,
-  assertNoAgentConnection,
-  type DaemonConfig,
-} from '../config.js'
+  normalizeServerUrl,
+  serverUrlProblem,
+  type JoinPrefer,
+  type VaultInfo,
+} from '@abele/sync-protocol'
+import { readConfig, stateFolder, assertNoAgentConnection, type DaemonConfig } from '../config.js'
 import { EXIT_LOCKED, EXIT_OK, UsageError, type CommandContext } from '../context.js'
 import { joinPrefer, parsePrefer } from '../join.js'
 import { promptPassword } from '../password.js'
 import { SqliteStateStore } from '../sqliteState.js'
+import { replaceConnection, resumeConnectionSwitch } from '../connectionSwitch.js'
 import {
   leavingClient,
   lockVault,
@@ -92,6 +92,18 @@ export async function runInit(opts: InitOptions, ctx: CommandContext): Promise<n
     // Recheck under the shared physical-vault lock before credentials/login or
     // any force-mode helper can catch a config-read refusal and treat it as empty.
     assertNoAgentConnection(dir)
+    if (
+      opts.force === true &&
+      (await resumeConnectionSwitch(
+        dir,
+        server,
+        () => assertClaim(release.held),
+        (old, check) => revokeReplaced(old, { ...ctx, fetch: guardedFetch(ctx.fetch, check) })
+      ))
+    ) {
+      ctx.io.out('completed the recorded connection switch; no new device was enrolled')
+      return EXIT_OK
+    }
     assertLocalSafety(dir, true)
     const stamp = () =>
       existsSync(configFile)
@@ -105,10 +117,18 @@ export async function runInit(opts: InitOptions, ctx: CommandContext): Promise<n
         throw new EngineError('lost', 'connection changed during enrollment')
     }
     await inspectProjectionInventory(dir, { guard: check })
-    const owned = { ...ctx, fetch: guardedFetch(ctx.fetch, check) }
-    return await setUp({ ...opts, server }, given, dir, configFile, owned, check, () => {
-      expected = stamp()
-    })
+    return await setUp(
+      { ...opts, server },
+      given,
+      dir,
+      configFile,
+      ctx,
+      check,
+      () => {
+        expected = stamp()
+      },
+      () => assertClaim(release.held)
+    )
   } finally {
     release()
   }
@@ -121,17 +141,22 @@ async function setUp(
   configFile: string,
   ctx: CommandContext,
   check: () => void,
-  acceptConfig: () => void
+  acceptConfig: () => void,
+  claim: () => void
 ): Promise<number> {
   check()
-  const previous = previousVault(dir)
   const replaced = opts.force === true ? previousConfig(dir) : null
+  const previous =
+    replaced !== null && normalizeServerUrl(replaced.serverUrl) !== normalizeServerUrl(opts.server)
+      ? null
+      : previousVault(dir)
   const password = await passwordFor(opts, ctx)
 
-  const { account_token } = await SyncClient.login(opts.server, ctx.fetch, opts.email, password)
+  const ownedFetch = guardedFetch(ctx.fetch, check)
+  const { account_token } = await SyncClient.login(opts.server, ownedFetch, opts.email, password)
   const client = new SyncClient({
     baseUrl: opts.server,
-    fetch: ctx.fetch,
+    fetch: ownedFetch,
     token: account_token,
     userAgent: 'abele-sync-daemon',
   })
@@ -154,19 +179,30 @@ async function setUp(
   const deviceName = opts.deviceName ?? hostname()
   const device = await client.enrolDevice(vault.id, deviceName, 'daemon')
 
-  // Removing foreign state first is crash-safe: the old config can rebuild a
-  // fresh ledger, but the new config must never see another vault's cursor.
+  // Staged credentials and the switch marker fence both sides while a cleared
+  // foreign ledger is retired. Startup cannot bootstrap between these writes.
   check()
-  settleState(dir, previous, vault.id, ctx, check)
-  writeConfig(dir, {
-    serverUrl: opts.server,
-    vaultId: vault.id,
-    deviceId: device.device_id,
-    deviceToken: device.device_token,
-    deviceName,
-    selective,
-    ...(prefer === null ? {} : { joinPrefer: prefer }),
-  })
+  await replaceConnection(
+    dir,
+    {
+      serverUrl: opts.server,
+      vaultId: vault.id,
+      deviceId: device.device_id,
+      deviceToken: device.device_token,
+      deviceName,
+      selective,
+      ...(prefer === null ? {} : { joinPrefer: prefer }),
+    },
+    previous === vault.id,
+    claim,
+    (old, switchCheck) =>
+      revokeReplaced(old, { ...ctx, fetch: guardedFetch(ctx.fetch, switchCheck) })
+  )
+  ctx.io.out(
+    previous === vault.id && replaced?.serverUrl === opts.server
+      ? 'kept state.db: the same vault'
+      : 'retired foreign state.db after safety preparation'
+  )
 
   acceptConfig()
   ctx.io.out(`vault ${vault.name} (${vault.id})`)
@@ -178,7 +214,6 @@ async function setUp(
       `joining: where both hold a file, ${side} is kept and the other goes to version history`
     )
   }
-  if (replaced !== null) await revokeReplaced(replaced, ctx)
   return EXIT_OK
 }
 
@@ -275,37 +310,6 @@ function previousVault(dir: string): string | null {
   } catch {
     return null
   }
-}
-
-/**
- * The state database, kept when it describes the very vault just enrolled into — the usual
- * case, a device re-enrolled after its token was revoked, which then has nothing to re-download —
- * and removed otherwise, since entries that name another vault's files would have the first sync
- * push edits against ids the server has never heard of.
- */
-function settleState(
-  dir: string,
-  previous: string | null,
-  vaultId: string,
-  ctx: CommandContext,
-  check: () => void
-): void {
-  check()
-  const file = stateDbFile(dir)
-  if (!existsSync(file)) return
-  if (previous === vaultId) {
-    ctx.io.out('kept state.db: the same vault')
-    return
-  }
-  for (const suffix of ['', '-wal', '-shm']) {
-    check()
-    rmSync(`${file}${suffix}`, { force: true })
-  }
-  ctx.io.out(
-    previous === null
-      ? 'removed state.db: it did not say which vault it described'
-      : 'removed state.db: it described another vault'
-  )
 }
 
 /** A vault `init` settled on, and what the server said about it; null info for one just made. */

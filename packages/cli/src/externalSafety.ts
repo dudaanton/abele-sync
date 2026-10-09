@@ -92,7 +92,8 @@ export function assertLocalSafety(
   retirement = false,
   scan = true,
   allowPullRecovery = false,
-  observer = false
+  observer = false,
+  recoveringSwitch = false
 ): void {
   const folder = stateFolder(dir)
   const scopedSources = new Set<string>()
@@ -102,7 +103,10 @@ export function assertLocalSafety(
       (!lstatSync(folder).isDirectory() || lstatSync(folder).isSymbolicLink())
     )
       hold('unsafe state directory')
-    for (const name of [ACTIVATION_FILE, SWITCH_FILE])
+    for (const name of [
+      ACTIVATION_FILE,
+      ...(recoveringSwitch ? [] : [SWITCH_FILE, 'external-switch-credentials.json']),
+    ])
       if (existsSync(join(folder, name))) hold(`retained ${name}`)
     for (const config of ['config.json', 'agent.json']) {
       const file = join(folder, config)
@@ -132,7 +136,18 @@ export function assertLocalSafety(
           if (row.key === 'daemon:external-files') {
             const doc = decodeExternalDocument(row.value)
             if (doc.files.length || doc.operations.length)
-              hold(`nonempty external inventory in ${name}`)
+              hold(
+                `nonempty external inventory in ${name}; materialization is required before retirement: ` +
+                  doc.files
+                    .slice(0, 8)
+                    .map(
+                      (file) =>
+                        `${file.fileId} (${file.representation}, ${file.availability}${file.blockingReason ? `, ${file.blockingReason}` : ''})`
+                    )
+                    .join('; ') +
+                  (doc.operations.length ? '; unresolved external operations' : '') +
+                  '; this CLI has no safe disconnect materializer; resolve the dependencies with the bound connection'
+              )
             if (name === 'state.db' && existsSync(join(folder, 'config.json'))) {
               const cfg = readConfig(dir)
               if (cfg && !sameConnection(doc.binding, personalBinding(cfg)))
