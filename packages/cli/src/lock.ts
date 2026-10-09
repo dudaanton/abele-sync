@@ -163,9 +163,13 @@ export async function acquireLock(dir: string, opts: LockOptions = {}): Promise<
  * else — a lock nobody holds, one written elsewhere, a holder that is not a daemon, a pid reused
  * by another program — and the caller then only waits for the holder's next sync.
  */
-export function localDaemon(dir: string): number | null { return localDaemonRecord(dir)?.pid ?? null }
+export function localDaemon(dir: string): number | null {
+  return localDaemonRecord(dir)?.pid ?? null
+}
 /** Claim attribution, not merely the presence of a PID/lock file. */
-export function liveDaemonIdentity(dir: string): string | null { return localDaemonRecord(dir)?.instance ?? null }
+export function liveDaemonIdentity(dir: string): string | null {
+  return localDaemonRecord(dir)?.instance ?? null
+}
 export function lockIdentity(dir: string): string | undefined {
   const read = readLockFile(join(stateFolder(dir), LOCK_FILE))
   return read === 'missing' || read === 'unreadable' ? undefined : read.instance

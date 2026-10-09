@@ -266,7 +266,9 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
    * one string under one key, or `null` when nothing was written under it. The cursor and
    * the journal have their own accessors and cannot be reached through here.
    */
-  effectOwner(): string | undefined { return this.pullOwner?.() }
+  effectOwner(): string | undefined {
+    return this.pullOwner?.()
+  }
 
   metadataKeys(prefix: string): string[] {
     const name = own(prefix)

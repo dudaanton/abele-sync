@@ -157,8 +157,19 @@ it('BUG: successful scoped publication prunes empty staging directories and perm
   writeFileSync(join(f.dir, 'Agents', 'published.md'), 'published content')
   expect(await runCli(['agent', 'run', '--dir', f.dir, '--once'], {}, f.io)).toBe(0)
   const raw = new SqliteDatabase(join(f.dir, '.abele-sync', 'agent.sqlite'), { readonly: true })
-  try { expect(JSON.parse((raw.prepare("SELECT value FROM meta WHERE key = 'daemon:scoped-v4-state'").get() as { value: string }).value).journal).toBeNull() }
-  finally { raw.close() }
+  try {
+    expect(
+      JSON.parse(
+        (
+          raw.prepare("SELECT value FROM meta WHERE key = 'daemon:scoped-v4-state'").get() as {
+            value: string
+          }
+        ).value
+      ).journal
+    ).toBeNull()
+  } finally {
+    raw.close()
+  }
   expect(existsSync(join(f.dir, '.abele-sync', 'scoped-outbox'))).toBe(false)
   expect(await runCli(['agent', 'disconnect', '--dir', f.dir], {}, f.io)).toBe(0)
   expect(readFileSync(join(f.dir, 'Agents', 'published.md'), 'utf8')).toBe('published content')

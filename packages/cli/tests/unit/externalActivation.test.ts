@@ -125,18 +125,31 @@ describe('recoverable CLI activation fence in the real ledger', () => {
   })
   for (const phase of ['preparing', 'active'] as const)
     it(`BUG: resumed ${phase} activation refuses retained switch evidence before any effect`, async () => {
-      const lock = await acquireLock(dir), raw = SqliteStateStore.open(file())
+      const lock = await acquireLock(dir),
+        raw = SqliteStateStore.open(file())
       try {
         await activateExternalFiles(dir, raw, cfg, lock.held)
-        const activation = { ...marker(), format: 'abele.external.activation', schema: 1, ledgerFile: 'state.db', state: phase }
+        const activation = {
+          ...marker(),
+          format: 'abele.external.activation',
+          schema: 1,
+          ledgerFile: 'state.db',
+          state: phase,
+        }
         writeFileSync(join(stateFolder(dir), ACTIVATION_FILE), JSON.stringify(activation))
         writeFileSync(join(stateFolder(dir), SWITCH_FILE), '{unresolved switch')
-        const before = readFileSync(join(stateFolder(dir), 'config.json')), document = await raw.getExternalState()
-        await expect(activateExternalFiles(dir, raw, cfg, lock.held)).rejects.toMatchObject({ reason: 'recovery-required' })
+        const before = readFileSync(join(stateFolder(dir), 'config.json')),
+          document = await raw.getExternalState()
+        await expect(activateExternalFiles(dir, raw, cfg, lock.held)).rejects.toMatchObject({
+          reason: 'recovery-required',
+        })
         expect(readFileSync(join(stateFolder(dir), 'config.json'))).toEqual(before)
         expect(await raw.getExternalState()).toBe(document)
         expect(marker().state).toBe(phase)
-      } finally { raw.close(); lock() }
+      } finally {
+        raw.close()
+        lock()
+      }
     })
   it('BUG: an activation cannot attach a foreign database handle to this vault descriptor', async () => {
     const lock = await acquireLock(dir),

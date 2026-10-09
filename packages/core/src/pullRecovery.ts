@@ -22,7 +22,11 @@ interface Intent {
 export function decodePullIntent(raw: string, fileId: string): Intent {
   try {
     const value = JSON.parse(raw) as Intent
-    if (value?.owner !== undefined && (typeof value.owner !== 'string' || !value.owner || value.owner.length > 128)) throw new Error('invalid intent owner')
+    if (
+      value?.owner !== undefined &&
+      (typeof value.owner !== 'string' || !value.owner || value.owner.length > 128)
+    )
+      throw new Error('invalid intent owner')
     if (
       !value ||
       value.fileId !== fileId ||
