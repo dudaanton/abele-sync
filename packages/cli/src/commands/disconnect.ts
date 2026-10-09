@@ -5,7 +5,6 @@ import { preparePersonalRetirement, externalLifecycleBinding } from '../external
 import { retirePreparedConnection, resumeConnectionRetirement } from '../connectionRetirement.js'
 import {
   assertClaim,
-  assertLocalSafety,
   inspectProjectionInventory,
   guardedFetch,
 } from '../externalSafety.js'

@@ -13,6 +13,7 @@ import { materializeForDisconnect } from '../../src/externalMaterialization.js'
 
 const roots: string[] = []
 afterEach(() => {
+  vi.restoreAllMocks()
   for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 function fixture() {
@@ -126,6 +127,82 @@ for (const phase of [
     expect(revoke).toHaveBeenCalledTimes(1)
   })
 }
+it('a lost activated binding COMMIT acknowledgement stops before config writes or revoke and resolves only after reopen', async () => {
+  const f = fixture(),
+    revoke = vi.fn(async () => {}),
+    file = join(stateFolder(f.dir), 'state.db')
+  const raw = SqliteStateStore.open(file),
+    descriptor = await activateExternalFiles(f.dir, raw, f.old, () => true)
+  raw.close()
+  await materializeForDisconnect(
+    f.dir,
+    'state.db',
+    descriptor.binding,
+    { scriptsFolder: 'Scripts', verify: async () => {}, download: async () => new Uint8Array() },
+    () => {}
+  )
+  const exec = SqliteDatabase.prototype.exec
+  vi.spyOn(SqliteDatabase.prototype, 'exec').mockImplementation(function (
+    this: SqliteDatabase.Database,
+    sql
+  ) {
+    const result = exec.call(this, sql)
+    if (sql === 'COMMIT') throw new Error('lost acknowledgement')
+    return result
+  })
+  await expect(replaceConnection(f.dir, f.target, true, () => {}, revoke)).rejects.toMatchObject({
+    reason: 'commit-unknown',
+  })
+  expect(readConfig(f.dir)).toEqual(f.old)
+  expect(revoke).not.toHaveBeenCalled()
+  vi.restoreAllMocks()
+  const reopened = SqliteStateStore.open(file)
+  expect(JSON.parse((await reopened.getExternalState())!).binding).toEqual(
+    personalBinding(f.target, 2)
+  )
+  reopened.close()
+  await resumeConnectionSwitch(f.dir, f.target.serverUrl, () => {}, revoke)
+  expect(readConfig(f.dir)).toEqual(f.target)
+  expect(revoke).toHaveBeenCalledTimes(1)
+})
+it('an activated cross-endpoint switch preserves physical identity but clears foreign entries and progress', async () => {
+  const f = fixture(),
+    file = join(stateFolder(f.dir), 'state.db'),
+    raw = SqliteStateStore.open(file)
+  const descriptor = await activateExternalFiles(f.dir, raw, f.old, () => true)
+  await raw.setCursor(7)
+  await raw.put({
+    fileId: 'ordinary',
+    path: 'ordinary.bin',
+    wirePath: 'ordinary.bin',
+    versionId: 'version',
+    sha: 'a'.repeat(64),
+    size: 1,
+    mtime: 1,
+  })
+  raw.close()
+  await materializeForDisconnect(
+    f.dir,
+    'state.db',
+    descriptor.binding,
+    { scriptsFolder: 'Scripts', verify: async () => {}, download: async () => new Uint8Array() },
+    () => {}
+  )
+  const target = { ...f.target, serverUrl: 'https://other.example.test' }
+  await replaceConnection(
+    f.dir,
+    target,
+    true,
+    () => {},
+    async () => {}
+  )
+  const final = SqliteStateStore.open(file)
+  expect(final.readExternalInstanceId()).toBe(f.instance)
+  expect(await final.getCursor()).toBe(0)
+  expect(await final.byFileId('ordinary')).toBeNull()
+  expect(JSON.parse((await final.getExternalState())!).binding).toEqual(personalBinding(target, 2))
+  final.close()
+})
 it('malformed staged binding evidence is held before changing the actual SQLite binding', async () => {
   const f = fixture(),
     revoke = vi.fn(async () => {}),

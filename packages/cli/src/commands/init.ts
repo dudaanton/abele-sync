@@ -5,7 +5,6 @@ import { basename, join } from 'node:path'
 import { EngineError, selectiveDefaults, SyncClient } from '@abele/sync-core'
 import {
   assertClaim,
-  assertLocalSafety,
   inspectProjectionInventory,
   guardedFetch,
 } from '../externalSafety.js'
