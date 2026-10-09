@@ -4,6 +4,8 @@ import { join, resolve } from 'node:path'
 import {
   classifyFailure,
   EngineError,
+  DeleteHolds,
+  DEFAULT_DELETE_WINDOW_MS,
   ExpectedWrites,
   resumeJournal,
   recoverPendingPullWrites,
@@ -156,13 +158,18 @@ export function openVault(dir: string, ctx: CommandContext, held?: () => boolean
       },
     })
     publicationRecovery.set(vault, async (disk) => {
-      if (await state.getJournal())
+      if (await state.getJournal()) {
+        const holds = new DeleteHolds(state), filed = await holds.decision()
+        if (filed !== null) await holds.resetTally()
+        const confirmed = new Set(filed?.decision.kind === 'confirm' ? filed.decision.fileIds : [])
         await resumeJournal(replay, disk, state, {
           expected: new ExpectedWrites(),
           filter: vault.filter,
           defer: (path) => codePluginId(path) !== null,
           onDefer: (items) => new StagedChanges(state).stage(items),
+          onCommitted: (ops) => holds.tally(Date.now(), ops.filter((op) => op.op === 'delete' && !confirmed.has(op.file_id)).length, DEFAULT_DELETE_WINDOW_MS),
         })
+      }
     })
     return vault
   } catch (error) {
