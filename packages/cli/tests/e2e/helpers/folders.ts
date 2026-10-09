@@ -58,6 +58,27 @@ export const ctxFor = (): CommandContext => ({
 })
 
 let temps: string[] = []
+const folderWork = new Set<Promise<void>>()
+
+/** Vitest timeouts do not cancel async test bodies. Drain them before tearing down fixtures. */
+export function withFolderWork(work: () => Promise<void>): Promise<void> {
+  const task = work()
+  const settled = task.then(
+    () => {
+      folderWork.delete(settled)
+    },
+    () => {
+      folderWork.delete(settled)
+    }
+  )
+  folderWork.add(settled)
+  return task
+}
+
+/** Includes child-process exit waits in the test body's finally blocks. */
+export async function waitForFolderWork(): Promise<void> {
+  while (folderWork.size > 0) await Promise.all([...folderWork])
+}
 
 /** A fresh, empty vault folder, removed by `cleanupFolders`. */
 export async function folder(): Promise<string> {
@@ -68,6 +89,7 @@ export async function folder(): Promise<string> {
 
 /** Every folder made so far, gone. For an `afterAll`; safe when a test failed half way. */
 export async function cleanupFolders(): Promise<void> {
+  await waitForFolderWork()
   const dirs = temps
   temps = []
   for (const dir of dirs) await rm(dir, { recursive: true, force: true })
