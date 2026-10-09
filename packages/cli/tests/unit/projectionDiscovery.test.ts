@@ -1,6 +1,7 @@
 import * as Fs from 'node:fs'
 import * as Fsp from 'node:fs/promises'
 import { join, resolve } from 'node:path'
+import { performance } from 'node:perf_hooks'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { scan, selectiveDefaults } from '@abele/sync-core'
 import { NodeFileSystem } from '../../src/nodeFs.js'
@@ -30,20 +31,18 @@ beforeEach(async () => {
   writeConfig(dir, cfg)
 })
 afterEach(async () => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
   await Fsp.rm(dir, { recursive: true, force: true })
 })
-function traceReads(slow = false) {
+function traceReads(onRead = () => {}) {
   const paths = new Map<number, string>(),
     bytes = new Map<string, number>(),
     opens: string[] = []
   const count = (path: string, size: number) => {
     if (!path.startsWith(dir + '/') || path.includes('/.abele-sync/')) return
     bytes.set(path, (bytes.get(path) ?? 0) + size)
-    if (slow) {
-      const until = performance.now() + 3
-      while (performance.now() < until) {}
-    }
+    onRead()
   }
   const syncOpen = Fs.openSync,
     syncRead = Fs.readSync,
@@ -155,10 +154,65 @@ describe('projection inventory read budget', () => {
     expect(second.bytes.get(join(dir, 'renamed.bin'))).toBeGreaterThan(0)
   })
   it('discovery yields during a long pass so the owning lock heartbeat remains alive', async () => {
-    for (let n = 0; n < 80; n++) await Fsp.writeFile(join(dir, `${n}.json`), '{"ordinary":true}')
-    traceReads(true)
-    const ctx = { ...context(), lockTiming: { heartbeatMs: 10, watchMs: 100 } }
-    await expect(runRun({ dir, once: true }, ctx)).rejects.toMatchObject({ code: 'offline' })
+    const files = 80,
+      readMs = 3,
+      timing = { heartbeatMs: 10, watchMs: 100 }
+    for (let n = 0; n < files; n++) await Fsp.writeFile(join(dir, `${n}.json`), '{"ordinary":true}')
+
+    // Model CPU work per read, not host scheduling delays. The whole pass costs
+    // 240 ms, longer than the lock's 80 ms give-up; a synchronous pass must lose it.
+    // Only actual event-loop turns may deliver the pending heartbeat intervals.
+    let elapsed = 0,
+      delivered = 0,
+      reads = 0
+    const wall = Date.now()
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsed)
+    vi.spyOn(Date, 'now').mockImplementation(() => wall + elapsed)
+    traceReads(() => {
+      reads++
+      elapsed += readMs
+    })
+    const turns: { reads: number; beat: number }[] = [],
+      immediate = globalThis.setImmediate,
+      lockFile = join(stateFolder(dir), 'lock'),
+      beatOf = () =>
+        (JSON.parse(Fs.readFileSync(lockFile, 'utf8').split('\n')[1]!) as { beat: number }).beat
+    vi.spyOn(globalThis, 'setImmediate').mockImplementation(((
+      callback: (...args: unknown[]) => void,
+      ...args: unknown[]
+    ) =>
+      immediate(() => {
+        vi.advanceTimersByTime(elapsed - delivered)
+        delivered = elapsed
+        turns.push({ reads, beat: beatOf() })
+        callback(...args)
+      })) as typeof setImmediate)
+    const lock = await acquireLock(dir, timing)
+    try {
+      await Safety.inspectProjectionInventory(dir, {
+        guard: () => {
+          expect(lock.held()).toBe(true)
+        },
+      })
+      expect(reads).toBe(files)
+      expect(turns.length).toBeGreaterThanOrEqual(5)
+      // Beats must land DURING discovery, not just after all the reads finish.
+      expect(turns[0]!.reads).toBeGreaterThan(0)
+      expect(turns[0]!.reads).toBeLessThan(files)
+      let previousReads = 0,
+        previousBeat = 0
+      for (const turn of turns) {
+        expect(turn.reads - previousReads).toBeLessThanOrEqual(16)
+        expect(turn.beat).toBeGreaterThan(previousBeat)
+        previousReads = turn.reads
+        previousBeat = turn.beat
+      }
+      expect(reads - previousReads).toBeLessThanOrEqual(16)
+      expect(lock.held()).toBe(true)
+    } finally {
+      lock()
+    }
   })
   it('a raced candidate read is capped even if the file grows after stat', async () => {
     const file = join(dir, 'raced.json')
