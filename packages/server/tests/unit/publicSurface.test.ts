@@ -9,6 +9,7 @@ const read = (path: string) => readFileSync(resolve(root, path), 'utf8')
 it('ships only deployment and current-state reference documents', () => {
   expect(readdirSync(resolve(root, 'docs')).sort()).toEqual([
     'deploy.md',
+    'external-file-cli-state.md',
     'protocol.md',
     'schema.md',
     'security.md',
