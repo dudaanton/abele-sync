@@ -99,7 +99,7 @@ async function fixture(availability: 'active' | 'deleted' | 'unavailable' = 'act
   raw.close()
   const client = {
     verify: vi.fn(async () => {}),
-    download: vi.fn(async () => bytes),
+    download: vi.fn(async (_base: typeof base) => bytes),
     scriptsFolder: 'Scripts',
   }
   return { dir, cfg, bytes, base, client }
@@ -273,6 +273,126 @@ for (const phase of [
     expect(existsSync(join(f.dir, 'Media/a.bin.abele-ref'))).toBe(false)
   })
 }
+for (const interruption of ['second-download', 'per-file-commit'] as const) {
+  it(`retries partial materialization after ${interruption} with durable ownership of the stale projection index`, async () => {
+    const f = await fixture(),
+      file = join(stateFolder(f.dir), 'state.db'),
+      raw = SqliteStateStore.open(file),
+      second = { ...f.base, fileId: 'second', versionId: 'second-version', path: 'Media/b.bin' },
+      projectionPath = second.path + '.abele-ref',
+      projection = JSON.stringify({
+        format: 'abele.external',
+        schema: 1,
+        vaultId: 'vault',
+        fileId: second.fileId,
+        path: second.path,
+        observedVersionId: second.versionId,
+        sha256: second.sha,
+        size: second.size,
+        mime: 'application/octet-stream',
+        mtime: 1,
+      })
+    await raw.put({ ...second, wirePath: second.path })
+    writeFileSync(join(f.dir, projectionPath), projection)
+    const ext = await ExternalState.open(
+        raw,
+        JSON.parse((await raw.getExternalState())!).ledgerId,
+        personalBinding(f.cfg)
+      ),
+      doc = await ext.snapshot()
+    await ext.commit({
+      expectedRevision: doc.revision,
+      files: [
+        {
+          expectedRevision: null,
+          next: {
+            ...doc.files[0]!,
+            fileId: second.fileId,
+            projectionPath,
+            projectionSha: await sha256(new TextEncoder().encode(projection)),
+            lastProvenLocalBase: second,
+          },
+        },
+      ],
+    })
+    raw.close()
+    if (interruption === 'second-download') {
+      f.client.download.mockImplementation(async (base) => {
+        if (base.fileId === second.fileId) throw new Error('offline second download')
+        return f.bytes
+      })
+    } else {
+      const exec = SqliteDatabase.prototype.exec
+      vi.spyOn(SqliteDatabase.prototype, 'exec').mockImplementation(function (
+        this: SqliteDatabase.Database,
+        sql
+      ) {
+        const complete =
+          sql === 'COMMIT' &&
+          JSON.parse(
+            (
+              this.prepare("SELECT value FROM meta WHERE key = 'daemon:external-files'").get() as {
+                value: string
+              }
+            ).value
+          ).operations.some(
+            (op: { operationId: string; phase: string }) =>
+              op.operationId === 'disconnect:file' && op.phase === 'complete'
+          )
+        const result = exec.call(this, sql)
+        if (complete) throw new Error('termination after per-file commit')
+        return result
+      })
+    }
+    const pending = materializeForDisconnect(
+      f.dir,
+      'state.db',
+      personalBinding(f.cfg),
+      f.client,
+      () => {}
+    )
+    if (interruption === 'second-download')
+      await expect(pending).rejects.toThrow('offline second download')
+    else await expect(pending).rejects.toMatchObject({ reason: 'commit-unknown' })
+    vi.restoreAllMocks()
+    expect(readFileSync(join(f.dir, f.base.path))).toEqual(Buffer.from(f.bytes))
+    expect(existsSync(join(f.dir, 'Media/a.bin.abele-ref'))).toBe(false)
+    expect(existsSync(join(f.dir, projectionPath))).toBe(true)
+    const index = JSON.parse(
+      readFileSync(join(stateFolder(f.dir), 'projection-index.json'), 'utf8')
+    )
+    expect(index.entries).toContainEqual(
+      expect.objectContaining({ path: 'Media/a.bin.abele-ref', marker: true })
+    )
+    const reopened = SqliteStateStore.open(file)
+    try {
+      const partial = JSON.parse((await reopened.getExternalState())!)
+      expect(partial.files[0]).toMatchObject({
+        representation: 'hydrated',
+        pendingOperationId: null,
+        projectionPath: 'Media/a.bin.abele-ref',
+      })
+      expect(partial.operations).toContainEqual(
+        expect.objectContaining({ operationId: 'disconnect:file', phase: 'complete' })
+      )
+    } finally {
+      reopened.close()
+    }
+    f.client.download.mockResolvedValue(f.bytes)
+    await materializeForDisconnect(f.dir, 'state.db', personalBinding(f.cfg), f.client, () => {})
+    expect(readFileSync(join(f.dir, second.path))).toEqual(Buffer.from(f.bytes))
+    expect(existsSync(join(f.dir, projectionPath))).toBe(false)
+    expect(existsSync(join(stateFolder(f.dir), 'projection-index.json'))).toBe(false)
+    const final = SqliteStateStore.open(file)
+    try {
+      expect(JSON.parse((await final.getExternalState())!).files).toEqual([])
+      expect(JSON.parse(final.getMeta('external-disconnect-ready')!).files).toHaveLength(2)
+    } finally {
+      final.close()
+    }
+  })
+}
+
 for (const failure of [
   'offline',
   'no-space',

@@ -145,8 +145,12 @@ ready-to-install before the native `link`. `EEXIST` preserves the target even
 when its bytes match. After interruption, only the recorded staging inode linked
 to the target, or a committed installation identity, proves installation; equal
 content alone does not. Active heads are verified again before installation.
-Only unchanged, owned projections/staging are retired. Orphan or changed
-artifacts and ambiguous operations remain holds. There is no overwrite fallback.
+Only unchanged, owned projections/staging are retired. Completed per-file
+materialization retains its projection path/digest in SQLite until the final
+projection-index cleanup and empty-inventory commit. A partial retry or restart
+therefore still owns removed paths referenced by the stale positive cache.
+Orphan or changed artifacts and ambiguous operations remain holds. There is no
+overwrite fallback.
 
 Authorized contentful deleted versions may be rescued through their exact
 historical download, without server Restore or publication. Tombstones and lost

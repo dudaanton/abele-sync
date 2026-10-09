@@ -577,8 +577,9 @@ export async function materializeForDisconnect(
             ? {
                 ...f,
                 representation: 'hydrated',
-                projectionPath: null,
-                projectionSha: null,
+                // Keep durable ownership of the removed projection until the final
+                // index refresh/cleanup and empty-inventory commit. A partial retry
+                // must still be able to authorize its stale positive cache entry.
                 pendingOperationId: null,
                 localRevision: f.localRevision + 1,
               }
