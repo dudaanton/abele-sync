@@ -2,11 +2,12 @@
 
 This implements the CLI/core side of the initial recovery barrier, instance and
 ownership fencing, activation migration and conservative lifecycle inventory. It
-adds no UI, automatic eviction, attachment filesystem installer, materialization
-API. Legacy personal enrollment now stages replacement credentials and records
-the old/target switch before retiring a safe ledger or replacing the connection.
-Production external eviction is
-still disabled until the later classification and attachment APIs are wired.
+adds no UI or automatic eviction. CLI lifecycle preparation now materializes
+eligible attachments through version-bound downloads and native no-clobber
+`link` installation. Personal enrollment stages credentials and records the
+old/target switch before replacing the connection or its activated descriptor.
+Production external eviction remains disabled until the later classification and
+attachment APIs are wired.
 
 ## Startup and effects
 
@@ -95,7 +96,7 @@ credentials, download URLs or device preferences. The existing connection token
 remains only in its private connection config. Config/marker files use the
 existing private state-folder permissions.
 
-## Initial lifecycle policy
+## Lifecycle preparation and retirement
 
 Disconnect, forced initialization/re-enrollment, scoped agent setup/disconnect
 and delayed cleanup check the shared read-only inventory under ownership before
@@ -125,20 +126,49 @@ A private `projection-index.json` caches exact path/size/mtime observations;
 damaged cache entries are re-inspected and known positive evidence remains a
 hold. The pass yields to timers so the lock heartbeat continues.
 
-Every nonempty external document and activation/switch marker remains a hold,
-including hydrated policy records, terminal operations, tombstones, pending
-downloads and unavailable/detached records. `--force` is not an exception. Offline,
-space, approval or access blockers preserve the connection and evidence; there is
-no automatic materialization in this foundation. A later preparation API must
-prove and persist readiness before relaxing these refusals.
+Ordinary startup still holds external documents and activation/switch evidence.
+Destructive lifecycle commands may relax that hold only through explicit
+`materializeForDisconnect` preparation under the physical-vault lock. The API
+validates the actual ledger instance, config and activation binding, settles only
+unambiguous terminal bookkeeping and inventories other publication, approval,
+conflict and retained-byte holds. `--force` never skips an unresolved dependency.
 
-Retirement refusals include the recorded file identity, representation,
-availability and blocker (up to eight records). Offline, no-space, version-change,
-approval and lost-access dependencies remain in the real SQLite inventory,
-including tombstones. Neither personal nor scoped force retirement bypasses this
-inventory. This checkout has no safe disconnect materializer: external-enabled
-connections and descriptor replacement continue to require recovery rather than
-guessing that equal bytes or a deleted server head resolve a dependency.
+Personal disconnect and forced enrollment prepare the old connection before
+revocation or login/enrollment. Scoped agent disconnect uses the same API with
+its scoped client and validates the existing `ScopedState` binding; it never
+falls back to personal authorization. Scoped setup still refuses an existing
+agent root rather than overwriting its credential or database.
+
+Preparation records hydration intent in SQLite, downloads the exact version to
+`.abele-sync/disconnect-staging`, checks SHA/size by rereading it, and commits
+ready-to-install before the native `link`. `EEXIST` preserves the target even
+when its bytes match. After interruption, only the recorded staging inode linked
+to the target, or a committed installation identity, proves installation; equal
+content alone does not. Active heads are verified again before installation.
+Only unchanged, owned projections/staging are retired. Orphan or changed
+artifacts and ambiguous operations remain holds. There is no overwrite fallback.
+
+Authorized contentful deleted versions may be rescued through their exact
+historical download, without server Restore or publication. Tombstones and lost
+access remain inventory dependencies until resolved. Code/settings/note/canvas
+materialization is refused here with a normal-path/approval diagnostic, never
+routed through the attachment installer. Offline, no-space, changed-version,
+approval and access failures preserve the connection and durable inventory.
+
+Successful preparation atomically clears resolved external records and writes
+`daemon:external-disconnect-ready`, containing the revision, binding and local
+file proofs. Every final retirement/replacement gate rechecks identity, SHA and
+size of those originals; a later local edit is a hold, not permission to discard
+the receipt. Missing state or markers are never recreated to bypass a hold.
+
+After a successful revoke (or an explicit force decision with an already-safe
+inventory), `external-retirement.json` records token-free cleanup evidence.
+Config removal, activation removal and SQLite inventory retirement can resume
+without another revoke, retaining the same physical ledger and ordinary entries.
+`disconnect`, scoped disconnect and personal `init --force` recover this receipt
+before doing new work. Changed credentials, ledger identity or local proofs
+refuse recovery. A retained old endpoint binding prevents a subsequent join to
+the same vault ID on a different server from reusing its ordinary ledger.
 
 Personal `init` writes replacement credentials to the private
 `external-switch-credentials.json` file and a bounded phase record to
@@ -148,23 +178,27 @@ For a valid marker, `init --force --server <recorded target>` resumes the staged
 target without login/enrollment. It validates the active config stamp, the staged
 credential digest and the original physical SQLite/instance identity, repeats the
 safety inventory, finishes the recorded connection write, confirms it, and only
-then attempts old-device revocation. Same vault IDs on different server endpoints
-do not retain the old ledger. A persisted retirement acknowledgement permits
-cleanup recovery without a second revoke.
+then attempts old-device revocation. For an activated connection, a planned
+empty-inventory SQLite transaction changes the binding/generation, then the
+versioned connection/descriptor and activation marker are written in recorded
+phases. It retains the physical instance, never bootstraps or adopts unresolved
+records. A foreign endpoint/vault clears ordinary entries and progress instead
+of reusing them; legacy foreign ledgers are retired as before. A persisted
+retirement acknowledgement permits cleanup recovery without a second revoke.
 
 Valid staging interrupted before marker creation can reconstruct the marker only
 after checking its recorded old config and physical ledger identity and repeating
 the safety inventory. Malformed evidence, replaced ledger,
-changed active credentials, or external activation/descriptor evidence remains a
-recovery hold. Do not delete those files to force an empty bootstrap. Staged
+changed active credentials, or activation/descriptor evidence outside the recorded
+old/target plan remains a recovery hold. Do not delete those files to force an empty bootstrap. Staged
 credentials are separate from the active slot but still private bearer secrets;
 retain the whole state directory when arranging recovery. This is process-crash
 recovery using the existing atomic JSON writer, not a new power-loss/fsync guarantee.
 
 An ordinary pre-activation connection with an empty inventory retains its prior
 CLI behavior, including local forced forgetting of an unsafe/unreachable address
-without sending its token. Normal read-only status and the legacy beside-daemon commands retain a binding/
-instance/recovery fence even without owning the daemon's lock. Every later HTTP
+without sending its token. Normal read-only status and the legacy beside-daemon
+commands retain a binding/instance/recovery fence even without owning the daemon's lock. Every later HTTP
 request and SQLite decision write rechecks it after awaits. Normal pull intents
 carry the preparing lock identity; readonly commands may inspect a live local
 daemon's matching intent, but crash/foreign-owner intents remain holds. Empty
