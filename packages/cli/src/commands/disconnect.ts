@@ -3,11 +3,7 @@ import { readFileSync, rmSync } from 'node:fs'
 import { EngineError } from '@abele/sync-core'
 import { preparePersonalRetirement, externalLifecycleBinding } from '../externalLifecycle.js'
 import { retirePreparedConnection, resumeConnectionRetirement } from '../connectionRetirement.js'
-import {
-  assertClaim,
-  inspectProjectionInventory,
-  guardedFetch,
-} from '../externalSafety.js'
+import { assertClaim, inspectProjectionInventory, guardedFetch } from '../externalSafety.js'
 import { join } from 'node:path'
 import { serverUrlProblem } from '@abele/sync-protocol'
 import { stateFolder, type DaemonConfig } from '../config.js'

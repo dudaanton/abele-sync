@@ -3,11 +3,7 @@ import { createHash } from 'node:crypto'
 import { hostname } from 'node:os'
 import { basename, join } from 'node:path'
 import { EngineError, selectiveDefaults, SyncClient } from '@abele/sync-core'
-import {
-  assertClaim,
-  inspectProjectionInventory,
-  guardedFetch,
-} from '../externalSafety.js'
+import { assertClaim, inspectProjectionInventory, guardedFetch } from '../externalSafety.js'
 import {
   normalizeServerUrl,
   serverUrlProblem,
