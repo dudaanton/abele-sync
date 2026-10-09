@@ -490,8 +490,11 @@ export async function activateBoundExternalFiles(
   held: () => boolean,
   writeDescriptor: (descriptor: LocalDescriptor, guard: () => void) => void
 ): Promise<LocalDescriptor> {
-  const claim = () => assertClaim(held),
-    file = join(stateFolder(dir), ACTIVATION_FILE)
+  const claim = () => {
+    assertClaim(held)
+    if (existsSync(join(stateFolder(dir), SWITCH_FILE))) hold(`retained ${SWITCH_FILE}`)
+  }
+  const file = join(stateFolder(dir), ACTIVATION_FILE)
   claim()
   state.assertExternalEffectsAllowed()
   if (
