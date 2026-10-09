@@ -5,11 +5,22 @@ const id = z.string().min(1).max(256)
 const revision = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
 const sha = z.string().regex(/^[a-f0-9]{64}$/)
 const size = z.number().int().nonnegative().max(EXTERNAL_FILES_MAX_BYTES)
+const encoder = new TextEncoder()
+/** Physical spelling must fit the same path/component UTF-8 ceilings as the
+ * protocol before NFC can shorten it. Keep valid decomposed spelling intact.
+ */
+function physicalLengthAllowed(path: string): boolean {
+  return (
+    encoder.encode(path).byteLength <= 1024 &&
+    path.split('/').every((segment) => encoder.encode(segment).byteLength <= 255)
+  )
+}
 const physicalPath = z
   .string()
   .min(1)
   .max(4096)
   .refine((path) => {
+    if (!physicalLengthAllowed(path)) return false
     try {
       validatePath(path.normalize('NFC'))
       return true
@@ -23,6 +34,7 @@ const artifactPath = z
   .min(1)
   .max(4096)
   .refine((path) => {
+    if (!physicalLengthAllowed(path)) return false
     try {
       const segments = path.normalize('NFC').split('/')
       if (segments.some((segment) => segment === '.' || segment === '..')) return false
