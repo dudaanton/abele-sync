@@ -1,14 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import {
-  closeSync,
-  existsSync,
-  lstatSync,
-  openSync,
-  readFileSync,
-  readSync,
-  readdirSync,
-  realpathSync,
-} from 'node:fs'
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import SqliteDatabase from 'better-sqlite3'
 import {
@@ -37,6 +28,8 @@ import {
 } from './config.js'
 import { SqliteStateStore } from './sqliteState.js'
 import { liveDaemonIdentity, lockIdentity } from './lock.js'
+import { assertIndexedProjectionSafety, inspectProjectionInventory } from './externalDiscovery.js'
+export { inspectProjectionInventory } from './externalDiscovery.js'
 
 export const ACTIVATION_FILE = 'external-activation.json'
 export const SWITCH_FILE = 'external-connection-switch.json'
@@ -53,86 +46,6 @@ function readJson(file: string): unknown {
   }
 }
 
-/** Bounded-memory root-marker recognition, independent of extension, placement or validity.
- * Does not treat a quoted JSON example inside a note/string as a projection.
- */
-function projection(file: string): boolean {
-  const fd = openSync(file, 'r'),
-    chunk = Buffer.alloc(64 * 1024)
-  let first = true,
-    depth = 0,
-    quoted = false,
-    escape = false,
-    token = '',
-    pending = 0
-  try {
-    for (;;) {
-      const count = readSync(fd, chunk, 0, chunk.length, null)
-      if (!count) return false
-      for (const char of chunk.subarray(0, count).toString('utf8')) {
-        if (first) {
-          if (/\s/.test(char)) continue
-          if (char !== '{') return false
-          first = false
-          depth = 1
-          continue
-        }
-        if (quoted) {
-          if (escape) {
-            if (token.length < 128) token += char
-            escape = false
-            continue
-          }
-          if (char === '\\') {
-            if (token.length < 128) token += char
-            escape = true
-            continue
-          }
-          if (char !== '"') {
-            if (token.length < 128) token += char
-            continue
-          }
-          quoted = false
-          let value = token
-          try {
-            value = JSON.parse('"' + token + '"') as string
-          } catch {
-            /* malformed markers still hold */
-          }
-          if (depth === 1 && pending === 2 && value === 'abele.external') return true
-          pending = depth === 1 && value === 'format' ? 1 : 0
-          continue
-        }
-        if (/\s/.test(char)) continue
-        if (char === '"') {
-          quoted = true
-          token = ''
-          escape = false
-          continue
-        }
-        if (char === ':' && pending === 1) {
-          pending = 2
-          continue
-        }
-        pending = 0
-        if (char === '{' || char === '[') depth++
-        if (char === '}' || char === ']') depth--
-      }
-    }
-  } finally {
-    closeSync(fd)
-  }
-}
-function inspectProjections(dir: string): void {
-  for (const item of readdirSync(dir, { withFileTypes: true })) {
-    if (item.isSymbolicLink()) continue
-    const path = join(dir, item.name)
-    if (item.isDirectory()) {
-      if (item.name.startsWith('.') && item.name !== '.obsidian') continue
-      inspectProjections(path)
-    } else if (item.isFile() && projection(path)) hold(`unowned projection at ${path}`)
-  }
-}
 // Core's durable staging also contains synthesized manifest changes: their actor
 // date may be unknown ('') and an empty manifest uses sequence 0. Those are valid
 // local records, not wire feed items. Keep every placement/identity field strict.
@@ -228,7 +141,8 @@ export function assertLocalSafety(
           }
           if (row.key.startsWith('daemon:pull-write:')) {
             const intent = decodePullIntent(row.value, row.key.slice('daemon:pull-write:'.length))
-            const live = observer && intent.owner !== undefined && intent.owner === liveDaemonIdentity(dir)
+            const live =
+              observer && intent.owner !== undefined && intent.owner === liveDaemonIdentity(dir)
             if (retirement || ((scan || observer) && !allowPullRecovery && !live))
               hold('unfinished pull installation intent')
           }
@@ -341,10 +255,15 @@ export function assertLocalSafety(
     if (retirement)
       for (const name of ['tmp', 'code-approvals', 'external', 'recovery', 'scoped-outbox']) {
         const path = join(folder, name)
-        if (existsSync(path) && (name === 'scoped-outbox' ? hasRetainedFiles(path) : !lstatSync(path).isDirectory() || readdirSync(path).length))
+        if (
+          existsSync(path) &&
+          (name === 'scoped-outbox'
+            ? hasRetainedFiles(path)
+            : !lstatSync(path).isDirectory() || readdirSync(path).length)
+        )
           hold(`retained ${name} artifacts`)
       }
-    if (scan) inspectProjections(dir)
+    assertIndexedProjectionSafety(dir)
   } catch (cause) {
     if (cause instanceof ExternalStateError) throw cause
     hold('unreadable ledger or local recovery evidence')
@@ -383,7 +302,10 @@ export class EffectFence {
     this.key = realpathSync(dir)
     const group = runtimes.get(this.key) ?? new Set<EffectFence>()
     this.predecessors = held ? [...group] : []
-    if (held) { group.add(this); runtimes.set(this.key, group) }
+    if (held) {
+      group.add(this)
+      runtimes.set(this.key, group)
+    }
     this.recovery = new RecoveryBarrier(() => {
       this.assertOwner()
       assertLocalSafety(dir, false, false, false, !this.held)
@@ -547,6 +469,7 @@ export async function activateBoundExternalFiles(
     }
   } else {
     assertLocalSafety(dir, true)
+    await inspectProjectionInventory(dir, { guard: claim })
     const current = await state.getExternalState()
     const existing = current === null ? null : decodeExternalDocument(current)
     if (existing && !sameConnection(existing.binding, binding)) hold('foreign external document')

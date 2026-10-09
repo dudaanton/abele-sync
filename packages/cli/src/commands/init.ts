@@ -3,7 +3,12 @@ import { createHash } from 'node:crypto'
 import { hostname } from 'node:os'
 import { basename, join } from 'node:path'
 import { EngineError, selectiveDefaults, SyncClient } from '@abele/sync-core'
-import { assertClaim, assertLocalSafety, guardedFetch } from '../externalSafety.js'
+import {
+  assertClaim,
+  assertLocalSafety,
+  inspectProjectionInventory,
+  guardedFetch,
+} from '../externalSafety.js'
 import { serverUrlProblem, type JoinPrefer, type VaultInfo } from '@abele/sync-protocol'
 import {
   readConfig,
@@ -99,6 +104,7 @@ export async function runInit(opts: InitOptions, ctx: CommandContext): Promise<n
       if (stamp() !== expected)
         throw new EngineError('lost', 'connection changed during enrollment')
     }
+    await inspectProjectionInventory(dir, { guard: check })
     const owned = { ...ctx, fetch: guardedFetch(ctx.fetch, check) }
     return await setUp({ ...opts, server }, given, dir, configFile, owned, check, () => {
       expected = stamp()

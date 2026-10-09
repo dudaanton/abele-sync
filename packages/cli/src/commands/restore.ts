@@ -10,7 +10,7 @@ import {
   buildEngine,
   DEFAULT_INTERVAL_SECONDS,
   fileIdFor,
-  openVault,
+  prepareVault,
   requireConfig,
   recoverVault,
   summarise,
@@ -95,7 +95,7 @@ export async function runRestore(
   let engine: SyncEngine | null = null
   try {
     const log = openLog(dir)
-    vault = openVault(dir, ctx, release.held)
+    vault = await prepareVault(dir, ctx, release.held)
     await recoverVault(vault, release.held)
     engine = buildEngine(vault, {
       stillHeld: release.held,
@@ -126,7 +126,7 @@ async function restoreBesideDaemon(
   opts: RestoreOptions,
   ctx: CommandContext
 ): Promise<number> {
-  const vault = openVault(dir, ctx)
+  const vault = await prepareVault(dir, ctx)
   try {
     const landed = applied(await restoreOnServer(vault, wire, opts), wire)
     openLog(dir).line(`restore: ${landed} restored on the server beside a running daemon`)

@@ -2,7 +2,7 @@ import type { VersionInfo } from '@abele/sync-protocol'
 import type { VaultClient } from '@abele/sync-core'
 import { EXIT_OK, UsageError, type CommandContext } from '../context.js'
 import { unifiedDiff } from '../diff.js'
-import { fileIdFor, humanBytes, openVault, vaultDir, wirePath } from '../vault.js'
+import { fileIdFor, humanBytes, prepareVault, vaultDir, wirePath } from '../vault.js'
 
 /**
  * What has happened to one file, and what changed between two of its versions.
@@ -32,7 +32,7 @@ export async function runHistory(
   if (opts.diff !== undefined && opts.diff.length !== 2) {
     throw new UsageError('--diff takes two versions: --diff <a> <b>')
   }
-  const vault = openVault(vaultDir(opts.dir), ctx)
+  const vault = await prepareVault(vaultDir(opts.dir), ctx)
   try {
     const wire = wirePath(path)
     const fileId = await fileIdFor(vault.client, vault.state, wire)

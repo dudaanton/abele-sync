@@ -1,5 +1,5 @@
 /** Production daemon adapters in a separate process, stopped at an acknowledged cut point. */
-import { openVault, buildEngine, rememberVault } from '../../../dist/vault.js'
+import { prepareVault, recoverVault, buildEngine, rememberVault } from '../../../dist/vault.js'
 import { acquireLock } from '../../../dist/lock.js'
 const [dir, cut] = process.argv.slice(2)
 if (cut === 'init-config') {
@@ -39,7 +39,8 @@ const ctx = {
   revokeTimeoutMs: 1000,
 }
 const release = await acquireLock(dir)
-const vault = openVault(dir, ctx)
+const vault = await prepareVault(dir, ctx, release.held)
+await recoverVault(vault, release.held)
 rememberVault(vault)
 let tripped = false
 const barrier = async () => {

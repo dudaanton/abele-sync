@@ -1,6 +1,11 @@
 import { EngineError, ScopedState, createScopedClient } from '@abele/sync-core'
 import { acquireLock } from '../lock.js'
-import { assertClaim, assertLocalSafety, guardedFetch } from '../externalSafety.js'
+import {
+  assertClaim,
+  assertLocalSafety,
+  inspectProjectionInventory,
+  guardedFetch,
+} from '../externalSafety.js'
 import { SqliteStateStore } from '../sqliteState.js'
 import {
   agentDirectory,
@@ -53,6 +58,7 @@ export async function runAgentSetup(opts: AgentSetupOptions, ctx: CommandContext
     }
     check()
     freshAgentRoot(dir)
+    await inspectProjectionInventory(dir, { guard: check })
     const client = await createScopedClient({
       baseUrl: opts.server,
       token,

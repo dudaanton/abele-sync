@@ -18,7 +18,7 @@ vi.mock('../../src/vault.js', () => ({
   fileIdFor: async () => 'f',
   DEFAULT_INTERVAL_SECONDS: 300,
   summarise: () => '',
-  openVault: () => ({
+  prepareVault: async () => ({
     close: () => {},
     client: {
       trash: async () => [{ file_id: 'f', path: 'a.md', deleted_at: new Date().toISOString() }],

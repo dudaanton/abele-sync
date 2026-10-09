@@ -8,7 +8,7 @@ import { openLog } from '../log.js'
 import {
   buildEngine,
   DEFAULT_INTERVAL_SECONDS,
-  openVault,
+  prepareVault,
   requireConfig,
   recoverVault,
   vaultDir,
@@ -31,7 +31,7 @@ export async function runCode(opts: CodeOptions, ctx: CommandContext): Promise<n
   const named = opts.approve ?? opts.reject
   if (named === undefined) {
     if (opts.expect !== undefined) throw new UsageError('--expect needs --approve or --reject')
-    const vault = openVault(dir, ctx)
+    const vault = await prepareVault(dir, ctx)
     try {
       const groups = codeGroups(await readStaged(vault.state))
       if (groups.length === 0) ctx.io.out('no plugin code awaiting approval')
@@ -54,7 +54,7 @@ export async function runCode(opts: CodeOptions, ctx: CommandContext): Promise<n
   let vault: OpenVault | null = null
   let engine: SyncEngine | null = null
   try {
-    vault = openVault(dir, ctx, release.held)
+    vault = await prepareVault(dir, ctx, release.held)
     await recoverVault(vault, release.held)
     const ids = [...new Set(named)].sort()
     const groups = codeGroups(await readStaged(vault.state))

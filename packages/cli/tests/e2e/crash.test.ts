@@ -5,7 +5,8 @@ import { runCli } from '../../src/cli.js'
 import { stateFolder } from '../../src/config.js'
 import type { CliIo } from '../../src/context.js'
 import { SqliteStateStore } from '../../src/sqliteState.js'
-import { buildEngine, fileIdFor, openVault, stateDbFile } from '../../src/vault.js'
+import { buildEngine, fileIdFor, prepareVault, recoverVault, stateDbFile } from '../../src/vault.js'
+import { acquireLock } from '../../src/lock.js'
 import {
   cleanupFolders,
   cli,
@@ -65,7 +66,9 @@ describe('a daemon killed between the upload and the commit answer', () => {
   it('replays the batch on the next run: one version, the file synced, the journal cleared', async () => {
     await write(a, 'note.md', 'typed once\n')
 
-    const vault = openVault(a, ctxFor())
+    const lock = await acquireLock(a),
+      vault = await prepareVault(a, ctxFor(), lock.held)
+    await recoverVault(vault, lock.held)
     try {
       const through = vault.client.commitRaw.bind(vault.client)
       vault.client.commitRaw = async (ops, key) => {
@@ -77,6 +80,7 @@ describe('a daemon killed between the upload and the commit answer', () => {
       await engine.stop()
     } finally {
       vault.close()
+      lock()
     }
     // What the crash left: a journal naming the batch, and a server that already has it.
     expect(await journalOf(a)).not.toBeNull()

@@ -12,7 +12,7 @@ import {
   heldLine,
   isUnauthorized,
   MIN_INTERVAL_SECONDS,
-  openVault,
+  prepareVault,
   rememberScope,
   rememberSummary,
   rememberVault,
@@ -100,7 +100,7 @@ export async function runRun(opts: RunOptions, ctx: CommandContext): Promise<num
   let terminalRevoked = false
   try {
     const log = openLog(dir)
-    vault = openVault(dir, ctx, lock.held)
+    vault = await prepareVault(dir, ctx, lock.held)
     if (wasRevoked(vault.state, personalRevocationBinding(vault.cfg))) {
       const line = 'stopping: device token was revoked or is no longer authorized'
       log.line(line)

@@ -9,7 +9,7 @@ import { codeHeldLine } from '../pluginCode.js'
 import {
   buildEngine,
   DEFAULT_INTERVAL_SECONDS,
-  openVault,
+  prepareVault,
   recoverVault,
   summarise,
   type OpenVault,
@@ -51,7 +51,7 @@ export async function runRestoreSince(
   let vault: OpenVault | null = null
   let engine: SyncEngine | null = null
   try {
-    vault = openVault(dir, ctx, release?.held)
+    vault = await prepareVault(dir, ctx, release?.held)
     if (release !== null) await recoverVault(vault, release.held)
     const items = (await vault.client.trash())
       .filter((item) => Date.parse(item.deleted_at) >= since)

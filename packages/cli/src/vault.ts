@@ -33,7 +33,13 @@ import {
 } from '@abele/sync-protocol'
 import { readConfig, stateFolder, type DaemonConfig } from './config.js'
 import { acquireLock, type Lock } from './lock.js'
-import { assertLocalSafety, EffectFence, personalStamp } from './externalSafety.js'
+import {
+  assertLocalSafety,
+  assertClaim,
+  EffectFence,
+  inspectProjectionInventory,
+  personalStamp,
+} from './externalSafety.js'
 import { CodeGroupDisk } from './codeGroupDisk.js'
 import { anyOf, SettlingFileSystem } from './growing.js'
 import { NodeFileSystem } from './nodeFs.js'
@@ -99,6 +105,30 @@ export function requireConfig(dir: string): DaemonConfig {
 
 /** Opens everything a command works through. The caller closes it, failure or not. */
 const publicationRecovery = new WeakMap<OpenVault, (disk: FileSystem) => Promise<void>>()
+const inspectedVaults = new WeakSet<OpenVault>()
+
+/** Async command composition: one bounded discovery pass before any ledger bootstrap. */
+export async function prepareVault(
+  dir: string,
+  ctx: CommandContext,
+  held?: () => boolean
+): Promise<OpenVault> {
+  requireServerUrl(requireConfig(dir).serverUrl)
+  const stamp = personalStamp(dir)
+  const guard = () => {
+    if (held) assertClaim(held)
+    if (personalStamp(dir) !== stamp)
+      throw new EngineError('lost', 'connection changed during recovery inspection')
+  }
+  guard()
+  assertLocalSafety(dir, false, true, held !== undefined, held === undefined)
+  await inspectProjectionInventory(dir, { guard, selective: requireConfig(dir).selective })
+  guard()
+  const vault = openVault(dir, ctx, held)
+  inspectedVaults.add(vault)
+  if (!held) vault.recovery?.activate()
+  return vault
+}
 
 export function openVault(dir: string, ctx: CommandContext, held?: () => boolean): OpenVault {
   if (held && !held()) throw new EngineError('lost', 'vault lock lost before recovery inspection')
@@ -122,17 +152,19 @@ export function openVault(dir: string, ctx: CommandContext, held?: () => boolean
   const ignore = anyOf([HIDDEN, ...(rules === null ? [] : [rules]), fs])
   let state: SqliteStateStore
   try {
-    state = SqliteStateStore.open(stateDbFile(dir), { effectGuard: () => {
-      if (!held && attached) fence.assertReady()
-      else fence.assertOwner()
-    }, effectOwner: fence.effectOwner })
+    state = SqliteStateStore.open(stateDbFile(dir), {
+      effectGuard: () => {
+        if (!held && attached) fence.assertReady()
+        else fence.assertOwner()
+      },
+      effectOwner: fence.effectOwner,
+    })
   } catch (error) {
     fence?.close()
     throw error
   }
   try {
     fence.attach(state, stateDbFile(dir))
-    if (!held) fence.recovery.activate()
     attached = true
     const owner = statedVault(state)
     if (owner !== null && owner !== cfg.vaultId) {
@@ -153,7 +185,8 @@ export function openVault(dir: string, ctx: CommandContext, held?: () => boolean
         excluded: (path, size) =>
           isExcluded(path, size, cfg.selective, SCRIPTS_FOLDER) || ignore.ignores(path),
       },
-      fence, recovery: fence.recovery,
+      fence,
+      recovery: fence.recovery,
       close: () => {
         fence?.close()
         state.close()
@@ -168,7 +201,8 @@ export function openVault(dir: string, ctx: CommandContext, held?: () => boolean
     })
     publicationRecovery.set(vault, async (disk) => {
       if (await state.getJournal()) {
-        const holds = new DeleteHolds(state), filed = await holds.decision()
+        const holds = new DeleteHolds(state),
+          filed = await holds.decision()
         if (filed !== null) await holds.resetTally()
         const confirmed = new Set(filed?.decision.kind === 'confirm' ? filed.decision.fileIds : [])
         await resumeJournal(replay, disk, state, {
@@ -176,7 +210,12 @@ export function openVault(dir: string, ctx: CommandContext, held?: () => boolean
           filter: vault.filter,
           defer: (path) => codePluginId(path) !== null,
           onDefer: (items) => new StagedChanges(state).stage(items),
-          onCommitted: (ops) => holds.tally(Date.now(), ops.filter((op) => op.op === 'delete' && !confirmed.has(op.file_id)).length, DEFAULT_DELETE_WINDOW_MS),
+          onCommitted: (ops) =>
+            holds.tally(
+              Date.now(),
+              ops.filter((op) => op.op === 'delete' && !confirmed.has(op.file_id)).length,
+              DEFAULT_DELETE_WINDOW_MS
+            ),
         })
       }
     })
@@ -194,6 +233,13 @@ export async function recoverVault(vault: OpenVault, held: () => boolean): Promi
   if (!held()) throw new EngineError('lost', 'vault lock lost before recovery')
   await vault.fence?.settlePredecessors()
   assertLocalSafety(vault.dir, false, true, true)
+  if (!inspectedVaults.has(vault)) {
+    await inspectProjectionInventory(vault.dir, {
+      guard: vault.fence?.assertOwner ?? (() => assertClaim(held)),
+      selective: vault.cfg.selective,
+    })
+    inspectedVaults.add(vault)
+  }
   const recoveryDisk = new NodeFileSystem(vault.dir, {
     skipHidden: true,
     effectGuard:

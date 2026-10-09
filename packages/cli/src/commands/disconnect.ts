@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto'
 import { readFileSync, rmSync } from 'node:fs'
 import { EngineError } from '@abele/sync-core'
-import { assertClaim, assertLocalSafety, guardedFetch } from '../externalSafety.js'
+import {
+  assertClaim,
+  assertLocalSafety,
+  inspectProjectionInventory,
+  guardedFetch,
+} from '../externalSafety.js'
 import { join } from 'node:path'
 import { serverUrlProblem } from '@abele/sync-protocol'
 import { stateFolder, type DaemonConfig } from '../config.js'
@@ -54,6 +59,7 @@ export async function runDisconnect(opts: DisconnectOptions, ctx: CommandContext
       if (configStamp() !== stamp)
         throw new EngineError('lost', 'connection changed during disconnect')
     }
+    await inspectProjectionInventory(dir, { guard: check, selective: cfg.selective })
     const told = await tellServer(cfg, { ...ctx, fetch: guardedFetch(ctx.fetch, check) })
     if (told !== null) {
       ctx.io.out(told)

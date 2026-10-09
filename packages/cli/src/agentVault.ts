@@ -33,7 +33,12 @@ import {
   writeOwnedJson,
   type LocalDescriptor,
 } from './config.js'
-import { activateBoundExternalFiles, assertLocalSafety, EffectFence } from './externalSafety.js'
+import {
+  activateBoundExternalFiles,
+  assertLocalSafety,
+  inspectProjectionInventory,
+  EffectFence,
+} from './externalSafety.js'
 import { NodeFileSystem } from './nodeFs.js'
 import { SqliteStateStore } from './sqliteState.js'
 import { acquireLock, type Lock } from './lock.js'
@@ -246,7 +251,11 @@ export async function openAgentVault(dir: string, ctx: CommandContext): Promise<
     const client = await agentClient(cfg, { ...ctx, fetch: fence.fetch(ctx.fetch) })
     fence.assertOwner()
     await fence.settlePredecessors()
-    raw = SqliteStateStore.open(file, { effectGuard: fence.assertOwner, effectOwner: fence.effectOwner })
+    await inspectProjectionInventory(root, { guard: fence.assertOwner })
+    raw = SqliteStateStore.open(file, {
+      effectGuard: fence.assertOwner,
+      effectOwner: fence.effectOwner,
+    })
     fence.attach(raw, file)
     const state = await ScopedState.open(raw, cfg.binding),
       disk = new NodeFileSystem(root, {

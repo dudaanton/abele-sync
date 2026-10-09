@@ -30,7 +30,9 @@ delete decisions, deferred apply/keep, publication and Restore. Scoped agents us
 the same inventory/ownership discipline and their existing tagged scoped journal;
 scoped heads and checkpoints remain exclusively in `ScopedState`. Unresolved
 scoped installation intents and orphan outbox material are conservative holds.
-No scoped credential is retried as a personal credential.
+No scoped credential is retried as a personal credential. Recovery replay also
+retains the normal recent-delete tally and confirmation semantics; recovered
+unconfirmed deletes count toward the shipped 15-minute mass-delete guard.
 
 Ownership is checked against the actual lock identity, not merely at the next
 heartbeat. Runtime effects recheck the connection binding, generation, credential
@@ -100,6 +102,13 @@ records/operations, projections (including renamed, malformed or oversized root
 markers), publication/owner holds, deferred approval, deletion decisions,
 installation intents, scoped conflicts/detach, and retained/staging directories.
 Known external state protects damaged projection paths through a connection hold.
+Projection discovery is one asynchronous pass per startup: it stats candidates
+first, respects selective exclusions and `.abele-sync-ignore`, skips files larger
+than 16 KiB without opening them, and caps raced reads at 16 KiB. A private
+`projection-index.json` caches exact path/size/mtime observations; damaged cache
+entries are re-inspected and known positive evidence remains a hold. The pass
+yields to timers so the lock heartbeat continues. An unknown oversized renamed
+projection cannot be identified from metadata alone under this read budget.
 
 Every nonempty external document and activation/switch marker remains a hold,
 including hydrated policy records, terminal operations, tombstones, pending
@@ -110,9 +119,13 @@ prove and persist readiness before relaxing these refusals.
 
 An ordinary pre-activation connection with an empty inventory retains its prior
 CLI behavior, including local forced forgetting of an unsafe/unreachable address
-without sending its token. Normal read-only status and the legacy beside-daemon
-commands remain compatible, but external evidence must never cause empty
-bootstrap or bypass a recovery hold.
+without sending its token. Normal read-only status and the legacy beside-daemon commands retain a binding/
+instance/recovery fence even without owning the daemon's lock. Every later HTTP
+request and SQLite decision write rechecks it after awaits. Normal pull intents
+carry the preparing lock identity; readonly commands may inspect a live local
+daemon's matching intent, but crash/foreign-owner intents remain holds. Empty
+scoped staging directories are pruned after publication and are not retained
+bytes; files and pending records still block retirement.
 
 ## Old direct-deletion boundary
 

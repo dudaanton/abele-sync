@@ -9,7 +9,7 @@ import { EXIT_LOCKED, EXIT_OK, UsageError, type CommandContext } from '../contex
 import { acquireLock, localDaemon, lockHolder, type Lock } from '../lock.js'
 import { promptLine } from '../prompt.js'
 import { openLog } from '../log.js'
-import { heldFingerprint, openVault, recoverVault, requireConfig, vaultDir } from '../vault.js'
+import { heldFingerprint, prepareVault, recoverVault, requireConfig, vaultDir } from '../vault.js'
 
 /**
  * The deletes the guard is holding, and the decision about them.
@@ -69,7 +69,7 @@ export async function runDeletes(opts: DeletesOptions, ctx: CommandContext): Pro
     }
   }
   try {
-    const vault = openVault(dir, ctx, release?.held)
+    const vault = await prepareVault(dir, ctx, release?.held)
     let count: number
     try {
       if (release) await recoverVault(vault, release.held)
@@ -106,7 +106,7 @@ export async function runDeletes(opts: DeletesOptions, ctx: CommandContext): Pro
 
 /** The held deletes, one path a line under a count. */
 async function list(dir: string, ctx: CommandContext): Promise<number> {
-  const vault = openVault(dir, ctx)
+  const vault = await prepareVault(dir, ctx)
   try {
     const held = await readHeldDeletes(vault.state)
     if (held.length === 0) {

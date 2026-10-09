@@ -18,7 +18,7 @@ import {
   humanBytes,
   isUnauthorized,
   lastSummary,
-  openVault,
+  prepareVault,
   REVOKED_HINT,
   vaultDir,
 } from '../vault.js'
@@ -44,7 +44,7 @@ const REFUSALS_SHOWN = 5
 
 export async function runStatus(opts: StatusOptions, ctx: CommandContext): Promise<number> {
   const dir = vaultDir(opts.dir)
-  const vault = openVault(dir, ctx)
+  const vault = await prepareVault(dir, ctx)
   try {
     if (wasRevoked(vault.state, personalRevocationBinding(vault.cfg))) {
       ctx.io.out('state      revoked')
