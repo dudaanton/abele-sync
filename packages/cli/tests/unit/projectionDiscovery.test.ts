@@ -2,7 +2,10 @@ import * as Fs from 'node:fs'
 import * as Fsp from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { selectiveDefaults } from '@abele/sync-core'
+import { scan, selectiveDefaults } from '@abele/sync-core'
+import { NodeFileSystem } from '../../src/nodeFs.js'
+import { SqliteStateStore } from '../../src/sqliteState.js'
+import { PROJECTION_SIZE_CAP } from '../../src/externalDiscovery.js'
 import { writeConfig, stateFolder } from '../../src/config.js'
 import { runRun } from '../../src/commands/run.js'
 import { acquireLock } from '../../src/lock.js'
@@ -79,7 +82,42 @@ const context = () => ({
   io: { out: () => {}, err: () => {} },
 })
 describe('projection inventory read budget', () => {
-  it('BUG: stat-first discovery never reads oversized or excluded JSON/canvas and runs one pass per start', async () => {
+  it('a marker only beyond the capped prefix is ordinary, with discovery never reading past the cap', async () => {
+    const path = 'renamed.bin',
+      file = join(dir, path)
+    await Fsp.writeFile(
+      file,
+      '{' + ' '.repeat(PROJECTION_SIZE_CAP + 1024) + '"format":"abele.external", broken'
+    )
+    const trace = traceReads(),
+      lock = await acquireLock(dir)
+    try {
+      await Safety.inspectProjectionInventory(dir, {
+        guard: () => {
+          if (!lock.held()) throw new Error('lost')
+        },
+      })
+      expect(trace.bytes.get(file)).toBe(PROJECTION_SIZE_CAP)
+      const index = JSON.parse(
+        Fs.readFileSync(join(stateFolder(dir), 'projection-index.json'), 'utf8')
+      ) as { entries: { path: string; marker: boolean }[] }
+      expect(index.entries.find((entry) => entry.path === path)?.marker).toBe(false)
+    } finally {
+      lock()
+    }
+    // Ordinary sync may read ordinary content; only projection discovery is prefix-bounded.
+    vi.restoreAllMocks()
+    const raw = SqliteStateStore.open(join(stateFolder(dir), 'state.db'))
+    try {
+      const result = await scan(new NodeFileSystem(dir), raw, { excluded: () => false })
+      expect(result.ops).toContainEqual(
+        expect.objectContaining({ op: 'create', path, size: Fs.statSync(file).size })
+      )
+    } finally {
+      raw.close()
+    }
+  })
+  it('stat-first discovery reads only capped prefixes, skips excluded files and runs one pass per start', async () => {
     await Fsp.mkdir(join(dir, 'Excluded'))
     await Fsp.mkdir(join(dir, 'Ignored'))
     await Fsp.writeFile(join(dir, 'Excluded', 'small.json'), '{"ordinary": true}')
@@ -93,12 +131,12 @@ describe('projection inventory read budget', () => {
     const trace = traceReads(),
       ctx = context()
     await expect(runRun({ dir, once: true }, ctx)).rejects.toMatchObject({ code: 'offline' })
-    expect(trace.bytes.get(large) ?? 0).toBe(0)
+    expect(trace.bytes.get(large)).toBe(PROJECTION_SIZE_CAP)
     expect(trace.bytes.get(join(dir, 'Excluded', 'small.json')) ?? 0).toBe(0)
     expect(trace.bytes.get(join(dir, 'Ignored', 'small.json')) ?? 0).toBe(0)
     expect(trace.bytes.get(small)).toBe(Fs.statSync(small).size)
   })
-  it('BUG: the durable index skips unchanged path/size/mtime, invalidates edits, and follows renamed small markers', async () => {
+  it('the durable index skips unchanged path/size/mtime, invalidates edits, and follows renamed small markers', async () => {
     const file = join(dir, 'ordinary.json')
     await Fsp.writeFile(file, '{"ordinary":true}')
     const first = traceReads()
@@ -116,13 +154,13 @@ describe('projection inventory read budget', () => {
     })
     expect(second.bytes.get(join(dir, 'renamed.bin'))).toBeGreaterThan(0)
   })
-  it('BUG: discovery yields during a long pass so the owning lock heartbeat remains alive', async () => {
+  it('discovery yields during a long pass so the owning lock heartbeat remains alive', async () => {
     for (let n = 0; n < 80; n++) await Fsp.writeFile(join(dir, `${n}.json`), '{"ordinary":true}')
     traceReads(true)
     const ctx = { ...context(), lockTiming: { heartbeatMs: 10, watchMs: 100 } }
     await expect(runRun({ dir, once: true }, ctx)).rejects.toMatchObject({ code: 'offline' })
   })
-  it('BUG: a raced candidate read is capped even if the file grows after stat', async () => {
+  it('a raced candidate read is capped even if the file grows after stat', async () => {
     const file = join(dir, 'raced.json')
     await Fsp.writeFile(file, '{}')
     const open = Fsp.open

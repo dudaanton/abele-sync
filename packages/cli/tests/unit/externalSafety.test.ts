@@ -152,17 +152,31 @@ describe('initial CLI recovery and lifecycle holds', () => {
     'external-activation.json',
     'external-connection-switch.json',
     'renamed-projection',
-    'late-malformed-projection',
+    'oversized-prefix-projection',
+    'oversized-damaged-prefix-projection',
+    'oversized-escaped-prefix-projection',
+    'oversized-truncated-prefix-projection',
   ] as const)
-    it(`BUG: missing ledger with ${evidence} cannot bootstrap or force re-enroll`, async () => {
+    it(`missing ledger with ${evidence} cannot bootstrap or force re-enroll`, async () => {
       if (evidence.endsWith('.json'))
         await writeFile(join(stateFolder(dir), evidence), '{retained evidence')
       else
         await writeFile(
           join(dir, 'renamed.bin'),
-          evidence === 'late-malformed-projection'
-            ? '{' + ' '.repeat(20 * 1024) + '"format": "abele.external", broken'
-            : JSON.stringify({ format: 'abele.external', schema: 1, fileId: 'foreign' })
+          evidence === 'oversized-prefix-projection'
+            ? JSON.stringify({
+                format: 'abele.external',
+                schema: 1,
+                fileId: 'foreign',
+                padding: 'x'.repeat(20 * 1024),
+              })
+            : evidence === 'oversized-damaged-prefix-projection'
+              ? '{"format":"abele.external", broken' + ' '.repeat(20 * 1024)
+              : evidence === 'oversized-escaped-prefix-projection'
+                ? '{"\\u0066ormat":"abele\\u002eexternal", broken' + ' '.repeat(20 * 1024)
+                : evidence === 'oversized-truncated-prefix-projection'
+                  ? '{"format":"abele.external' + ' '.repeat(20 * 1024)
+                  : JSON.stringify({ format: 'abele.external', schema: 1, fileId: 'foreign' })
         )
       const ctx = context()
       await expect(commands.run(ctx)).rejects.toMatchObject({ reason: 'recovery-required' })

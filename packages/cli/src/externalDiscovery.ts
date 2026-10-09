@@ -64,20 +64,43 @@ function marker(bytes: Uint8Array): boolean {
   try {
     return (JSON.parse(text) as { format?: unknown }).format === 'abele.external'
   } catch {
-    // Decode complete quoted tokens so escaped tags in malformed small JSON remain held.
-    const tokens = text.match(/"(?:\\.|[^"\\])*"\s*:\s*"(?:\\.|[^"\\])*"/g) ?? []
-    return tokens.some((token) => {
-      const match = /^("(?:\\.|[^"\\])*")\s*:\s*("(?:\\.|[^"\\])*")$/.exec(token)
-      try {
-        return (
-          !!match &&
-          JSON.parse(match[1]!) === 'format' &&
-          JSON.parse(match[2]!) === 'abele.external'
-        )
-      } catch {
-        return false
+    // As in the plugin, recognition decodes JSON spellings, not repaired schema.
+    // A damaged/truncated marker in the bounded prefix can only establish a hold.
+    const token = (start: number): { value: string | null; end: number } => {
+      for (let end = start + 1; end < text.length; end++) {
+        if (text[end] === '\\') {
+          end++
+          continue
+        }
+        if (text[end] !== '"') continue
+        try {
+          const value: unknown = end - start <= 86 ? JSON.parse(text.slice(start, end + 1)) : null
+          return { value: typeof value === 'string' ? value : null, end: end + 1 }
+        } catch {
+          return { value: null, end: end + 1 }
+        }
       }
-    })
+      return { value: null, end: text.length }
+    }
+    for (let at = 0; at < text.length; at++) {
+      if (text[at] !== '"') continue
+      const key = token(at)
+      at = key.end - 1
+      let colon = key.end
+      while (colon < text.length && /\s/.test(text[colon]!)) colon++
+      if (text[colon] !== ':') continue
+      let valueAt = colon + 1
+      while (valueAt < text.length && /\s/.test(text[valueAt]!)) valueAt++
+      if (text[valueAt] !== '"') continue
+      const value = token(valueAt)
+      if (
+        (key.value === 'format' && (value.value === 'abele.external' || value.value === null)) ||
+        (key.value === null && value.value === 'abele.external')
+      )
+        return true
+      at = value.end - 1
+    }
+    return false
   }
 }
 function configuredSelective(dir: string): SelectiveSettings {
@@ -91,7 +114,8 @@ function configuredSelective(dir: string): SelectiveSettings {
     return selectiveDefaults()
   }
 }
-/** One async, stat-first pass. No read above the cap; raced reads are capped too.
+/** One async, stat-first pass. Only the first capped prefix is ever inspected,
+ * regardless of total file size; raced reads are capped too.
  * Path/size/mtime index entries are reusable only for that exact observed tuple.
  * Positive evidence survives edits/exclusion until explicit recovery resolves it.
  */
@@ -151,7 +175,6 @@ export async function inspectProjectionInventory(
       if (
         !before.isFile() ||
         before.isSymbolicLink() ||
-        before.size > PROJECTION_SIZE_CAP ||
         (!control && isExcluded(path, before.size, selective, 'Scripts'))
       )
         continue
@@ -165,13 +188,7 @@ export async function inspectProjectionInventory(
         stable = false
       try {
         const opened = await handle.stat()
-        if (
-          !opened.isFile() ||
-          opened.size > PROJECTION_SIZE_CAP ||
-          opened.dev !== before.dev ||
-          opened.ino !== before.ino
-        )
-          continue
+        if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) continue
         const bytes = new Uint8Array(PROJECTION_SIZE_CAP)
         guard()
         const read = await handle.read(bytes, 0, bytes.length, 0)

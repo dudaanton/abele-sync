@@ -102,13 +102,26 @@ records/operations, projections (including renamed, malformed or oversized root
 markers), publication/owner holds, deferred approval, deletion decisions,
 installation intents, scoped conflicts/detach, and retained/staging directories.
 Known external state protects damaged projection paths through a connection hold.
-Projection discovery is one asynchronous pass per startup: it stats candidates
-first, respects selective exclusions and `.abele-sync-ignore`, skips files larger
-than 16 KiB without opening them, and caps raced reads at 16 KiB. A private
-`projection-index.json` caches exact path/size/mtime observations; damaged cache
-entries are re-inspected and known positive evidence remains a hold. The pass
-yields to timers so the lock heartbeat continues. An unknown oversized renamed
-projection cannot be identified from metadata alone under this read budget.
+Projection discovery follows the same prefix-candidate contract as the plugin.
+A projection we write is far below `MAX_PROJECTION_BYTES` (16 KiB) and starts with
+its marker. Discovery is one asynchronous, stat-first pass per startup, respects
+selective exclusions and `.abele-sync-ignore`, and reads at most the first 16 KiB
+of each eligible file **regardless of its total size**. A renamed oversized file
+with a marker in that prefix remains a recovery hold, including escaped JSON
+key/value spellings and damaged or truncated JSON; padding after the marker does
+not authorize bootstrap or force re-enrollment.
+
+A marker appearing only beyond the prefix cap does not make an unknown file a
+projection: it is treated as ordinary, and discovery never reads beyond the cap.
+If someone padded a projection with more than 16 KiB before its marker and also
+lost the ledger, that padded file can be synced as an ordinary file. Discovery
+does not delete any original in this case. Existing external records, activation
+markers and known positive evidence remain independent holds, even if projection
+bytes are damaged.
+
+A private `projection-index.json` caches exact path/size/mtime observations;
+damaged cache entries are re-inspected and known positive evidence remains a
+hold. The pass yields to timers so the lock heartbeat continues.
 
 Every nonempty external document and activation/switch marker remains a hold,
 including hydrated policy records, terminal operations, tombstones, pending
