@@ -23,6 +23,8 @@ interface Entry {
 export interface ProjectionInventoryOptions {
   guard?: () => void
   selective?: SelectiveSettings
+  /** Validated owned paths only; the lifecycle host checks their recorded digest. */
+  ownedProjections?: ReadonlySet<string>
 }
 function held(path: string): never {
   const error = new ExternalStateError('recovery-required')
@@ -50,8 +52,8 @@ function entries(dir: string): Entry[] {
     return []
   } // An index is an optimization, never permission to skip an invalid record.
 }
-export function assertIndexedProjectionSafety(dir: string): void {
-  const marker = entries(dir).find((entry) => entry.marker)
+export function assertIndexedProjectionSafety(dir: string, owned?: ReadonlySet<string>): void {
+  const marker = entries(dir).find((entry) => entry.marker && !owned?.has(entry.path))
   if (marker) held(marker.path)
 }
 /** Root marker only; no adoption/schema/placement permission is inferred. */
@@ -126,7 +128,7 @@ export async function inspectProjectionInventory(
   const guard = options.guard ?? (() => {}),
     file = join(stateFolder(dir), INDEX_FILE)
   guard()
-  assertIndexedProjectionSafety(dir)
+  assertIndexedProjectionSafety(dir, options.ownedProjections)
   const previous = new Map(entries(dir).map((entry) => [entry.path, entry])),
     next: Entry[] = []
   const selective = options.selective ?? configuredSelective(dir)
@@ -204,7 +206,7 @@ export async function inspectProjectionInventory(
       } finally {
         await handle.close()
       }
-      if (found) evidence ??= path
+      if (found && !options.ownedProjections?.has(path)) evidence ??= path
       if (stable || found)
         next.push({ path, size: before.size, mtime: before.mtimeMs, marker: found })
     }

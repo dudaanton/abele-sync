@@ -2,7 +2,13 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createScopedClient, ExternalState, ScopedState } from '@abele/sync-core'
+import {
+  createScopedClient,
+  ExternalState,
+  ScopedState,
+  sha256,
+  encodeText,
+} from '@abele/sync-core'
 import * as Agent from '../../src/agentVault.js'
 import {
   writeAgentConfig,
@@ -26,7 +32,7 @@ async function fixture(withDependency = true) {
   const dir = await mkdtemp(join(scratch, 'agent-hold-'))
   roots.push(dir)
   const token = 'absk_' + 'a'.repeat(43),
-    fetch = vi.fn(async () => {
+    fetch = vi.fn<typeof globalThis.fetch>(async () => {
       throw new Error('must not reach network before recovery')
     })
   const ctx: CommandContext = {
@@ -91,6 +97,102 @@ async function fixture(withDependency = true) {
   return { dir, ctx, fetch }
 }
 describe('shared scoped/agent lifecycle inventory', () => {
+  it('materializes scoped pending bytes and updates existing known state before retiring only that key', async () => {
+    const f = await fixture(false),
+      cfg = readAgentConfig(f.dir),
+      raw = SqliteStateStore.open(agentDbFile(f.dir))
+    const bytes = encodeText('scoped attachment'),
+      sha = await sha256(bytes)
+    const base = {
+      fileId: 'file',
+      versionId: 'version',
+      path: 'Agents/a.bin',
+      sha,
+      size: bytes.length,
+      mtime: 1,
+    }
+    const scoped = await ScopedState.open(raw, cfg.binding)
+    await scoped.putKnown({
+      file_id: 'file',
+      version_id: 'version',
+      path: base.path,
+      sha,
+      size: bytes.length,
+      mtime: 1,
+      state: 'known_not_materialized',
+      dirty: false,
+    })
+    const binding = Agent.agentExternalBinding(cfg)
+    const external = await ExternalState.open(raw, 'ledger', binding)
+    await external.commit({
+      expectedRevision: 0,
+      files: [
+        {
+          expectedRevision: null,
+          next: {
+            schema: 1,
+            ledgerId: 'ledger',
+            binding,
+            fileId: 'file',
+            representation: 'pending-download',
+            preference: 'on-demand',
+            pinned: false,
+            projectionPath: null,
+            projectionSha: null,
+            localRevision: 0,
+            pendingOperationId: null,
+            availability: 'active',
+            blockingReason: null,
+            lastProvenLocalBase: base,
+            retained: [],
+          },
+        },
+      ],
+    })
+    raw.close()
+    f.fetch.mockImplementation(async (input, init) => {
+      const path = new URL(String(input)).pathname
+      expect(path).not.toMatch(/^\/v1\/(vaults|devices)/)
+      if (init?.method === 'DELETE') {
+        expect(readFileSync(join(f.dir, base.path))).toEqual(Buffer.from(bytes))
+        return Response.json({ revoked: true })
+      }
+      if (path.endsWith('/capabilities'))
+        return Response.json({
+          extension_version: 1,
+          projection_schema: 1,
+          personal: true,
+          scoped: true,
+          verification: {
+            live_head: true,
+            sha256: true,
+            actual_size: true,
+            authorization_rechecked: true,
+          },
+          max_file_size: 200 * 1024 * 1024,
+        })
+      if (path.endsWith('/head'))
+        return Response.json({
+          file_id: 'file',
+          version_id: 'version',
+          path: base.path,
+          kind: 'attachment',
+          sha,
+          size: bytes.length,
+          mtime: 1,
+        })
+      if (path.endsWith('/external/verify'))
+        return Response.json({ verified: true, file_id: 'file', ...JSON.parse(String(init?.body)) })
+      if (path.endsWith('/versions/version')) return new Response(Buffer.from(bytes))
+      throw new Error(`unexpected scoped request ${path}`)
+    })
+    expect(await runAgentDisconnect({ dir: f.dir, force: true }, f.ctx)).toBe(0)
+    expect(existsSync(agentConfigFile(f.dir))).toBe(false)
+    const reopened = SqliteStateStore.open(agentDbFile(f.dir)),
+      final = await ScopedState.open(reopened, cfg.binding)
+    expect((await final.getKnown('file'))?.state).toBe('materialized')
+    reopened.close()
+  })
   it('BUG: agent activation uses the same durable-instance marker and nested config fence, never a personal descriptor', async () => {
     const f = await fixture(false),
       raw = SqliteStateStore.open(agentDbFile(f.dir))
@@ -111,6 +213,18 @@ describe('shared scoped/agent lifecycle inventory', () => {
       raw.close()
       lock()
     }
+  })
+  it('refuses a foreign scoped root before materialization or key retirement', async () => {
+    const f = await fixture(false),
+      raw = SqliteStateStore.open(agentDbFile(f.dir))
+    const root = JSON.parse(raw.getMeta('scoped-v4-state')!)
+    root.binding.grant_id = 'foreign-grant'
+    raw.setMeta('scoped-v4-state', JSON.stringify(root))
+    raw.close()
+    const before = readFileSync(agentConfigFile(f.dir))
+    await expect(runAgentDisconnect({ dir: f.dir, force: true }, f.ctx)).rejects.toThrow()
+    expect(f.fetch).not.toHaveBeenCalled()
+    expect(readFileSync(agentConfigFile(f.dir))).toEqual(before)
   })
   it('BUG: a live scoped runtime rechecks actual credential bytes, not only a declared fingerprint', async () => {
     const f = await fixture(false),

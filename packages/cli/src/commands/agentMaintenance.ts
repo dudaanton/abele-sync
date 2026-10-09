@@ -1,5 +1,19 @@
-import { rmSync } from 'node:fs'
-import { assertLocalSafety } from '../externalSafety.js'
+import { rmSync, readFileSync, existsSync, lstatSync } from 'node:fs'
+import {
+  assertClaim,
+  assertLocalSafety,
+  guardedFetch,
+  inspectProjectionInventory,
+} from '../externalSafety.js'
+import { SqliteStateStore } from '../sqliteState.js'
+import { acquireLock } from '../lock.js'
+import { retirePreparedConnection, resumeConnectionRetirement } from '../connectionRetirement.js'
+import { externalLifecycleBinding } from '../externalLifecycle.js'
+import {
+  assertPreparedInventory,
+  materializeForDisconnect,
+  validateLifecycleLedger,
+} from '../externalMaterialization.js'
 import { caseKey, normalisePath } from '@abele/sync-protocol'
 import { EngineError, pushScoped, sha256, encodeText, type ScopedKnownFile } from '@abele/sync-core'
 import {
@@ -8,6 +22,12 @@ import {
   agentConfigFile,
   validateAgent,
   type AgentVault,
+  agentDirectory,
+  agentExternalBinding,
+  agentClient,
+  readAgentConfig,
+  readAgentDescriptor,
+  agentDbFile,
 } from '../agentVault.js'
 import { EXIT_OK, EXIT_FAILED, EXIT_LOCKED, UsageError, type CommandContext } from '../context.js'
 export interface AgentMaintenanceOptions {
@@ -182,25 +202,109 @@ export function runAgentDeletes(opts: AgentMaintenanceOptions, ctx: CommandConte
     return result.acknowledged ? EXIT_FAILED : EXIT_OK
   })
 }
-export function runAgentDisconnect(opts: AgentMaintenanceOptions, ctx: CommandContext) {
-  return locked(opts.dir, ctx, async (vault) => {
-    assertLocalSafety(vault.dir, true)
+export async function runAgentDisconnect(opts: AgentMaintenanceOptions, ctx: CommandContext) {
+  const dir = agentDirectory(opts.dir)
+  let lock
+  try {
+    lock = await acquireLock(dir, ctx.lockTiming)
+  } catch (error) {
+    if (error instanceof EngineError && error.code === 'conflict') {
+      ctx.io.err(error.message)
+      return EXIT_LOCKED
+    }
+    throw error
+  }
+  let raw: SqliteStateStore | undefined
+  try {
+    if (await resumeConnectionRetirement(dir, () => assertClaim(lock.held), 'agent.sqlite')) {
+      ctx.io.out('completed the recorded scoped disconnect cleanup; kept local data and ledger')
+      return EXIT_OK
+    }
+    const cfg = readAgentConfig(dir),
+      stamp = readFileSync(agentConfigFile(dir), 'utf8')
+    const ledgerFile = agentDbFile(dir)
+    if (
+      !existsSync(ledgerFile) ||
+      !lstatSync(ledgerFile).isFile() ||
+      lstatSync(ledgerFile).isSymbolicLink()
+    )
+      throw new EngineError('lost', 'agent ledger missing or unsafe')
+    let instance: string | null = null
+    const check = () => {
+      assertClaim(lock.held)
+      if (raw && (!raw.isLedgerFile(ledgerFile) || raw.readExternalInstanceId() !== instance))
+        throw new EngineError('lost', 'agent physical ledger changed during retirement')
+      if (readFileSync(agentConfigFile(dir), 'utf8') !== stamp)
+        throw new EngineError('lost', 'agent connection changed during retirement')
+    }
+    check()
+    const binding = agentExternalBinding(cfg, readAgentDescriptor(dir)?.binding.generation)
+    const external = externalLifecycleBinding(dir, 'agent.sqlite')
+    if (!external) assertLocalSafety(dir, true)
+    raw = SqliteStateStore.open(ledgerFile, { effectGuard: check })
+    instance = raw.readExternalInstanceId()
+    await validateLifecycleLedger(dir, 'agent.sqlite', binding, raw)
+    check()
+    if (instance === null) instance = raw.getExternalInstanceId()
+    if (!external) await inspectProjectionInventory(dir, { guard: check })
+    const clientFor = (effectGuard: () => void) =>
+      agentClient(cfg, {
+        ...ctx,
+        fetch: guardedFetch(ctx.fetch, () => {
+          check()
+          effectGuard()
+        }),
+      })
+    const client = await clientFor(check)
+    if (external)
+      await materializeForDisconnect(
+        dir,
+        'agent.sqlite',
+        binding,
+        {
+          scriptsFolder: 'Scripts',
+          verify: async (base, effectGuard) => {
+            const client = await clientFor(effectGuard)
+            const head = await client.head(base.fileId)
+            if (head.kind !== 'attachment')
+              throw new UsageError('approval-required: not a scoped attachment')
+            await client.verifyExternalFile(base.fileId, {
+              version_id: base.versionId,
+              path: base.path,
+              sha: base.sha,
+              size: base.size,
+            })
+          },
+          download: async (base, effectGuard) =>
+            (await clientFor(effectGuard)).version(base.fileId, base.versionId),
+        },
+        check
+      )
+    const prepared = () => {
+      check()
+      if (external) assertPreparedInventory(dir, 'agent.sqlite', [binding])
+      else assertLocalSafety(dir, true)
+    }
+    prepared()
     let retired = false
     try {
-      await vault.client.revokeSelf()
+      await client.revokeSelf()
       retired = true
     } catch (error) {
       if (!opts.force) throw error
     }
-    vault.fence.assertReady()
-    assertLocalSafety(vault.dir, true)
-    if (!vault.lock.held()) throw new EngineError('lost', 'agent disconnect claim lost')
-    rmSync(agentConfigFile(vault.dir))
+    prepared()
+    if (external)
+      await retirePreparedConnection(dir, 'agent.sqlite', binding, () => assertClaim(lock.held))
+    else rmSync(agentConfigFile(dir))
     ctx.io.out(
       retired
-        ? 'retired only this scoped credential; kept local data, ledger and pending work'
+        ? 'retired only this scoped credential; kept local data and ledger'
         : 'forgot the credential locally; revoke its key from owner settings; local data and ledger retained'
     )
     return EXIT_OK
-  })
+  } finally {
+    raw?.close()
+    lock()
+  }
 }

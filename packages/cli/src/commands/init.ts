@@ -21,6 +21,8 @@ import { joinPrefer, parsePrefer } from '../join.js'
 import { promptPassword } from '../password.js'
 import { SqliteStateStore } from '../sqliteState.js'
 import { replaceConnection, resumeConnectionSwitch } from '../connectionSwitch.js'
+import { preparePersonalRetirement } from '../externalLifecycle.js'
+import { resumeConnectionRetirement } from '../connectionRetirement.js'
 import {
   leavingClient,
   lockVault,
@@ -104,7 +106,11 @@ export async function runInit(opts: InitOptions, ctx: CommandContext): Promise<n
       ctx.io.out('completed the recorded connection switch; no new device was enrolled')
       return EXIT_OK
     }
-    assertLocalSafety(dir, true)
+    if (opts.force === true)
+      await resumeConnectionRetirement(dir, () => assertClaim(release.held), 'state.db')
+    const inventory = await preparePersonalRetirement(dir, previousConfig(dir), ctx, () =>
+      assertClaim(release.held)
+    )
     const stamp = () =>
       existsSync(configFile)
         ? createHash('sha256').update(readFileSync(configFile)).digest('hex')
@@ -112,7 +118,7 @@ export async function runInit(opts: InitOptions, ctx: CommandContext): Promise<n
     let expected = stamp()
     const check = () => {
       assertClaim(release.held)
-      assertLocalSafety(dir, true)
+      inventory()
       if (stamp() !== expected)
         throw new EngineError('lost', 'connection changed during enrollment')
     }
@@ -147,7 +153,11 @@ async function setUp(
   check()
   const replaced = opts.force === true ? previousConfig(dir) : null
   const previous =
-    replaced !== null && normalizeServerUrl(replaced.serverUrl) !== normalizeServerUrl(opts.server)
+    (replaced !== null &&
+      normalizeServerUrl(replaced.serverUrl) !== normalizeServerUrl(opts.server)) ||
+    (replaced === null &&
+      retiredEndpoint(dir) !== null &&
+      retiredEndpoint(dir) !== normalizeServerUrl(opts.server))
       ? null
       : previousVault(dir)
   const password = await passwordFor(opts, ctx)
@@ -300,6 +310,8 @@ function previousVault(dir: string): string | null {
       try {
         const owner = statedVault(state)
         if (owner !== null) return owner
+        const retired = state.getMeta('retired-connection-binding')
+        if (retired !== null) return (JSON.parse(retired) as { vaultId: string }).vaultId
       } finally {
         state.close()
       }
@@ -311,6 +323,20 @@ function previousVault(dir: string): string | null {
     return readConfig(dir)?.vaultId ?? null
   } catch {
     return null
+  }
+}
+
+function retiredEndpoint(dir: string): string | null {
+  const file = stateDbFile(dir)
+  if (!existsSync(file)) return null
+  const raw = SqliteStateStore.openReadOnlySnapshot(file)
+  try {
+    const value = raw.getMeta('retired-connection-binding')
+    return value === null
+      ? null
+      : normalizeServerUrl((JSON.parse(value) as { endpoint: string }).endpoint)
+  } finally {
+    raw.close()
   }
 }
 

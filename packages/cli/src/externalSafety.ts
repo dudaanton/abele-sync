@@ -87,13 +87,23 @@ function hasRetainedFiles(path: string): boolean {
   return readdirSync(path).some((name) => hasRetainedFiles(join(path, name)))
 }
 
+/** Trusted lifecycle caller must first validate the bound descriptor and file digests. */
+export interface LifecycleInventory {
+  ledgerFile: 'state.db' | 'agent.sqlite'
+  binding: ConnectionBinding
+  projections: ReadonlySet<string>
+  materializing?: ReadonlySet<string>
+  retiring?: boolean
+  staging?: ReadonlySet<string>
+}
 export function assertLocalSafety(
   dir: string,
   retirement = false,
   scan = true,
   allowPullRecovery = false,
   observer = false,
-  recoveringSwitch = false
+  recoveringSwitch = false,
+  lifecycle?: LifecycleInventory
 ): void {
   const folder = stateFolder(dir)
   const scopedSources = new Set<string>()
@@ -104,7 +114,8 @@ export function assertLocalSafety(
     )
       hold('unsafe state directory')
     for (const name of [
-      ACTIVATION_FILE,
+      ...(lifecycle ? [] : [ACTIVATION_FILE]),
+      ...(!lifecycle?.retiring ? ['external-retirement.json'] : []),
       ...(recoveringSwitch ? [] : [SWITCH_FILE, 'external-switch-credentials.json']),
     ])
       if (existsSync(join(folder, name))) hold(`retained ${name}`)
@@ -118,7 +129,7 @@ export function assertLocalSafety(
         } catch {
           continue
         } // Legacy force recovery without external evidence remains supported.
-        if (raw && typeof raw === 'object' && 'schema' in raw)
+        if (raw && typeof raw === 'object' && 'schema' in raw && !lifecycle)
           hold(`versioned ${config} requires bound migration recovery`)
       }
     }
@@ -133,9 +144,16 @@ export function assertLocalSafety(
           key: string
           value: string
         }[]) {
+          if (row.key === 'daemon:external-disconnect-ready' && !lifecycle)
+            hold('retained disconnect preparation receipt')
           if (row.key === 'daemon:external-files') {
             const doc = decodeExternalDocument(row.value)
-            if (doc.files.length || doc.operations.length)
+            if (
+              lifecycle &&
+              (name !== lifecycle.ledgerFile || !sameConnection(doc.binding, lifecycle.binding))
+            )
+              hold('foreign lifecycle inventory')
+            if (!lifecycle && (doc.files.length || doc.operations.length))
               hold(
                 `nonempty external inventory in ${name}; materialization is required before retirement: ` +
                   doc.files
@@ -146,9 +164,9 @@ export function assertLocalSafety(
                     )
                     .join('; ') +
                   (doc.operations.length ? '; unresolved external operations' : '') +
-                  '; this CLI has no safe disconnect materializer; resolve the dependencies with the bound connection'
+                  '; use explicit disconnect preparation with the bound connection; force cannot skip these dependencies'
               )
-            if (name === 'state.db' && existsSync(join(folder, 'config.json'))) {
+            if (!lifecycle && name === 'state.db' && existsSync(join(folder, 'config.json'))) {
               const cfg = readConfig(dir)
               if (cfg && !sameConnection(doc.binding, personalBinding(cfg)))
                 hold('foreign external binding')
@@ -247,13 +265,27 @@ export function assertLocalSafety(
             const known = ScopedKnownFileSchema.parse(JSON.parse(row.value))
             if (
               retirement &&
-              (known.dirty || ['detached', 'held', 'known_not_materialized'].includes(known.state))
+              (known.dirty ||
+                ['detached', 'held'].includes(known.state) ||
+                (known.state === 'known_not_materialized' &&
+                  !lifecycle?.materializing?.has(known.file_id)))
             )
               hold('unresolved scoped placement/conflict')
           }
         }
       } finally {
         db.close()
+      }
+    }
+    const disconnectStaging = join(folder, 'disconnect-staging')
+    if (existsSync(disconnectStaging)) {
+      const stat = lstatSync(disconnectStaging)
+      if (!stat.isDirectory() || stat.isSymbolicLink()) hold('unsafe disconnect staging')
+      for (const name of readdirSync(disconnectStaging)) {
+        const path = `.abele-sync/disconnect-staging/${name}`,
+          child = lstatSync(join(dir, path))
+        if (!child.isFile() || child.isSymbolicLink() || !lifecycle?.staging?.has(path))
+          hold('orphan disconnect staging artifact')
       }
     }
     if (scan && existsSync(join(folder, 'scoped-outbox'))) {
@@ -278,7 +310,7 @@ export function assertLocalSafety(
         )
           hold(`retained ${name} artifacts`)
       }
-    assertIndexedProjectionSafety(dir)
+    assertIndexedProjectionSafety(dir, lifecycle?.projections)
   } catch (cause) {
     if (cause instanceof ExternalStateError) throw cause
     hold('unreadable ledger or local recovery evidence')

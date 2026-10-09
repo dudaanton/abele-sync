@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto'
 import { readFileSync, rmSync } from 'node:fs'
 import { EngineError } from '@abele/sync-core'
+import { preparePersonalRetirement, externalLifecycleBinding } from '../externalLifecycle.js'
+import { retirePreparedConnection, resumeConnectionRetirement } from '../connectionRetirement.js'
 import {
   assertClaim,
   assertLocalSafety,
@@ -38,14 +40,18 @@ export interface DisconnectOptions {
 
 export async function runDisconnect(opts: DisconnectOptions, ctx: CommandContext): Promise<number> {
   const dir = vaultDir(opts.dir)
-  let cfg = requireConfig(dir)
-
   const release = await lockVault(dir, ctx, 'stop it before disconnecting')
   if (release === null) return EXIT_LOCKED
 
   try {
-    cfg = requireConfig(dir)
-    assertLocalSafety(dir, true)
+    if (await resumeConnectionRetirement(dir, () => assertClaim(release.held), 'state.db')) {
+      ctx.io.out('completed the recorded disconnect cleanup; kept local data and ledger')
+      return EXIT_OK
+    }
+    const cfg = requireConfig(dir)
+    const inventory = await preparePersonalRetirement(dir, cfg, ctx, () =>
+      assertClaim(release.held)
+    )
     // A legacy unsafe URL can still be forgotten locally when the inventory is
     // clear; its token must never be sent merely to compute/validate a binding.
     const configStamp = () =>
@@ -55,7 +61,7 @@ export async function runDisconnect(opts: DisconnectOptions, ctx: CommandContext
     const stamp = configStamp()
     const check = () => {
       assertClaim(release.held)
-      assertLocalSafety(dir, true)
+      inventory()
       if (configStamp() !== stamp)
         throw new EngineError('lost', 'connection changed during disconnect')
     }
@@ -76,7 +82,10 @@ export async function runDisconnect(opts: DisconnectOptions, ctx: CommandContext
       return EXIT_FAILED
     }
     check()
-    forgetConfig(dir)
+    const external = externalLifecycleBinding(dir, 'state.db')
+    if (external)
+      await retirePreparedConnection(dir, 'state.db', external, () => assertClaim(release.held))
+    else forgetConfig(dir)
     ctx.io.out(`removed ${join(stateFolder(dir), 'config.json')}; kept state.db`)
     return EXIT_OK
   } finally {
