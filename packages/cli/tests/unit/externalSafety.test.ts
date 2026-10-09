@@ -48,7 +48,7 @@ function context(): CommandContext {
 beforeEach(async () => {
   const scratch = resolve(import.meta.dirname, '../../../../.scratch')
   await mkdir(scratch, { recursive: true })
-  dir = await mkdtemp(join(scratch, 'task3-cli-'))
+  dir = await mkdtemp(join(scratch, 'external-safety-'))
   writeConfig(dir, cfg)
 })
 afterEach(async () => {

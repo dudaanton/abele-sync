@@ -258,7 +258,7 @@ To adopt explicit readiness:
    clients must remain fenced even if the plugin continues using its direct
    client rather than the new engine Restore methods.
 5. Vendor committed aligned core/protocol inputs and update provenance/fixtures
-   explicitly. This work did not edit the plugin worktree or its archives.
+   explicitly.
 
 ## Public exclusive scheduler port for attachment operations
 
@@ -354,8 +354,6 @@ All scoped pull/push/creation/lifecycle callers must continue using that same
 checks are preserved, not replaced with personal engine semantics. Bind the
 facade to the existing host/runtime, never silently create a fresh runtime after
 retirement. The scoped `sync` prerequisite likewise runs before queue entry.
-This core change and its queue-adapter tests do not edit or execute the plugin
-worktree, Obsidian or the phone.
 
 ## Verification
 
@@ -371,4 +369,4 @@ lost COMMIT acknowledgement, stale-runtime/long-await native and multipart
 checks, startup/mutation/lifecycle holds, preparing migration recovery and the
 pinned old-reader/direct-deletion demonstration. Existing real daemon SIGKILL
 and all-or-nothing code approval tests remain in place. Application restart is
-covered; arbitrary power-loss survival and phone execution are not claimed here.
+covered; arbitrary power-loss survival and mobile hosts are not covered.

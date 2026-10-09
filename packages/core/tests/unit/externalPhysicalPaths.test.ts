@@ -67,7 +67,7 @@ const artifact = (path: string) => ({
 })
 
 describe('raw physical UTF-8 bounds in canonical external state', () => {
-  // Mirrored from plugin commit 13b6e8d6: normalization cannot make a physical
+  // Normalization cannot make a physical
   // filename fit a filesystem component limit that its actual spelling exceeds.
   it('BUG: rejects an overlong physical spelling in the canonical external record schema, not just its NFC form', () => {
     const physical = 'Media/' + 'e\u0301'.repeat(90) + '.jpg.abele-ref'

@@ -24,7 +24,7 @@ const ctx = (
 beforeEach(async () => {
   const scratch = resolve(import.meta.dirname, '../../../../.scratch')
   await mkdir(scratch, { recursive: true })
-  dir = await mkdtemp(join(scratch, 'task3-runtime-'))
+  dir = await mkdtemp(join(scratch, 'external-runtime-'))
   writeConfig(dir, cfg)
 })
 afterEach(async () => {
