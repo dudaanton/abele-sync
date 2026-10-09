@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createScopedClient, ExternalState, ScopedState } from '@abele/sync-core'
@@ -9,6 +9,7 @@ import {
   agentDbFile,
   agentConfigFile,
   readAgentConfig,
+  openAgentVault,
 } from '../../src/agentVault.js'
 import { acquireLock } from '../../src/lock.js'
 import { runAgentDisconnect, runAgentRestore } from '../../src/commands/agentMaintenance.js'
@@ -109,6 +110,19 @@ describe('shared scoped/agent lifecycle inventory', () => {
     } finally {
       raw.close()
       lock()
+    }
+  })
+  it('BUG: a live scoped runtime rechecks actual credential bytes, not only a declared fingerprint', async () => {
+    const f = await fixture(false),
+      vault = await openAgentVault(f.dir, f.ctx)
+    try {
+      const cfg = JSON.parse(readFileSync(agentConfigFile(f.dir), 'utf8'))
+      cfg.token = 'absk_' + 'b'.repeat(43)
+      writeFileSync(agentConfigFile(f.dir), JSON.stringify(cfg))
+      await expect(vault.client.state()).rejects.toMatchObject({ code: 'lost' })
+      expect(f.fetch).not.toHaveBeenCalled()
+    } finally {
+      vault.close()
     }
   })
   for (const verb of ['run', 'restore', 'disconnect', 'setup'] as const)

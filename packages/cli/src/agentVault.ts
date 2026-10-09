@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import {
   existsSync,
   lstatSync,
@@ -160,10 +161,12 @@ export async function activateAgentExternalFiles(
   )
 }
 function agentStamp(dir: string): string {
-  return JSON.stringify({
-    binding: readAgentConfig(dir).binding,
-    descriptor: readAgentDescriptor(dir),
-  })
+  const cfg = readAgentConfig(dir)
+  // A declared fingerprint is not evidence that the active token still has those
+  // bytes. Token replacement without a matching validated binding retires this run.
+  if (createHash('sha256').update(cfg.token).digest('hex') !== cfg.binding.credential_fingerprint)
+    throw new EngineError('lost', 'agent credential association changed')
+  return JSON.stringify({ binding: cfg.binding, descriptor: readAgentDescriptor(dir) })
 }
 
 export async function agentClient(cfg: AgentConfig, ctx: CommandContext): Promise<ScopedClient> {
