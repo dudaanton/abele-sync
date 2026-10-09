@@ -123,8 +123,10 @@ new facade. Close/reopen the ledger and inspect its durable phase before recover
 never turn uncertainty into a destructive retry. Memory stores, including a real
 SQLite `:memory:` ledger, cannot serve as production external persistence.
 
-This persistence port does not itself enable eviction, implement projection
-filesystem effects or provide the startup/lifecycle/downgrade gates.
+This persistence port does not itself enable eviction or implement projection
+filesystem effects. The CLI's composition, initial recovery/lifecycle holds and
+versioned config fence are described in
+[CLI external-file recovery](external-file-cli-state.md).
 
 ## Upgrade procedure
 
