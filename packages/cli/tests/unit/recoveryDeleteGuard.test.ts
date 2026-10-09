@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, unlink } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { expect, it, vi } from 'vitest'
-import { ExpectedWrites, pull, readHeldDeletes, selectiveDefaults, SyncClient } from '@abele/sync-core'
+import { readHeldDeletes, selectiveDefaults, SyncClient } from '@abele/sync-core'
 import { buildTestApp } from '@abele/sync-server/tests/helpers/testApp.js'
 import { commit, create, putBlob } from '@abele/sync-server/tests/helpers/ops.js'
 import { writeConfig, stateFolder } from '../../src/config.js'
@@ -21,9 +21,9 @@ it('BUG: nine recovered deletes plus one new delete in a 40-file vault trip the 
     const endpoint = await t.app.listen({ host: '127.0.0.1', port: 0 })
     writeConfig(dir, { serverUrl: endpoint, vaultId: vault, deviceId: device.deviceId, deviceToken: device.deviceToken, deviceName: 'test', selective: selectiveDefaults() })
     const client = new SyncClient({ baseUrl: endpoint, token: device.deviceToken, fetch }).forVault(vault)
+    const context = { fetch, env: {}, revokeTimeoutMs: 20, io: { out: () => {}, err: () => {} } }
+    expect(await runRun({ dir, once: true }, context)).toBe(0)
     raw = SqliteStateStore.open(join(stateFolder(dir), 'state.db'))
-    await pull(client, new NodeFileSystem(dir), raw, { expected: new ExpectedWrites(), filter: { excluded: () => false }, dirty: new Set() })
-    raw.setMeta('vault', vault)
     const ops = seeded.results.slice(0, 9).map((r) => { if (r.status === 'rejected') throw new Error('bad fixture'); return { op: 'delete' as const, file_id: r.file_id, base_version_id: r.version_id } })
     for (let n = 0; n < 10; n++) await unlink(join(dir, `file-${n}.txt`))
     await raw.setJournal({ batchId: 'interrupted-nine', ops, idempotencyKey: 'interrupted-nine', startedAt: new Date().toISOString() })
