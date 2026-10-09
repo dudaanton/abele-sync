@@ -1,5 +1,5 @@
 import { sql } from 'kysely'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetPassword } from '../../src/auth/accounts.js'
 import { readJson } from '../../src/db/json.js'
 import { getVaultSettings, updateVaultSettings } from '../../src/vault/vaults.js'
@@ -23,15 +23,20 @@ for (const dialect of ['sqlite', 'pg'] as const) {
       const audits = () =>
         t.db.selectFrom('audit').selectAll().where('vault_id', '=', vaultId).execute()
 
-      beforeEach(async () => {
-        t = await buildTestApp({ dialect })
+      // Each PG fixture runs the full migration chain, then scrypt authentication,
+      // on the disposable server's single CPU. Match the 30-second test budget
+      // for setup/cleanup under load; SQLite retains its ten-second hook budget.
+      const fixtureTimeout = dialect === 'pg' ? 30_000 : 10_000
+      beforeEach(async ({ onTestFinished }) => {
+        const fixture = await buildTestApp({ dialect })
+        // Capture this test's app, not the previous test's already-closed `t`
+        // when setup fails before assigning the new fixture.
+        onTestFinished(() => fixture.close(), fixtureTimeout)
+        t = fixture
         ;({ accountId, accountToken } = await t.account('settings@example.test'))
         ;({ vaultId } = await t.vault(accountToken))
         ;({ deviceId, deviceToken } = await t.device(accountToken, vaultId))
-      })
-      afterEach(async () => {
-        await t.close()
-      })
+      }, fixtureTimeout)
 
       for (const field of ['notes_days', 'attachments_days', 'settings_days'] as const) {
         for (const days of [1, 0]) {
