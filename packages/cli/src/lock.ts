@@ -277,7 +277,15 @@ function hold(file: string, identity: LockIdentity, opts: LockOptions): Lock {
   }
   // Asked before every step that leaves a mark, so a stall the timer has not caught up with
   // yet is caught here: past the give-up, the lock is not relied on even before it is lost.
-  return Object.assign(release, { held: () => !over && fresh() })
+  return Object.assign(release, {
+    held: () => {
+      if (over || !fresh()) return false
+      const current = readLockFile(file)
+      return (
+        current !== 'missing' && current !== 'unreadable' && current.instance === identity.instance
+      )
+    },
+  })
 }
 
 /** The next beat, written whole through a temp file so a reader never sees half of it. */

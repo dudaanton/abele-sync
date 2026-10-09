@@ -1,8 +1,10 @@
-import { mkdirSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { lstatSync, mkdirSync, realpathSync } from 'node:fs'
 import { dirname } from 'node:path'
 import SqliteDatabase, { type Database, type Statement } from 'better-sqlite3'
 import {
   EngineError,
+  ExternalStateError,
   SqliteExternalStateStore,
   type ExternalPhaseBatch,
   type ExternalStatePort,
@@ -35,6 +37,8 @@ const DEFAULT_BUSY_TIMEOUT_MS = 5000
 export interface SqliteStateStoreOptions {
   /** The daemon takes the default; a test lowers it to provoke a lock without waiting for one. */
   busyTimeoutMs?: number
+  /** Host ownership/binding/generation check at actual ledger effects, including COMMIT. */
+  effectGuard?: () => void
 }
 
 interface Row {
@@ -80,7 +84,16 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
   /** 0 outside a transaction; a nested `transaction` runs inside the outer one. */
   private depth = 0
 
-  private constructor(private readonly db: Database) {
+  private readonly openedIdentity: string | undefined
+  private constructor(
+    private readonly db: Database,
+    private readonly effectGuard?: () => void,
+    private readonly openedFile?: string
+  ) {
+    if (openedFile && openedFile !== ':memory:') {
+      const stat = lstatSync(openedFile, { bigint: true })
+      this.openedIdentity = `${stat.dev}:${stat.ino}`
+    }
     this.selectByPath = db.prepare('select * from entries where path = ?')
     this.selectByFileId = db.prepare('select * from entries where file_id = ?')
     this.selectAll = db.prepare('select * from entries')
@@ -105,6 +118,7 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
 
   /** Opens (and creates) the database file, its folder and its schema. */
   static open(file: string, options: SqliteStateStoreOptions = {}): SqliteStateStore {
+    options.effectGuard?.()
     try {
       mkdirSync(dirname(file), { recursive: true })
       const db = new SqliteDatabase(file)
@@ -112,7 +126,7 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
       db.pragma('journal_mode = WAL')
       db.pragma(`busy_timeout = ${options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS}`)
       db.exec(SCHEMA)
-      return new SqliteStateStore(db)
+      return new SqliteStateStore(db, options.effectGuard, file)
     } catch (cause) {
       throw new EngineError('io', `cannot open the state database at ${file}`, cause)
     }
@@ -127,7 +141,7 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
       db = new SqliteDatabase(file, { readonly: true, fileMustExist: true })
       db.pragma(`busy_timeout = ${DEFAULT_BUSY_TIMEOUT_MS}`)
       db.exec('BEGIN')
-      const store = new SqliteStateStore(db)
+      const store = new SqliteStateStore(db, undefined, file)
       // ScopedState.open validates through transaction(); keep its reads inside
       // this snapshot instead of asking for the writer reservation.
       store.depth = 1
@@ -148,10 +162,25 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
       get inTransaction() {
         return db.inTransaction
       },
-      exec: (sql) => db.exec(sql),
-      // Select the positional-binding overload of better-sqlite3's generic API.
-      prepare: (sql) => db.prepare<(string | number | null)[]>(sql),
+      exec: (sql) => {
+        if (sql !== 'ROLLBACK') this.checkEffect()
+        return db.exec(sql)
+      },
+      prepare: (sql) => {
+        const statement = db.prepare<(string | number | null)[]>(sql)
+        return {
+          get: (...parameters) => statement.get(...parameters),
+          run: (...parameters) => {
+            this.checkEffect()
+            return statement.run(...parameters)
+          },
+        }
+      },
     }))
+  }
+
+  assertExternalEffectsAllowed(): void {
+    this.externalPort().assertExternalEffectsAllowed()
   }
 
   async getExternalState(): Promise<string | null> {
@@ -199,6 +228,7 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
   }
 
   async delete(path: string): Promise<void> {
+    this.checkEffect()
     guard(`cannot forget ${path}`, () => this.deleteByPath.run(path))
   }
 
@@ -208,6 +238,7 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
   }
 
   async setCursor(seq: number): Promise<void> {
+    this.checkEffect()
     guard('cannot record the cursor', () => this.upsertMeta.run(CURSOR_KEY, String(seq)))
   }
 
@@ -220,6 +251,7 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
   }
 
   async setJournal(j: Journal | null): Promise<void> {
+    this.checkEffect()
     guard('cannot record the journal', () =>
       j === null
         ? this.deleteMeta.run(JOURNAL_KEY)
@@ -232,11 +264,20 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
    * one string under one key, or `null` when nothing was written under it. The cursor and
    * the journal have their own accessors and cannot be reached through here.
    */
+  metadataKeys(prefix: string): string[] {
+    const name = own(prefix)
+    const rows = guard('cannot inspect ledger metadata keys', () =>
+      this.db.prepare('SELECT key FROM meta WHERE substr(key, 1, ?) = ?').all(name.length, name)
+    ) as { key: string }[]
+    return rows.map((row) => row.key.slice('daemon:'.length))
+  }
+
   getMeta(key: string): string | null {
     return this.meta(own(key))
   }
 
   setMeta(key: string, value: string | null): void {
+    this.checkEffect()
     const name = own(key)
     guard(`cannot record ${name}`, () =>
       value === null ? this.deleteMeta.run(name) : this.upsertMeta.run(name, value)
@@ -250,6 +291,7 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
    * lets every failure out, which is what makes that safe.
    */
   async transaction<T>(fn: () => Promise<T>): Promise<T> {
+    this.checkEffect()
     if (this.depth > 0) {
       this.depth++
       try {
@@ -262,6 +304,7 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
     this.depth = 1
     try {
       const result = await fn()
+      this.checkEffect()
       guard('cannot commit the state transaction', () => this.db.exec('COMMIT'))
       return result
     } catch (error) {
@@ -279,7 +322,49 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
 
   /** Two statements that have to land together, whether or not a transaction is already open. */
   private write(what: string, fn: () => void): void {
+    this.checkEffect()
     guard(what, () => (this.depth > 0 ? fn() : this.db.transaction(fn)()))
+  }
+
+  private checkEffect(): void {
+    this.effectGuard?.()
+  }
+
+  /** The private handle must still be the physical ledger named by its descriptor. */
+  isLedgerFile(file: string): boolean {
+    if (!this.db.open || !this.openedFile || !this.openedIdentity) return false
+    try {
+      const stat = lstatSync(file, { bigint: true })
+      return (
+        realpathSync(file) === realpathSync(this.openedFile) &&
+        `${stat.dev}:${stat.ino}` === this.openedIdentity
+      )
+    } catch {
+      return false
+    }
+  }
+
+  /** Inspection never creates a new identity in a missing/replaced activated ledger. */
+  readExternalInstanceId(): string | null {
+    const id = this.meta(own('ledger-instance-id'))
+    if (id !== null && !/^[0-9a-f-]{36}$/.test(id))
+      throw new ExternalStateError('recovery-required')
+    return id
+  }
+  getExternalInstanceId(): string {
+    this.externalPort() // Refuse SQLite memory as production persistence.
+    if (this.db.inTransaction) throw new ExternalStateError('nested-transaction')
+    const existing = this.readExternalInstanceId()
+    if (existing !== null) return existing
+    this.checkEffect()
+    guard('cannot initialize ledger instance identity', () =>
+      this.db.transaction(() => {
+        this.db
+          .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING')
+          .run(own('ledger-instance-id'), randomUUID())
+      })()
+    )
+    return this.readExternalInstanceId()!
   }
 
   private meta(key: string): string | null {

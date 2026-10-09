@@ -81,7 +81,12 @@ export async function containedIn(base: string, path: string): Promise<string> {
  * its way through lands outside the vault. Made one level at a time, never with `recursive`,
  * which would follow a link it met on the way.
  */
-export async function ownTempFolder(base: string, stateDir: string, tmp: string): Promise<string> {
+export async function ownTempFolder(
+  base: string,
+  stateDir: string,
+  tmp: string,
+  effectGuard: () => void = () => {}
+): Promise<string> {
   let current = base
   for (const name of [stateDir, tmp]) {
     current = join(current, name)
@@ -91,6 +96,7 @@ export async function ownTempFolder(base: string, stateDir: string, tmp: string)
     } catch (cause) {
       if (!isMissing(cause)) throw new EngineError('io', `cannot look at ${stateDir}`, cause)
       try {
+        effectGuard()
         await mkdir(current)
       } catch (made) {
         if ((made as { code?: string }).code !== 'EEXIST') {
@@ -132,7 +138,7 @@ export function realTempFolder(base: string, stateDir: string, tmp: string): str
  * Clears whatever a killed process left in the temp folder. One vault is held by one daemon —
  * the lock sees to that — so, called under the lock, nothing here is anybody's work in progress.
  */
-export function sweepTempFolder(folder: string | null): void {
+export function sweepTempFolder(folder: string | null, effectGuard: () => void = () => {}): void {
   if (folder === null) return
   let names: string[]
   try {
@@ -143,6 +149,7 @@ export function sweepTempFolder(folder: string | null): void {
   for (const name of names) {
     try {
       // Only what the folder itself holds, by name: a symlink is unlinked, never followed.
+      effectGuard()
       rmSync(join(folder, name), { recursive: true, force: true })
     } catch {
       /* a leftover we cannot remove is not worth failing a start over */

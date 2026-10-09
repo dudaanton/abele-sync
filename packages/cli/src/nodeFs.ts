@@ -13,7 +13,13 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import { basename, dirname, join, resolve, sep } from 'node:path'
-import { EngineError, isHidden, type FileInfo, type FileSystem } from '@abele/sync-core'
+import {
+  EngineError,
+  ExternalStateError,
+  isHidden,
+  type FileInfo,
+  type FileSystem,
+} from '@abele/sync-core'
 import { caseKey } from '@abele/sync-protocol'
 import { syncParents, syncPath } from './nodeFsDurability.js'
 import {
@@ -51,6 +57,8 @@ export interface NodeFileSystemOptions {
    * reason to wake one. Hidden *files* are still listed; the scan's filter passes over them.
    */
   skipHidden?: boolean
+  effectGuard?: () => void
+  effectTracker?: <T>(work: () => Promise<T>) => Promise<T>
 }
 
 /**
@@ -79,12 +87,23 @@ export class NodeFileSystem implements FileSystem {
 
   /** The root resolved once: what every path is built from and tested against. */
   private readonly base: string
+  private readonly effectGuard?: () => void
 
   constructor(
     private readonly root: string,
     options: NodeFileSystemOptions = {}
   ) {
     this.base = resolve(root)
+    this.effectGuard = options.effectGuard
+    if (options.effectTracker) {
+      const track = options.effectTracker
+      const write = this.writeAtomic.bind(this),
+        move = this.move.bind(this),
+        remove = this.remove.bind(this)
+      this.writeAtomic = (...args) => track(() => write(...args))
+      this.move = (...args) => track(() => move(...args))
+      this.remove = (...args) => track(() => remove(...args))
+    }
     this.ignoreDirs = new Set([STATE_DIR, ...(options.ignoreDirs ?? [])])
     this.skipHidden = options.skipHidden === true
     this.supportsWatch = supportsRecursiveWatch(root)
@@ -102,14 +121,17 @@ export class NodeFileSystem implements FileSystem {
    */
   sweepTemp(): void {
     // Never through a link: an engine folder or temp folder that is one is left alone.
-    sweepTempFolder(realTempFolder(this.base, STATE_DIR, TMP_DIR))
+    this.checkEffect()
+    sweepTempFolder(realTempFolder(this.base, STATE_DIR, TMP_DIR), () => this.checkEffect())
   }
 
   /** The temp folder gone altogether, for a clean exit; nothing of the vault's is in it. */
   removeTemp(): void {
+    this.checkEffect()
     const folder = realTempFolder(this.base, STATE_DIR, TMP_DIR)
     if (folder === null) return
     try {
+      this.checkEffect()
       rmSync(folder, { recursive: true, force: true })
     } catch {
       /* a folder that will not go is not worth failing an exit over */
@@ -144,25 +166,31 @@ export class NodeFileSystem implements FileSystem {
   }
 
   async writeAtomic(path: string, bytes: Uint8Array, mtime: number): Promise<void> {
+    this.checkEffect()
     const target = await this.contained(path)
     await this.onlyFileOrNothing(target, path)
     const temp = await this.tempPath()
     try {
+      this.checkEffect()
       await writeFile(temp, bytes)
       // utimes takes seconds and sets both times, so the file's own atime is read back and put
       // straight again: only the mtime is ours to say. The file carries it before it has a name.
       const written = await lstat(temp)
+      this.checkEffect()
       await utimes(temp, written.atime, mtime / 1000)
       await syncPath(temp)
+      this.checkEffect()
       await mkdir(dirname(target), { recursive: true })
       // Looked at again right before the rename: a folder swapped for a link since the first
       // look is refused here rather than written through.
       await this.contained(path)
       await this.onlyFileOrNothing(target, path)
+      this.checkEffect()
       await rename(temp, target)
       await syncParents(target, this.base)
       await syncParents(temp, this.base)
     } catch (cause) {
+      this.checkEffect()
       await unlink(temp).catch(() => {})
       if (cause instanceof EngineError) throw cause
       throw new EngineError('io', `cannot write ${path}`, cause)
@@ -170,6 +198,7 @@ export class NodeFileSystem implements FileSystem {
   }
 
   async move(from: string, to: string): Promise<void> {
+    this.checkEffect()
     const source = await this.contained(from)
     const target = await this.contained(to)
     if (source === target) {
@@ -189,6 +218,7 @@ export class NodeFileSystem implements FileSystem {
       }
       try {
         await this.recheck(from, to)
+        this.checkEffect()
         await rename(source, target)
         if (await spelledExactly(target)) {
           await syncParents(target, this.base)
@@ -198,7 +228,9 @@ export class NodeFileSystem implements FileSystem {
         // mounts take it literally. Then the new spelling has to be taken in two steps, through
         // the temp folder, where a crash leaves nothing loose in the vault for the scanner.
         const temp = await this.tempPath()
+        this.checkEffect()
         await rename(target, temp)
+        this.checkEffect()
         await rename(temp, target)
         await syncParents(target, this.base)
         await syncParents(temp, this.base)
@@ -209,8 +241,10 @@ export class NodeFileSystem implements FileSystem {
       return
     }
     try {
+      this.checkEffect()
       await mkdir(dirname(target), { recursive: true })
       await this.recheck(from, to)
+      this.checkEffect()
       await rename(source, target)
       await syncParents(target, this.base)
       await syncParents(source, this.base)
@@ -228,14 +262,17 @@ export class NodeFileSystem implements FileSystem {
   }
 
   async remove(path: string): Promise<void> {
+    this.checkEffect()
     const target = await this.contained(path)
     await this.onlyFileOrNothing(target, path)
     // Looked at again right before the unlink: its folders may have been swapped meanwhile.
     await this.contained(path)
     try {
+      this.checkEffect()
       await unlink(target)
       await syncParents(target, this.base)
     } catch (cause) {
+      if (cause instanceof EngineError || cause instanceof ExternalStateError) throw cause
       if (isMissing(cause)) return
       throw new EngineError('io', `cannot remove ${path}`, cause)
     }
@@ -255,7 +292,9 @@ export class NodeFileSystem implements FileSystem {
       const folder = segments.join('/')
       if (this.isIgnored(folder)) return
       try {
-        await rmdir(await this.contained(folder))
+        const target = await this.contained(folder)
+        this.checkEffect()
+        await rmdir(target)
       } catch {
         return
       }
@@ -345,7 +384,7 @@ export class NodeFileSystem implements FileSystem {
 
   /** A fresh name in `<root>/.abele-sync/tmp`, folders created, and neither of them a link. */
   private async tempPath(): Promise<string> {
-    const folder = await ownTempFolder(this.base, STATE_DIR, TMP_DIR)
+    const folder = await ownTempFolder(this.base, STATE_DIR, TMP_DIR, () => this.checkEffect())
     return join(folder, randomBytes(12).toString('hex'))
   }
 
@@ -433,6 +472,10 @@ export class NodeFileSystem implements FileSystem {
       }
       return kept
     }
+  }
+
+  private checkEffect(): void {
+    this.effectGuard?.()
   }
 
   private isIgnored(path: string): boolean {
