@@ -185,7 +185,111 @@ To adopt explicit readiness:
 5. Vendor committed aligned core/protocol inputs and update provenance/fixtures
    explicitly. This work did not edit the plugin worktree or its archives.
 
+## Public exclusive scheduler port for attachment operations
+
+Core exports `ExclusiveOperationPort`, `ExclusiveOperationOptions` and
+`exclusiveOperationPort`. Personal `SyncEngine` implements the port:
+
+```ts
+const result = await engine.runExclusive(async () => {
+  // Re-read the file identity/head and external ledger revision here.
+  // Reserve paths, validate intent/ownership, then journal/fence host effects.
+  return evictOrHydrate()
+})
+```
+
+This uses the **existing whole-engine scheduler**, not a new attachment mutex.
+It excludes ordinary pull/apply/move/push, deferred apply/keep and engine Restore
+work until the callback settles. The scheduler has no path/identity-scoped lock;
+there is intentionally no narrower-exclusion claim. External path reservations,
+open-file/use checks, native no-clobber installation and durable phases remain
+host responsibilities. Independent filesystem writers are not excluded.
+
+The personal port delegates to the same private scheduler as existing deferred
+and Restore callers, without changing their queue policy. It waits for running
+work (including failure); sync calls while occupied still share the existing
+coalesced follow-up run. It adds no separate FIFO/priority/fairness guarantee and
+no retries. A thrown/rejected callback releases its slot. Recovery readiness is
+checked before preparation and again before work starts, including after waiting
+for another job. `stop()` retains its existing behavior: blocked engine network
+reads can be abandoned, but issued writes and running host effects must settle
+before the slot is released. A waiting host job is not automatically discarded
+by personal `stop()`, just as internal deferred/Restore jobs are not; runtime
+retirement must still fence it. The port does not forcibly cancel arbitrary host
+I/O or pretend an already-issued effect was undone.
+
+Publication must run **outside** exclusivity. Awaiting `engine.sync()` (or
+Restore/deferred/another exclusive verb) from inside the callback waits on its
+own slot and deadlocks. An operation that needs to publish the same file first
+can express this as an awaited prerequisite:
+
+```ts
+await engine.runExclusive(
+  async () => {
+    // Publication can have changed version/path/revision. Re-read and validate
+    // all of them before reserving paths or deleting any original bytes.
+    return evictAfterRevalidation()
+  },
+  { before: () => engine.sync() }
+)
+```
+
+`before` is awaited before entering the queue, creates no reservation, and its
+rejection prevents the exclusive effect. Preparation is not atomic with queue
+entry and is not itself covered by scheduler drain/stop; its I/O needs the host's
+normal ownership/cancellation fences. No automatic sync is inserted for callers
+that omit it. The existing plugin's `AttachmentStore.evict()` already awaits
+publication outside its `host.run()` call and revalidates on entry; that sequence
+can remain unchanged. Do not move its publication into the exclusive callback.
+
+### Switching the plugin bridge
+
+After vendoring aligned committed core inputs/provenance, replace the personal
+`engineBuild.ts` cast to private `exclusive` with:
+
+```ts
+serial: {
+  run: (work) => engine.runExclusive(work)
+}
+```
+
+Keep `sync: () => engine.sync()` for the attachment store's separate publication
+phase. Preserve the existing host reservation, readiness and per-effect fences.
+The public port is usable by both eviction and hydration; it grants no eviction
+eligibility by itself.
+
+Core does **not** currently define a scoped engine class: `pullScoped`,
+`pushScoped` and scanning are functions whose queue belongs to the scoped host.
+The public facade adapts that actual scheduler without adding a second queue.
+In `ScopedPluginHost`, expose the same port through the existing `serial` queue:
+
+```ts
+private readonly operations = exclusiveOperationPort((work) => this.serial(work))
+
+runExclusive<T>(work: () => Promise<T>, options?: ExclusiveOperationOptions): Promise<T> {
+  return this.operations.runExclusive(work, options)
+}
+
+// AttachmentStore options:
+serial: { run: (work) => this.runExclusive(work) }
+```
+
+All scoped pull/push/creation/lifecycle callers must continue using that same
+`serial` queue. Its FIFO ordering, teardown wait and closed/runtime cancellation
+checks are preserved, not replaced with personal engine semantics. Bind the
+facade to the existing host/runtime, never silently create a fresh runtime after
+retirement. The scoped `sync` prerequisite likewise runs before queue entry.
+This core change and its queue-adapter tests do not edit or execute the plugin
+worktree, Obsidian or the phone.
+
 ## Verification
+
+The public-port regressions cover ordering against a running real personal sync,
+exclusion of a following cycle, multiple host jobs, synchronous throw/rejection,
+stop/drain, cancellation of a blocked engine read, failed publication, and a real
+same-file unsynced edit published and revalidated before exclusive entry. Scoped
+host adapter tests cover the existing FIFO/closure policy and same-queue
+publication prerequisite without deadlock.
 
 The acceptance tests use real on-disk CLI SQLite close/reopen, definite abort and
 lost COMMIT acknowledgement, stale-runtime/long-await native and multipart

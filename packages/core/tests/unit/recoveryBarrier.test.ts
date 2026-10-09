@@ -85,6 +85,59 @@ describe('opt-in core recovery readiness', () => {
         await f.engine.stop()
       }
     })
+  it('gates public exclusive preparation and rechecks readiness after preparation awaits', async () => {
+    const f = fixture()
+    let prepared = false,
+      ran = false
+    const job = async () => {
+      ran = true
+    }
+    try {
+      await expect(
+        f.engine.runExclusive(job, {
+          before: async () => {
+            prepared = true
+          },
+        })
+      ).rejects.toMatchObject({ reason: 'recovery-required' })
+      expect(prepared).toBe(false)
+      f.ready()
+      await expect(
+        f.engine.runExclusive(job, {
+          before: async () => {
+            prepared = true
+            f.retire()
+          },
+        })
+      ).rejects.toMatchObject({ code: 'lost' })
+      expect(prepared).toBe(true)
+      expect(ran).toBe(false)
+    } finally {
+      await f.engine.stop()
+    }
+  })
+  it('rechecks public exclusive readiness after waiting behind another host effect', async () => {
+    const f = fixture()
+    f.ready()
+    let release!: () => void
+    const running = f.engine.runExclusive(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve
+        })
+    )
+    let ran = false
+    const waiting = f.engine.runExclusive(async () => {
+      ran = true
+    })
+    const refused = expect(waiting).rejects.toMatchObject({ code: 'lost' })
+    f.retire()
+    release()
+    await running
+    await refused
+    expect(ran).toBe(false)
+    await f.engine.stop()
+  })
   it('BUG: start/resume cannot activate watchers or timers before recovery', async () => {
     const f = fixture(),
       watch = vi.spyOn(f.fs, 'watch')

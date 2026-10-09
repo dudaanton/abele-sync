@@ -11,6 +11,11 @@ import {
   type SyncReport,
 } from './engineTypes.js'
 import { guarded, stoppableClient } from './guard.js'
+import {
+  exclusiveOperationPort,
+  type ExclusiveOperationOptions,
+  type ExclusiveOperationPort,
+} from './exclusiveOperations.js'
 import type { DeferredApplied, DeferredKept, Staging } from './staging.js'
 import { Wake } from './wake.js'
 import { WatchReports } from './watchReports.js'
@@ -61,7 +66,7 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject }
 }
 
-export class SyncEngine {
+export class SyncEngine implements ExclusiveOperationPort {
   private readonly expected = new ExpectedWrites()
   private readonly log: (line: string) => void
   private readonly now: () => number
@@ -106,6 +111,7 @@ export class SyncEngine {
   private cancellation = new AbortController()
   private stopping = false
   private readonly activeWrites = { count: 0 }
+  private readonly hostOperations = exclusiveOperationPort((job) => this.exclusive(job))
 
   constructor(opts: EngineOptions) {
     const hands =
@@ -266,6 +272,21 @@ export class SyncEngine {
     await holds.decide({ kind, fileIds: decided, at: new Date(this.now()).toISOString() })
     if (this.paused || this.halted) return { decided: decided.length, report: null }
     return { decided: decided.length, report: await this.sync() }
+  }
+
+  /**
+   * A host effect on the same whole-engine scheduler as sync, deferred changes and
+   * Restore. Preserves the internal scheduler's ordering and stop semantics:
+   * blocked engine reads can be cancelled, issued writes and host jobs settle
+   * before exclusion is released. Host effects still need their own fences.
+   *
+   * `before`, when supplied, runs outside the queue (publication may await sync).
+   * Revalidate the file inside `job`; never await a queued engine verb there.
+   * Recovery is checked before preparation and again on exclusive queue entry.
+   */
+  async runExclusive<T>(job: () => Promise<T>, options?: ExclusiveOperationOptions): Promise<T> {
+    this.opts.recovery?.assertReady()
+    return this.hostOperations.runExclusive(job, options)
   }
 
   /** Authorized server Restore, serialized and recovery-gated like deferred writes. */
