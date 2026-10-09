@@ -1,4 +1,5 @@
 import { rmSync } from 'node:fs'
+import { assertLocalSafety } from '../externalSafety.js'
 import { caseKey, normalisePath } from '@abele/sync-protocol'
 import { EngineError, pushScoped, sha256, encodeText, type ScopedKnownFile } from '@abele/sync-core'
 import {
@@ -183,6 +184,7 @@ export function runAgentDeletes(opts: AgentMaintenanceOptions, ctx: CommandConte
 }
 export function runAgentDisconnect(opts: AgentMaintenanceOptions, ctx: CommandContext) {
   return locked(opts.dir, ctx, async (vault) => {
+    assertLocalSafety(vault.dir, true)
     let retired = false
     try {
       await vault.client.revokeSelf()
@@ -190,6 +192,8 @@ export function runAgentDisconnect(opts: AgentMaintenanceOptions, ctx: CommandCo
     } catch (error) {
       if (!opts.force) throw error
     }
+    vault.fence.assertReady()
+    assertLocalSafety(vault.dir, true)
     if (!vault.lock.held()) throw new EngineError('lost', 'agent disconnect claim lost')
     rmSync(agentConfigFile(vault.dir))
     ctx.io.out(

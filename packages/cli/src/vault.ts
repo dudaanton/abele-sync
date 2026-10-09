@@ -4,6 +4,10 @@ import { join, resolve } from 'node:path'
 import {
   classifyFailure,
   EngineError,
+  ExpectedWrites,
+  resumeJournal,
+  recoverPendingPullWrites,
+  StagedChanges,
   IgnoreRules,
   isExcluded,
   isHidden,
@@ -17,6 +21,7 @@ import {
   type SyncFailure,
   type SyncReport,
   type VaultClient,
+  type RecoveryBarrier,
 } from '@abele/sync-core'
 import {
   normalisePath,
@@ -25,7 +30,9 @@ import {
   validatePath,
 } from '@abele/sync-protocol'
 import { readConfig, stateFolder, type DaemonConfig } from './config.js'
-import { acquireLock } from './lock.js'
+import { acquireLock, type Lock } from './lock.js'
+import { assertLocalSafety, EffectFence, personalStamp } from './externalSafety.js'
+import { CodeGroupDisk } from './codeGroupDisk.js'
 import { anyOf, SettlingFileSystem } from './growing.js'
 import { NodeFileSystem } from './nodeFs.js'
 import { SqliteStateStore } from './sqliteState.js'
@@ -70,6 +77,8 @@ export interface OpenVault {
   ignoreText: string | null
   /** What this device syncs at all, as `scan` asks it. */
   filter: ScanFilter
+  recovery?: RecoveryBarrier
+  fence?: EffectFence
   close(): void
 }
 
@@ -80,49 +89,113 @@ const HIDDEN: PathMatcher = { ignores: isHidden }
 export function requireConfig(dir: string): DaemonConfig {
   const cfg = readConfig(dir)
   if (cfg === null) {
+    assertLocalSafety(dir)
     throw new UsageError(`${dir} is not set up: run \`abele-sync init --dir ${dir} …\` first`)
   }
   return cfg
 }
 
 /** Opens everything a command works through. The caller closes it, failure or not. */
-export function openVault(dir: string, ctx: CommandContext): OpenVault {
+const publicationRecovery = new WeakMap<OpenVault, (disk: FileSystem) => Promise<void>>()
+
+export function openVault(dir: string, ctx: CommandContext, held?: () => boolean): OpenVault {
+  if (held && !held()) throw new EngineError('lost', 'vault lock lost before recovery inspection')
+  assertLocalSafety(dir, false, true, held !== undefined)
   const cfg = requireConfig(dir)
+  const fence = held ? new EffectFence(dir, held, () => personalStamp(dir)) : undefined
   // Hidden folders are not walked or watched: the filter below would pass over all of it.
-  const disk = new NodeFileSystem(dir, { skipHidden: true })
+  const disk = new NodeFileSystem(dir, {
+    skipHidden: true,
+    effectGuard: fence?.assertReady,
+    effectTracker: fence?.track,
+  })
   const fs = new SettlingFileSystem(disk)
   const ignoreText = readIgnoreText(dir)
   const rules = ignoreText === null ? null : IgnoreRules.parse(ignoreText)
   // Hidden paths first: no ignore file can bring a `.git` or a `.DS_Store` into the vault.
   const ignore = anyOf([HIDDEN, ...(rules === null ? [] : [rules]), fs])
-  const state = SqliteStateStore.open(stateDbFile(dir))
+  let state: SqliteStateStore
   try {
+    state = SqliteStateStore.open(stateDbFile(dir), { effectGuard: fence?.assertOwner })
+  } catch (error) {
+    fence?.close()
+    throw error
+  }
+  try {
+    fence?.attach(state, stateDbFile(dir))
     const owner = statedVault(state)
     if (owner !== null && owner !== cfg.vaultId) {
       throw new UsageError(
         'state.db describes another vault; run init --force to reconcile the configuration before syncing'
       )
     }
-    return {
+    const vault: OpenVault = {
       dir,
       cfg,
       disk,
       fs,
       state,
-      client: vaultClient(cfg, ctx),
+      client: vaultClient(cfg, fence ? { ...ctx, fetch: fence.fetch(ctx.fetch) } : ctx),
       ignore,
       ignoreText,
       filter: {
         excluded: (path, size) =>
           isExcluded(path, size, cfg.selective, SCRIPTS_FOLDER) || ignore.ignores(path),
       },
-      close: () => state.close(),
+      ...(fence ? { fence, recovery: fence.recovery } : {}),
+      close: () => {
+        fence?.close()
+        state.close()
+      },
     }
+    const replay = vaultClient(cfg, {
+      ...ctx,
+      fetch: (input, init) => {
+        fence?.assertOwner()
+        return fence ? fence.track(() => ctx.fetch(input, init)) : ctx.fetch(input, init)
+      },
+    })
+    publicationRecovery.set(vault, async (disk) => {
+      if (await state.getJournal())
+        await resumeJournal(replay, disk, state, {
+          expected: new ExpectedWrites(),
+          filter: vault.filter,
+          defer: (path) => codePluginId(path) !== null,
+          onDefer: (items) => new StagedChanges(state).stage(items),
+        })
+    })
+    return vault
   } catch (error) {
     // Nothing may be left holding the database when the caller never got a handle to close.
+    fence?.close()
     state.close()
     throw error
   }
+}
+
+/** Owned installation recovery and predecessor settlement precede ordinary engine effects. */
+export async function recoverVault(vault: OpenVault, held: () => boolean): Promise<void> {
+  if (!held()) throw new EngineError('lost', 'vault lock lost before recovery')
+  await vault.fence?.settlePredecessors()
+  assertLocalSafety(vault.dir, false, true, true)
+  const recoveryDisk = new NodeFileSystem(vault.dir, {
+    skipHidden: true,
+    effectGuard:
+      vault.fence?.assertOwner ??
+      (() => {
+        if (!held()) throw new EngineError('lost', 'recovery ownership lost')
+      }),
+    effectTracker: vault.fence?.track,
+  })
+  await CodeGroupDisk.recover({ ...vault, disk: recoveryDisk }, held)
+  const pullIds = vault.state
+    .metadataKeys('pull-write:')
+    .map((key) => key.slice('pull-write:'.length))
+  await recoverPendingPullWrites(recoveryDisk, vault.state, pullIds)
+  await publicationRecovery.get(vault)?.(recoveryDisk)
+  publicationRecovery.delete(vault)
+  assertLocalSafety(vault.dir)
+  vault.recovery?.activate()
 }
 
 /**
@@ -175,9 +248,9 @@ export async function lockVault(
   dir: string,
   ctx: CommandContext,
   advice: string
-): Promise<(() => void) | null> {
+): Promise<Lock | null> {
   try {
-    return await acquireLock(dir)
+    return await acquireLock(dir, ctx.lockTiming)
   } catch (error) {
     if (error instanceof EngineError && error.code === 'conflict') {
       ctx.io.err(`${error.message}; ${advice}`)
@@ -221,6 +294,7 @@ export function buildEngine(
     ...(opts.onSync === undefined ? {} : { onSync: opts.onSync }),
     ...(opts.onFail === undefined ? {} : { onFail: opts.onFail }),
     ...(opts.stillHeld === undefined ? {} : { stillHeld: opts.stillHeld }),
+    ...(vault.recovery ? { recovery: vault.recovery } : {}),
     log: opts.log,
   })
 }

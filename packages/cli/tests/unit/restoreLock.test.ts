@@ -13,6 +13,7 @@ vi.mock('../../src/log.js', () => ({ openLog: () => ({ line: () => {} }) }))
 vi.mock('../../src/vault.js', () => ({
   vaultDir: (dir: string) => dir,
   requireConfig: () => {},
+  recoverVault: recover,
   wirePath: (path: string) => path,
   fileIdFor: async () => 'f',
   DEFAULT_INTERVAL_SECONDS: 300,

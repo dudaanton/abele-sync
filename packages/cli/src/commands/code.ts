@@ -1,7 +1,6 @@
 import { EngineError, readStaged, type SyncEngine } from '@abele/sync-core'
 import { approveCodeGroup } from '../codeApproval.js'
 import { localCodeChanges } from '../codeCheck.js'
-import { CodeGroupDisk } from '../codeGroupDisk.js'
 import { EXIT_FAILED, EXIT_LOCKED, EXIT_OK, UsageError, type CommandContext } from '../context.js'
 import { codeArg, codeFingerprint, codeGroups, codeText, type CodeGroup } from '../pluginCode.js'
 import { acquireLock, type Lock } from '../lock.js'
@@ -11,6 +10,7 @@ import {
   DEFAULT_INTERVAL_SECONDS,
   openVault,
   requireConfig,
+  recoverVault,
   vaultDir,
   type OpenVault,
 } from '../vault.js'
@@ -54,8 +54,8 @@ export async function runCode(opts: CodeOptions, ctx: CommandContext): Promise<n
   let vault: OpenVault | null = null
   let engine: SyncEngine | null = null
   try {
-    vault = openVault(dir, ctx)
-    await CodeGroupDisk.recover(vault, release.held)
+    vault = openVault(dir, ctx, release.held)
+    await recoverVault(vault, release.held)
     const ids = [...new Set(named)].sort()
     const groups = codeGroups(await readStaged(vault.state))
     const group = groups.find((one) => JSON.stringify(one.ids) === JSON.stringify(ids))

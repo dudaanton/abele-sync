@@ -13,6 +13,9 @@ import { join, resolve } from 'node:path'
 import { z } from 'zod'
 import {
   EngineError,
+  ExternalStateError,
+  sameConnection,
+  type ConnectionBinding,
   ScopedConnectionSchema,
   ScopedState,
   createScopedClient,
@@ -22,7 +25,14 @@ import {
   type ScopedClient,
   type ScopedConnection,
 } from '@abele/sync-core'
-import { stateFolder, ensureStateFolder } from './config.js'
+import {
+  parseLocalDescriptor,
+  stateFolder,
+  ensureStateFolder,
+  writeOwnedJson,
+  type LocalDescriptor,
+} from './config.js'
+import { activateBoundExternalFiles, assertLocalSafety, EffectFence } from './externalSafety.js'
 import { NodeFileSystem } from './nodeFs.js'
 import { SqliteStateStore } from './sqliteState.js'
 import { acquireLock, type Lock } from './lock.js'
@@ -55,22 +65,107 @@ export function readAgentConfig(dir: string): AgentConfig {
   if (!existsSync(file) || lstatSync(file).isSymbolicLink())
     throw new UsageError('agent is not set up, or its config is unsafe')
   try {
-    return ConfigSchema.parse(JSON.parse(readFileSync(file, 'utf8')))
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>
+    if (raw.schema !== undefined || raw.format !== undefined) {
+      if (raw.schema !== 2 || raw.format !== 'abele.cli')
+        throw new ExternalStateError('recovery-required')
+      const descriptor = parseLocalDescriptor(raw.descriptor)
+      const cfg = ConfigSchema.parse(raw.connection)
+      if (
+        !sameConnection(
+          descriptor.binding,
+          agentExternalBinding(cfg, descriptor.binding.generation)
+        )
+      )
+        throw new ExternalStateError('binding-mismatch')
+      return cfg
+    }
+    return ConfigSchema.parse(raw)
   } catch {
     throw new EngineError('lost', 'agent config requires reviewed recovery')
   }
 }
-export function writeAgentConfig(dir: string, cfg: AgentConfig): void {
+export function writeAgentConfig(
+  dir: string,
+  cfg: AgentConfig,
+  guard: () => void = () => {}
+): void {
+  guard()
+  const descriptor = readAgentDescriptor(dir)
+  if (descriptor) {
+    if (
+      !sameConnection(descriptor.binding, agentExternalBinding(cfg, descriptor.binding.generation))
+    )
+      throw new ExternalStateError('binding-mismatch')
+    writeOwnedJson(
+      dir,
+      'agent.json',
+      { format: 'abele.cli', schema: 2, connection: ConfigSchema.parse(cfg), descriptor },
+      guard
+    )
+    return
+  }
   const folder = ensureStateFolder(dir),
     temporary = join(folder, `agent.${crypto.randomUUID()}.tmp`)
   try {
     writeFileSync(temporary, JSON.stringify(ConfigSchema.parse(cfg)), { mode: 0o600, flag: 'wx' })
     chmodSync(temporary, 0o600)
+    guard()
     renameSync(temporary, agentConfigFile(dir))
   } finally {
     if (existsSync(temporary)) unlinkSync(temporary)
   }
 }
+export function agentExternalBinding(cfg: AgentConfig, generation = 1): ConnectionBinding {
+  return {
+    endpoint: cfg.binding.endpoint_identity,
+    vaultId: cfg.binding.vault_id,
+    mode: 'scoped',
+    principalId: cfg.binding.principal_id,
+    principalType: cfg.binding.principal_kind,
+    grantId: cfg.binding.grant_id,
+    generation,
+    credentialAssociation: cfg.binding.credential_fingerprint,
+  }
+}
+export function readAgentDescriptor(dir: string): LocalDescriptor | null {
+  if (!existsSync(agentConfigFile(dir))) return null
+  const raw = JSON.parse(readFileSync(agentConfigFile(dir), 'utf8')) as Record<string, unknown>
+  if (raw.schema === undefined && raw.format === undefined) return null
+  if (raw.schema !== 2 || raw.format !== 'abele.cli')
+    throw new ExternalStateError('recovery-required')
+  return parseLocalDescriptor(raw.descriptor)
+}
+export async function activateAgentExternalFiles(
+  dir: string,
+  raw: SqliteStateStore,
+  cfg: AgentConfig,
+  held: () => boolean
+) {
+  const binding = agentExternalBinding(cfg, readAgentDescriptor(dir)?.binding.generation)
+  return activateBoundExternalFiles(
+    dir,
+    raw,
+    binding,
+    'agent.sqlite',
+    held,
+    (descriptor, guard) => {
+      writeOwnedJson(
+        dir,
+        'agent.json',
+        { format: 'abele.cli', schema: 2, connection: ConfigSchema.parse(cfg), descriptor },
+        guard
+      )
+    }
+  )
+}
+function agentStamp(dir: string): string {
+  return JSON.stringify({
+    binding: readAgentConfig(dir).binding,
+    descriptor: readAgentDescriptor(dir),
+  })
+}
+
 export async function agentClient(cfg: AgentConfig, ctx: CommandContext): Promise<ScopedClient> {
   const client = await createScopedClient({
     baseUrl: cfg.binding.endpoint_identity,
@@ -102,6 +197,7 @@ export interface AgentVault {
   disk: NodeFileSystem
   raw: SqliteStateStore
   lock: Lock
+  fence: EffectFence
   close(): void
 }
 function checkedAgentLedger(dir: string): string {
@@ -138,14 +234,25 @@ export async function openAgentSnapshot(dir: string, ctx: CommandContext) {
 export async function openAgentVault(dir: string, ctx: CommandContext): Promise<AgentVault> {
   const root = agentDirectory(dir),
     lock = await acquireLock(root, { ...ctx.lockTiming, daemon: false })
-  let raw: SqliteStateStore | undefined
+  let raw: SqliteStateStore | undefined, fence: EffectFence | undefined
   try {
+    assertLocalSafety(root)
     const cfg = readAgentConfig(root)
     const file = checkedAgentLedger(root)
-    const client = await agentClient(cfg, ctx)
-    raw = SqliteStateStore.open(file)
+    fence = new EffectFence(root, lock.held, () => agentStamp(root))
+    const client = await agentClient(cfg, { ...ctx, fetch: fence.fetch(ctx.fetch) })
+    fence.assertOwner()
+    await fence.settlePredecessors()
+    raw = SqliteStateStore.open(file, { effectGuard: fence.assertOwner })
+    fence.attach(raw, file)
     const state = await ScopedState.open(raw, cfg.binding),
-      disk = new NodeFileSystem(root, { skipHidden: true })
+      disk = new NodeFileSystem(root, {
+        skipHidden: true,
+        effectGuard: fence.assertReady,
+        effectTracker: fence.track,
+      })
+    assertLocalSafety(root)
+    fence.recovery.activate()
     return {
       dir: root,
       client,
@@ -153,12 +260,15 @@ export async function openAgentVault(dir: string, ctx: CommandContext): Promise<
       disk,
       raw,
       lock,
+      fence,
       close: () => {
+        fence?.close()
         raw?.close()
         lock()
       },
     }
   } catch (error) {
+    fence?.close()
     raw?.close()
     lock()
     throw error
@@ -184,6 +294,7 @@ export function freshAgentRoot(dir: string) {
       'agent setup needs a fresh dedicated vault root; do not pass Agents itself'
     )
 }
-export function createAgentsFolder(dir: string) {
+export function createAgentsFolder(dir: string, guard: () => void = () => {}): void {
+  guard()
   mkdirSync(join(dir, 'Agents'), { recursive: true })
 }

@@ -1,4 +1,7 @@
-import { rmSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { readFileSync, rmSync } from 'node:fs'
+import { EngineError } from '@abele/sync-core'
+import { assertClaim, assertLocalSafety, guardedFetch } from '../externalSafety.js'
 import { join } from 'node:path'
 import { serverUrlProblem } from '@abele/sync-protocol'
 import { stateFolder, type DaemonConfig } from '../config.js'
@@ -30,13 +33,28 @@ export interface DisconnectOptions {
 
 export async function runDisconnect(opts: DisconnectOptions, ctx: CommandContext): Promise<number> {
   const dir = vaultDir(opts.dir)
-  const cfg = requireConfig(dir)
+  let cfg = requireConfig(dir)
 
   const release = await lockVault(dir, ctx, 'stop it before disconnecting')
   if (release === null) return EXIT_LOCKED
 
   try {
-    const told = await tellServer(cfg, ctx)
+    cfg = requireConfig(dir)
+    assertLocalSafety(dir, true)
+    // A legacy unsafe URL can still be forgotten locally when the inventory is
+    // clear; its token must never be sent merely to compute/validate a binding.
+    const configStamp = () =>
+      createHash('sha256')
+        .update(readFileSync(join(stateFolder(dir), 'config.json')))
+        .digest('hex')
+    const stamp = configStamp()
+    const check = () => {
+      assertClaim(release.held)
+      assertLocalSafety(dir, true)
+      if (configStamp() !== stamp)
+        throw new EngineError('lost', 'connection changed during disconnect')
+    }
+    const told = await tellServer(cfg, { ...ctx, fetch: guardedFetch(ctx.fetch, check) })
     if (told !== null) {
       ctx.io.out(told)
     } else if (opts.force === true) {
@@ -51,6 +69,7 @@ export async function runDisconnect(opts: DisconnectOptions, ctx: CommandContext
       )
       return EXIT_FAILED
     }
+    check()
     forgetConfig(dir)
     ctx.io.out(`removed ${join(stateFolder(dir), 'config.json')}; kept state.db`)
     return EXIT_OK

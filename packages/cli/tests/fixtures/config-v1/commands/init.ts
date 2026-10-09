@@ -1,9 +1,7 @@
-import { existsSync, readFileSync, rmSync } from 'node:fs'
-import { createHash } from 'node:crypto'
+import { existsSync, rmSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { basename, join } from 'node:path'
-import { EngineError, selectiveDefaults, SyncClient } from '@abele/sync-core'
-import { assertClaim, assertLocalSafety, guardedFetch } from '../externalSafety.js'
+import { selectiveDefaults, SyncClient } from '@abele/sync-core'
 import { serverUrlProblem, type JoinPrefer, type VaultInfo } from '@abele/sync-protocol'
 import {
   readConfig,
@@ -87,22 +85,7 @@ export async function runInit(opts: InitOptions, ctx: CommandContext): Promise<n
     // Recheck under the shared physical-vault lock before credentials/login or
     // any force-mode helper can catch a config-read refusal and treat it as empty.
     assertNoAgentConnection(dir)
-    assertLocalSafety(dir, true)
-    const stamp = () =>
-      existsSync(configFile)
-        ? createHash('sha256').update(readFileSync(configFile)).digest('hex')
-        : 'absent'
-    let expected = stamp()
-    const check = () => {
-      assertClaim(release.held)
-      assertLocalSafety(dir, true)
-      if (stamp() !== expected)
-        throw new EngineError('lost', 'connection changed during enrollment')
-    }
-    const owned = { ...ctx, fetch: guardedFetch(ctx.fetch, check) }
-    return await setUp({ ...opts, server }, given, dir, configFile, owned, check, () => {
-      expected = stamp()
-    })
+    return await setUp({ ...opts, server }, given, dir, configFile, ctx)
   } finally {
     release()
   }
@@ -113,11 +96,8 @@ async function setUp(
   given: JoinPrefer | null | undefined,
   dir: string,
   configFile: string,
-  ctx: CommandContext,
-  check: () => void,
-  acceptConfig: () => void
+  ctx: CommandContext
 ): Promise<number> {
-  check()
   const previous = previousVault(dir)
   const replaced = opts.force === true ? previousConfig(dir) : null
   const password = await passwordFor(opts, ctx)
@@ -150,8 +130,7 @@ async function setUp(
 
   // Removing foreign state first is crash-safe: the old config can rebuild a
   // fresh ledger, but the new config must never see another vault's cursor.
-  check()
-  settleState(dir, previous, vault.id, ctx, check)
+  settleState(dir, previous, vault.id, ctx)
   writeConfig(dir, {
     serverUrl: opts.server,
     vaultId: vault.id,
@@ -162,7 +141,6 @@ async function setUp(
     ...(prefer === null ? {} : { joinPrefer: prefer }),
   })
 
-  acceptConfig()
   ctx.io.out(`vault ${vault.name} (${vault.id})`)
   ctx.io.out(`device ${deviceName} (${device.device_id})`)
   ctx.io.out(`wrote ${configFile}`)
@@ -281,20 +259,15 @@ function settleState(
   dir: string,
   previous: string | null,
   vaultId: string,
-  ctx: CommandContext,
-  check: () => void
+  ctx: CommandContext
 ): void {
-  check()
   const file = stateDbFile(dir)
   if (!existsSync(file)) return
   if (previous === vaultId) {
     ctx.io.out('kept state.db: the same vault')
     return
   }
-  for (const suffix of ['', '-wal', '-shm']) {
-    check()
-    rmSync(`${file}${suffix}`, { force: true })
-  }
+  for (const suffix of ['', '-wal', '-shm']) rmSync(`${file}${suffix}`, { force: true })
   ctx.io.out(
     previous === null
       ? 'removed state.db: it did not say which vault it described'

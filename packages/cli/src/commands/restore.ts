@@ -6,13 +6,13 @@ import { EXIT_OK, UsageError, type CommandContext } from '../context.js'
 import { openLog } from '../log.js'
 import { runRestoreSince } from './restoreSince.js'
 import { codeHeldLine } from '../pluginCode.js'
-import { CodeGroupDisk } from '../codeGroupDisk.js'
 import {
   buildEngine,
   DEFAULT_INTERVAL_SECONDS,
   fileIdFor,
   openVault,
   requireConfig,
+  recoverVault,
   summarise,
   vaultDir,
   wirePath,
@@ -95,8 +95,8 @@ export async function runRestore(
   let engine: SyncEngine | null = null
   try {
     const log = openLog(dir)
-    vault = openVault(dir, ctx)
-    await CodeGroupDisk.recover(vault, release.held)
+    vault = openVault(dir, ctx, release.held)
+    await recoverVault(vault, release.held)
     engine = buildEngine(vault, {
       stillHeld: release.held,
       fallbackMs: DEFAULT_INTERVAL_SECONDS * 1000,

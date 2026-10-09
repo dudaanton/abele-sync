@@ -1,6 +1,6 @@
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
-import { EngineError, isEngineOwn } from '@abele/sync-core'
+import { EngineError, ExternalStateError, isEngineOwn } from '@abele/sync-core'
 import { normalisePath, validatePath } from '@abele/sync-protocol'
 import {
   CodeDraft,
@@ -22,7 +22,7 @@ interface Journal {
   attempted: number
   steps: GroupStep[]
 }
-type Vault = Pick<OpenVault, 'dir' | 'cfg' | 'disk' | 'state'>
+type Vault = Pick<OpenVault, 'dir' | 'cfg' | 'disk' | 'state' | 'fence'>
 
 /** Disk undo journal paired with the enclosing SQLite transaction's commit marker. */
 export class CodeGroupDisk {
@@ -34,7 +34,12 @@ export class CodeGroupDisk {
   ) {}
   static async create(vault: Vault, held: () => boolean): Promise<CodeGroupDisk> {
     if (!held()) throw new EngineError('lost', 'code approval lost the vault lock')
-    const folder = await ownTempFolder(resolve(vault.dir), '.abele-sync', FOLDER)
+    const check = () => {
+      vault.fence?.assertOwner()
+      if (!held()) throw new EngineError('lost', 'code approval lost ownership')
+    }
+    const folder = await ownTempFolder(resolve(vault.dir), '.abele-sync', FOLDER, check)
+    check()
     const work = await mkdtemp(join(folder, 'group-'))
     // The undo journal must remain reachable after a power loss, not only after SIGKILL.
     await syncParents(join(work, 'journal.json'), resolve(vault.dir))
@@ -48,6 +53,7 @@ export class CodeGroupDisk {
     return `code-approval:${basename(this.work)}`
   }
   private check(): void {
+    this.vault.fence?.assertOwner()
     if (!this.held())
       throw new EngineError(
         'lost',
@@ -56,11 +62,10 @@ export class CodeGroupDisk {
   }
   private async save(): Promise<void> {
     this.check()
-    await new NodeFileSystem(this.work).writeAtomic(
-      'journal.json',
-      new TextEncoder().encode(JSON.stringify(this.journal)),
-      0
-    )
+    await new NodeFileSystem(this.work, {
+      effectGuard: () => this.check(),
+      effectTracker: this.vault.fence?.track,
+    }).writeAtomic('journal.json', new TextEncoder().encode(JSON.stringify(this.journal)), 0)
   }
   async place(draft: CodeDraft): Promise<void> {
     this.check()
@@ -129,7 +134,8 @@ export class CodeGroupDisk {
   }
   async discard(): Promise<void> {
     this.check()
-    await rm(this.work, { recursive: true, force: true })
+    const remove = () => rm(this.work, { recursive: true, force: true })
+    await (this.vault.fence ? this.vault.fence.track(remove) : remove())
     // Never durably forget the commit marker while the journal's directory could reappear.
     await syncPath(dirname(this.work))
     this.check()
@@ -144,13 +150,20 @@ export class CodeGroupDisk {
       if (!entry.isDirectory() || !/^group-[a-zA-Z0-9]+$/.test(entry.name)) continue
       const disk = new CodeGroupDisk(join(folder, entry.name), vault, held)
       disk.check()
-      const files = new NodeFileSystem(disk.work)
+      const files = new NodeFileSystem(disk.work, {
+        effectGuard: () => disk.check(),
+        effectTracker: vault.fence?.track,
+      })
       if ((await files.stat('journal.json')) !== null) {
         disk.journal = parseJournal(
           JSON.parse(new TextDecoder().decode(await files.read('journal.json'))),
           vault.cfg.vaultId
         )
         if (vault.state.getMeta(disk.marker) !== 'committed') await disk.rollback()
+      } else if ((await readdir(disk.work)).length) {
+        throw new ExternalStateError('recovery-required', {
+          cause: 'unjournaled installation material must be retained',
+        })
       }
       await disk.discard()
     }

@@ -1,5 +1,6 @@
 import { EngineError, ScopedState, createScopedClient } from '@abele/sync-core'
 import { acquireLock } from '../lock.js'
+import { assertClaim, assertLocalSafety, guardedFetch } from '../externalSafety.js'
 import { SqliteStateStore } from '../sqliteState.js'
 import {
   agentDirectory,
@@ -34,15 +35,6 @@ export async function runAgentSetup(opts: AgentSetupOptions, ctx: CommandContext
     throw new UsageError(
       'set ABELE_AGENT_TOKEN to the scoped machine key; no owner password is used'
     )
-  const client = await createScopedClient({
-    baseUrl: opts.server,
-    token,
-    fetch: ctx.fetch,
-    vaultId: opts.vault,
-    grantId: opts.grant,
-    principalId: opts.principal,
-    principalKind: 'key',
-  })
   let lock
   try {
     lock = await acquireLock(dir, ctx.lockTiming)
@@ -55,13 +47,32 @@ export async function runAgentSetup(opts: AgentSetupOptions, ctx: CommandContext
   }
   let raw: SqliteStateStore | undefined
   try {
+    const check = () => {
+      assertClaim(lock.held)
+      assertLocalSafety(dir, true)
+    }
+    check()
     freshAgentRoot(dir)
+    const client = await createScopedClient({
+      baseUrl: opts.server,
+      token,
+      fetch: guardedFetch(ctx.fetch, check),
+      vaultId: opts.vault,
+      grantId: opts.grant,
+      principalId: opts.principal,
+      principalKind: 'key',
+    })
     await validateAgent(client)
-    raw = SqliteStateStore.open(agentDbFile(dir))
+    check()
+    raw = SqliteStateStore.open(agentDbFile(dir), { effectGuard: () => assertClaim(lock.held) })
     await ScopedState.open(raw, client.binding, { initialize: true })
     if (!lock.held()) throw new EngineError('lost', 'agent setup claim lost')
-    createAgentsFolder(dir)
-    writeAgentConfig(dir, { mode: 'agent', scriptPolicy: 'refuse', binding: client.binding, token })
+    createAgentsFolder(dir, () => assertClaim(lock.held))
+    writeAgentConfig(
+      dir,
+      { mode: 'agent', scriptPolicy: 'refuse', binding: client.binding, token },
+      () => assertClaim(lock.held)
+    )
     ctx.io.out('agent folder connection set up; exact paths, script policy refuse')
     return EXIT_OK
   } finally {

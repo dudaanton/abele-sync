@@ -4,7 +4,6 @@ import { EXIT_REVOKED, EXIT_LOCKED, EXIT_OK, UsageError, type CommandContext } f
 import { personalRevocationBinding, recordRevoked, wasRevoked } from '../revoked.js'
 import { forgetJoinOnceDone } from '../join.js'
 import { codeHeldLine } from '../pluginCode.js'
-import { CodeGroupDisk } from '../codeGroupDisk.js'
 import { openLog, type Log } from '../log.js'
 import { PROGRESS_FILE_MS, PROGRESS_LINE_MS, PushProgress, writeLive } from '../progress.js'
 import {
@@ -17,6 +16,7 @@ import {
   rememberScope,
   rememberSummary,
   rememberVault,
+  recoverVault,
   requireConfig,
   requireServerUrl,
   REVOKED_HINT,
@@ -100,7 +100,7 @@ export async function runRun(opts: RunOptions, ctx: CommandContext): Promise<num
   let terminalRevoked = false
   try {
     const log = openLog(dir)
-    vault = openVault(dir, ctx)
+    vault = openVault(dir, ctx, lock.held)
     if (wasRevoked(vault.state, personalRevocationBinding(vault.cfg))) {
       const line = 'stopping: device token was revoked or is no longer authorized'
       log.line(line)
@@ -108,7 +108,7 @@ export async function runRun(opts: RunOptions, ctx: CommandContext): Promise<num
       ctx.io.err(REVOKED_HINT)
       return EXIT_REVOKED
     }
-    await CodeGroupDisk.recover(vault, lock.held)
+    await recoverVault(vault, lock.held)
     // Under the lock, and only here: what a killed daemon left half-written is nobody's now.
     vault.disk.sweepTemp()
     rememberVault(vault)
@@ -175,7 +175,14 @@ export async function runRun(opts: RunOptions, ctx: CommandContext): Promise<num
       ctx.io.err('revoked status could not be saved; recover the local ledger before restarting')
     // Nothing is in flight now, so nothing of ours is in the temp folder; a clean exit leaves
     // none behind. A lost lock leaves it alone: it may be the next holder's by now.
-    if (lostWhy === null) vault?.disk.removeTemp()
+    if (lostWhy === null && lock.held() && vault?.recovery) {
+      try {
+        vault.recovery.assertReady()
+        vault.disk.removeTemp()
+      } catch {
+        /* recovery/lost ownership preserves all artifacts */
+      }
+    }
     vault?.close()
     lock()
     // Only once the lock no longer names this process a daemon.

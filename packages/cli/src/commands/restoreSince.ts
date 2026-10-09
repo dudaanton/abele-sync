@@ -6,11 +6,11 @@ import { acquireLock, type Lock } from '../lock.js'
 import { openLog } from '../log.js'
 import { promptLine } from '../prompt.js'
 import { codeHeldLine } from '../pluginCode.js'
-import { CodeGroupDisk } from '../codeGroupDisk.js'
 import {
   buildEngine,
   DEFAULT_INTERVAL_SECONDS,
   openVault,
+  recoverVault,
   summarise,
   type OpenVault,
 } from '../vault.js'
@@ -51,8 +51,8 @@ export async function runRestoreSince(
   let vault: OpenVault | null = null
   let engine: SyncEngine | null = null
   try {
-    vault = openVault(dir, ctx)
-    if (release !== null) await CodeGroupDisk.recover(vault, release.held)
+    vault = openVault(dir, ctx, release?.held)
+    if (release !== null) await recoverVault(vault, release.held)
     const items = (await vault.client.trash())
       .filter((item) => Date.parse(item.deleted_at) >= since)
       .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))

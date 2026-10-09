@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { EngineError, sha256, type FileInfo, type FileSystem } from '@abele/sync-core'
-import { NodeFileSystem } from './nodeFs.js'
+import { NodeFileSystem, type NodeFileSystemOptions } from './nodeFs.js'
 
 export interface Image {
   sha: string
@@ -71,13 +71,19 @@ export class CodeDraft implements FileSystem {
     readonly blobs: GroupBlobs
   ) {}
 
-  static async create(real: FileSystem, work: string): Promise<CodeDraft> {
+  static async create(
+    real: FileSystem,
+    work: string,
+    options: NodeFileSystemOptions = {}
+  ): Promise<CodeDraft> {
+    options.effectGuard?.()
     await mkdir(join(work, 'view'))
+    options.effectGuard?.()
     await mkdir(join(work, 'blobs'))
     return new CodeDraft(
       real,
-      new NodeFileSystem(join(work, 'view')),
-      new GroupBlobs(new NodeFileSystem(join(work, 'blobs')))
+      new NodeFileSystem(join(work, 'view'), options),
+      new GroupBlobs(new NodeFileSystem(join(work, 'blobs'), options))
     )
   }
 

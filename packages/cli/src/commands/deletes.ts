@@ -6,10 +6,10 @@ import {
   type HeldDelete,
 } from '@abele/sync-core'
 import { EXIT_LOCKED, EXIT_OK, UsageError, type CommandContext } from '../context.js'
-import { acquireLock, localDaemon, lockHolder } from '../lock.js'
+import { acquireLock, localDaemon, lockHolder, type Lock } from '../lock.js'
 import { promptLine } from '../prompt.js'
 import { openLog } from '../log.js'
-import { heldFingerprint, openVault, requireConfig, vaultDir } from '../vault.js'
+import { heldFingerprint, openVault, recoverVault, requireConfig, vaultDir } from '../vault.js'
 
 /**
  * The deletes the guard is holding, and the decision about them.
@@ -54,7 +54,7 @@ export async function runDeletes(opts: DeletesOptions, ctx: CommandContext): Pro
   if (opts.expect !== undefined && kind !== 'confirm') {
     throw new UsageError('--expect goes with --confirm')
   }
-  let release: (() => void) | null = null
+  let release: Lock | null = null
   try {
     release = await acquireLock(dir, ctx.lockTiming ?? {})
   } catch (error) {
@@ -69,9 +69,10 @@ export async function runDeletes(opts: DeletesOptions, ctx: CommandContext): Pro
     }
   }
   try {
-    const vault = openVault(dir, ctx)
+    const vault = openVault(dir, ctx, release?.held)
     let count: number
     try {
+      if (release) await recoverVault(vault, release.held)
       const held = await readHeldDeletes(vault.state)
       count = held.length
       if (count === 0) {

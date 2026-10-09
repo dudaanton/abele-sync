@@ -1,5 +1,6 @@
 import {
   DEFERRED_KEY,
+  EngineError,
   MemoryStateStore,
   type DeferredApplied,
   type SyncEngine,
@@ -31,7 +32,13 @@ export async function approveCodeGroup(
     result = await vault.state.transaction(async () => {
       if ((await vault.state.getJournal()) !== null)
         throw new HeldGroup('finish the interrupted sync before approval')
-      const draft = await CodeDraft.create(vault.fs, disk.work)
+      const draft = await CodeDraft.create(vault.fs, disk.work, {
+        effectGuard: () => {
+          vault.fence?.assertOwner()
+          if (!held()) throw new EngineError('lost', 'code approval ownership lost')
+        },
+        effectTracker: vault.fence?.track,
+      })
       const paths = new Set(
         group.changes.flatMap((one) => [
           one.path,
