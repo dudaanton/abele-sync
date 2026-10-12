@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest'
 import { createUploadManager } from '../../src/blobs/uploads.js'
 import { loadConfig } from '../../src/config.js'
-import { runRetention } from '../../src/history/retention.js'
+import { runRetainedEngineRetention as runRetention } from '../helpers/retainedRetention.js'
 import { buildTestApp } from '../helpers/testApp.js'
 import { commit, create, putBlob } from '../helpers/ops.js'
 

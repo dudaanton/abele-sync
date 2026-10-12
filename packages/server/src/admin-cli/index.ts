@@ -4,26 +4,26 @@ import { join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Command, CommanderError } from 'commander'
 import { sql, type Kysely } from 'kysely'
-import { createAccount, resetPassword, type AuthDeps } from '../auth/accounts.js'
+import { createUser } from '../access/tokens.js'
 import { BlobStore } from '../blobs/store.js'
 import { createUploadManager } from '../blobs/uploads.js'
+import { runRetention } from '../history/retention.js'
 import { loadConfig, type Config } from '../config.js'
 import { createDb, type Dialect } from '../db/connect.js'
 import { runMigrations } from '../db/migrate.js'
 import type { Database } from '../db/schema.js'
-import { runRetention } from '../history/retention.js'
-import { createVault } from '../vault/vaults.js'
 import { verifyBackup } from './verifyBackup.js'
 
 /**
  * The operator's side of the server: the handful of things that have to be done
- * from a shell because no route may do them — making the first account, resetting
- * a password nobody can log in with, running the sweep by hand, taking a backup.
+ * from a shell because no route may do them — provisioning a user/root token
+ * and taking a verified backup or running storage cleanup.
  *
  * It opens its own database from `ABELE_DATABASE_URL` and migrates it first, so
  * it works on a server that has never been started. Nothing is written straight
  * to the console: everything goes through `out`, which the tests read instead of
- * printing, and no token, password or hash is ever among it.
+ * printing. Only `user create` deliberately prints a newly created root token;
+ * existing secrets, hashes and passwords are never printed.
  */
 
 export interface AdminOutput {
@@ -91,78 +91,37 @@ function buildProgram(out: AdminOutput, chosen: { command: AdminCommand | null }
     })
 
   program
-    .command('create-account')
-    .description('create an account')
-    .requiredOption('--email <email>', 'the email that identifies it')
-    .requiredOption('--password <password>', 'its first password')
-    .action((opts: { email: string; password: string }) => {
+    .command('user')
+    .description('local unified-access provisioning')
+    .command('create')
+    .requiredOption('--label <label>', 'display label for the user and initial root token')
+    .requiredOption('--address <url>', 'canonical public HTTPS address (or loopback HTTP)')
+    .action((opts: { label: string; address: string }) => {
       chosen.command = async (ctx) => {
-        const { id } = await createAccount(authDeps(ctx), opts.email, opts.password)
-        out.log(`created account ${id} for ${normaliseEmail(opts.email)}`)
-      }
-    })
-
-  program
-    .command('reset-password')
-    .description('set a new password and drop the tokens the old one issued')
-    .requiredOption('--email <email>', 'the account to reset')
-    .requiredOption('--password <password>', 'its new password')
-    .action((opts: { email: string; password: string }) => {
-      chosen.command = async (ctx) => {
-        const email = normaliseEmail(opts.email)
-        // Asked first, so that an operator's typo comes back with the address they typed.
-        await accountFor(ctx.db, email)
-        await resetPassword(authDeps(ctx), email, opts.password)
-        out.log(`reset the password for ${email}`)
-      }
-    })
-
-  program
-    .command('create-vault')
-    .description('create a vault owned by an existing account')
-    .requiredOption('--owner-email <email>', 'the account that will own it')
-    .requiredOption('--name <name>', 'what to call it')
-    .action((opts: { ownerEmail: string; name: string }) => {
-      chosen.command = async (ctx) => {
-        const email = normaliseEmail(opts.ownerEmail)
-        const owner = await accountFor(ctx.db, email)
-        const { id } = await createVault({ db: ctx.db }, owner.id, opts.name)
-        out.log(`created vault ${id} named ${opts.name} for ${email}`)
-      }
-    })
-
-  program
-    .command('list-vaults')
-    .description('every vault on this server, with its owner')
-    .action(() => {
-      chosen.command = async (ctx) => {
-        const vaults = await ctx.db
-          .selectFrom('vaults')
-          // A left join: a vault whose owner row went missing must still be listed.
-          .leftJoin('accounts', 'accounts.id', 'vaults.owner_account_id')
-          .select(['vaults.id as id', 'vaults.name as name', 'accounts.email as owner'])
-          .orderBy('vaults.created_at')
-          .execute()
-        if (vaults.length === 0) {
-          out.log('no vaults')
-          return
-        }
-        for (const vault of vaults) {
-          out.log(`${vault.id}  ${vault.name}  ${vault.owner ?? '(no owner)'}`)
-        }
+        const issued = await createUser(
+          { db: ctx.db, pepper: ctx.config.tokenPepper, dialect: ctx.dialect },
+          opts.label,
+          opts.address
+        )
+        out.log(issued.token)
       }
     })
 
   program
     .command('gc')
-    .description('run retention once, now')
+    .description('run retained storage cleanup for token spaces')
     .action(() => {
       chosen.command = async (ctx) => {
         const report = await runRetention({
           db: ctx.db,
           dialect: ctx.dialect,
           store: ctx.store,
-          uploads: createUploadManager({ config: ctx.config, db: ctx.db, store: ctx.store }),
+          uploads: createUploadManager({
+            config: ctx.config,
+            db: ctx.db,
+            store: ctx.store,
+            dialect: ctx.dialect,
+          }),
           idempotencyTtlMs: ctx.config.idempotencyTtlMs,
           now: () => new Date(),
         })
@@ -230,26 +189,6 @@ async function backup(ctx: AdminContext, dir: string, out: AdminOutput): Promise
   await verifyBackup(database, blobs, ctx.config.masterKey)
   out.log('backup verified: every snapshot version has intact bytes')
 }
-
-const authDeps = (ctx: AdminContext): AuthDeps => ({
-  db: ctx.db,
-  pepper: ctx.config.tokenPepper,
-  accountTokenTtlMs: ctx.config.accountTokenTtlMs,
-})
-
-/** The account that email names, or a failure that says which email nobody has. */
-async function accountFor(db: Kysely<Database>, email: string): Promise<{ id: string }> {
-  const account = await db
-    .selectFrom('accounts')
-    .select('id')
-    .where('email', '=', email)
-    .executeTakeFirst()
-  if (account === undefined) throw new Error(`no account has the email ${email}`)
-  return account
-}
-
-/** The same normalisation `accounts.ts` stores emails under, so a lookup here finds them. */
-const normaliseEmail = (email: string): string => email.trim().toLowerCase()
 
 /** Is that path there? Only ENOENT is absent; a disk that will not answer says so instead. */
 const exists = (path: string): Promise<boolean> =>

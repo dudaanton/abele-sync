@@ -24,7 +24,7 @@ import {
   type ScanFilter,
   type ScanResult,
   type VaultClient,
-} from '../../src/index.js'
+} from '../legacy/index.js'
 import { BASE_URL, serverHarness, type Harness } from '../helpers/harness.js'
 
 /**
@@ -470,7 +470,7 @@ describe('the pusher over the device facet', () => {
     expect((await d.scan()).ops).toEqual([])
   })
 
-  it('writes nothing when the head a conflict names is what the file already holds', async () => {
+  it('writes nothing and creates no conflict when both sides sent identical bytes', async () => {
     const vault = await ownVault('conflict-same')
     await copyConflictsAside(vault)
     const d = vault.device()
@@ -488,13 +488,56 @@ describe('the pusher over the device facet', () => {
     await d.write('note.md', 'both of us', 3000)
     const report = await d.sync()
 
-    expect(report).toMatchObject({ conflicts: 1, rejected: [] })
+    expect(report).toMatchObject({ applied: 1, conflicts: 0, rejected: [] })
     expect(await d.text('note.md')).toBe('both of us')
     // The bytes are already there: nothing was downloaded and nothing was written.
     expect(d.writes).toEqual([])
     expect(d.gets).toEqual([])
     expect(await d.state.get('note.md')).toMatchObject({ sha: head.sha, mtime: 3000 })
     expect((await d.scan()).ops).toEqual([])
+  })
+
+  it('refuses a replay whose conflict copy was edited rather than recording original bytes against its new version', async () => {
+    const vault = await ownVault('edited-conflict-retry')
+    const d = vault.device()
+    await d.write('note.md', 'base\n')
+    await d.sync()
+    const base = must(await d.state.get('note.md'), 'missing base')
+    await seed(vault.client, [
+      {
+        op: 'modify',
+        file_id: base.fileId,
+        base_version_id: base.versionId,
+        ...(await blob(vault.client, 'head\n')),
+        mtime: 2000,
+      },
+    ])
+    await d.write('note.md', 'incoming\n', 3000)
+    const first = (await d.sync()).committed?.results[0]
+    if (first?.status !== 'conflict') throw new Error('expected conflict')
+    await seed(vault.client, [
+      {
+        op: 'modify',
+        file_id: first.conflict_file_id,
+        base_version_id: first.conflict_version_id,
+        ...(await blob(vault.client, 'copy edited\n')),
+        mtime: 4000,
+      },
+    ])
+    // A lost-response legacy client replays from its old ledger without a copy on disk.
+    await d.state.put(base)
+    await d.write('note.md', 'incoming\n', 5000)
+    const replay = await d.sync()
+    expect(replay.rejected.map((r) => r.code)).toEqual(['not_found'])
+    expect(await d.text('note.md')).toBe('incoming\n')
+    expect(await d.fs.stat(first.conflict_path)).toBeNull()
+    const manifest = (await vault.client.manifest(null)).items
+    expect(manifest).toHaveLength(2)
+    expect(
+      decoder.decode(
+        await vault.client.getBlob(manifest.find((i) => i.file_id === first.conflict_file_id)!.sha!)
+      )
+    ).toBe('copy edited\n')
   })
 
   it('puts a rejected move back where it was, and reports it', async () => {
@@ -594,10 +637,17 @@ describe('the pusher over the device facet', () => {
 
     const report = await d.sync()
 
-    // The server merged the create into the moved file; this disk had that file under its old
-    // name, unedited, so the copy there goes: left, the next scan would create it anew.
-    expect(report.merged).toBe(1)
-    expect(await d.text('b.md')).toBe('from A\na new B\n')
+    // The moved original keeps its bytes; the competing create gets its own complete copy.
+    // The old synced path still goes so the next scan does not create it anew.
+    expect(report.conflicts).toBe(1)
+    expect(await d.text('b.md')).toBe('from A\n')
+    const result = report.committed?.results[0]
+    if (result?.status !== 'conflict') throw new Error('expected conflict')
+    expect(
+      decoder.decode(
+        await vault.client.versionBytes(result.conflict_file_id, result.conflict_version_id)
+      )
+    ).toBe('a new B\n')
     expect(await d.fs.stat('a.md')).toBeNull()
     expect(await d.state.get('a.md')).toBeNull()
     expect(await d.state.get('b.md')).toMatchObject({ fileId: mine.fileId })
@@ -622,7 +672,14 @@ describe('the pusher over the device facet', () => {
 
     const report = await d.pushScan(found)
 
-    expect(report.merged).toBe(1)
+    expect(report.conflicts).toBe(1)
+    const result = report.committed?.results[0]
+    if (result?.status !== 'conflict') throw new Error('expected conflict')
+    expect(
+      decoder.decode(
+        await vault.client.versionBytes(result.conflict_file_id, result.conflict_version_id)
+      )
+    ).toBe('a new B\n')
     expect(await d.text('a.md')).toBe('from A, and more\n')
     expect(await d.state.get('a.md')).toBeNull()
   })
@@ -877,18 +934,20 @@ describe('the pusher over the device facet', () => {
   it('leaves an edit made while the batch was in the air alone, and keeps both sides after', async () => {
     const vault = await ownVault('merge-raced')
     const d = vault.device()
-    await d.write('race.md', 'alfa\nbravo\ncharlie\n')
+    await d.write('race.md', 'alfa\nbravo\ncharlie\nanchor\n')
     await d.sync()
     const base = must(await d.state.get('race.md'), 'race.md was never synced')
     d.forget()
 
     // Another device rewrites the first line while this one is away.
-    const head = await blob(vault.client, 'ALFA-from-yonder\nbravo\ncharlie\n')
+    // Keep an unchanged anchor between the replacement and late insertion so
+    // this byte-preservation/settlement test exercises a proven clean merge.
+    const head = await blob(vault.client, 'ALFA-from-yonder\nbravo\ncharlie\nanchor\n')
     await seed(vault.client, [
       { op: 'modify', file_id: base.fileId, base_version_id: base.versionId, ...head, mtime: 2000 },
     ])
-    const sent = 'alfa\nbravo\nCHARLIE-from-here\n'
-    const late = 'alfa\nbravo\nCHARLIE-from-here\ndelta-typed-late\n'
+    const sent = 'alfa\nbravo\nCHARLIE-from-here\nanchor\n'
+    const late = 'alfa\nbravo\nCHARLIE-from-here\nanchor\ndelta-typed-late\n'
     await d.write('race.md', sent, 3000)
 
     // Somebody types again after the bytes have gone up and before the verdict comes back.
@@ -1145,7 +1204,7 @@ describe('the pusher over the device facet', () => {
 
     const first = await d.sync()
 
-    expect(first).toMatchObject({ merged: 1, rejected: [], kept: ['both.md'] })
+    expect(first).toMatchObject({ conflicts: 1, rejected: [], kept: ['both.md'] })
     expect(await d.text('both.md')).toBe(late)
     expect(d.writes).toEqual([])
     // A create has no base to keep it on, so nothing is recorded at all. That is what makes
@@ -1160,10 +1219,19 @@ describe('the pusher over the device facet', () => {
     const second = await d.sync()
 
     const settled = second.committed?.results[0]
-    if (settled?.status !== 'merged') throw new Error(`not merged: ${JSON.stringify(settled)}`)
+    if (settled?.status !== 'conflict')
+      throw new Error(`not conflicted: ${JSON.stringify(settled)}`)
     const server = decoder.decode(await vault.client.getBlob(settled.sha))
-    expect(server).toContain('line-from-yonder')
-    expect(server).toContain('late-line-from-here')
+    expect(server).toBe('line-from-yonder\n')
+    expect(
+      decoder.decode(
+        await vault.client.versionBytes(settled.conflict_file_id, settled.conflict_version_id)
+      )
+    ).toBe(late)
+    const copies = (await vault.client.manifest(null)).items.filter((i) =>
+      i.path.startsWith('both (Conflicted copy')
+    )
+    expect(copies).toHaveLength(2) // sent and late are different branches, not duplicated retries
   })
 
   it('keeps every move with its modify, however far apart the scan put them', async () => {

@@ -2,10 +2,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
   cleanupFolders,
   config,
-  EMAIL,
   listing,
   manifestPaths,
-  PASSWORD,
   read,
   setSelective,
   SETUP_MS,
@@ -26,7 +24,6 @@ let b: string
 
 beforeAll(async () => {
   server = await spawnServer()
-  await server.createAccount(EMAIL, PASSWORD)
   const pair = await vaultPair(server, 'Settings')
   a = pair.a
   b = pair.b

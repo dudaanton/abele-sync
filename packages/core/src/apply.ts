@@ -5,9 +5,10 @@ import {
   type ChangeItem,
   type CommitOpResult,
 } from '@abele/sync-protocol'
-import type { VaultClient } from './client.js'
+import type { EngineClient } from './engineClient.js'
 import type { ExpectedWrites } from './echo.js'
 import type { FileSystem } from './fs.js'
+import { fingerprintFile } from './fs.js'
 import type { StateEntry, StateStore } from './state.js'
 
 /**
@@ -68,7 +69,7 @@ export async function shaIndex(state: StateStore): Promise<Map<string, StateEntr
  * for the caller to hold the change over and say so.
  */
 export async function bytesFor(
-  client: Pick<VaultClient, 'getBlob'>,
+  client: Pick<EngineClient, 'getBlob'>,
   fs: FileSystem,
   sha: string,
   local: Map<string, StateEntry>,
@@ -84,7 +85,7 @@ export async function bytesFor(
 
 /** The server's bytes for a sha, or `null` when they do not hash to it. */
 export async function fetchChecked(
-  client: Pick<VaultClient, 'getBlob'>,
+  client: Pick<EngineClient, 'getBlob'>,
   sha: string,
   hash: (bytes: Uint8Array) => Promise<string>
 ): Promise<Uint8Array | null> {
@@ -194,7 +195,7 @@ export async function settledStat(
   if (have === null) return { size: wrote.size, mtime: wrote.mtime }
   if (have.size === wrote.size && have.mtime === wrote.mtime) return have
   try {
-    if ((await hash(await fs.read(path))) === sha) return have
+    if ((await fingerprintFile(fs, path, hash)).sha === sha) return have
   } catch {
     // Gone or unreadable between the stat and the read: what was written is what is known.
   }

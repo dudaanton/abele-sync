@@ -15,15 +15,6 @@ describe('loadConfig', () => {
     expect(c.wsHelloTimeoutMs).toBe(5000)
     expect(c.trustProxy).toBe(false)
   })
-  it('enables the entire scoped runtime only with an explicit on setting', () => {
-    expect(loadConfig(base).scopedSharing).toBe(false)
-    expect(loadConfig({ ...base, ABELE_SCOPED_SHARING: 'off' }).scopedSharing).toBe(false)
-    expect(loadConfig({ ...base, ABELE_SCOPED_SHARING: 'on' }).scopedSharing).toBe(true)
-    for (const value of ['', 'true', 'ON', 'folder', ' on '])
-      expect(() => loadConfig({ ...base, ABELE_SCOPED_SHARING: value })).toThrow(
-        /ABELE_SCOPED_SHARING must be on or off/
-      )
-  })
   it('reads the proxies to trust: none, all, or a list', () => {
     expect(loadConfig({ ...base, ABELE_TRUST_PROXY: 'false' }).trustProxy).toBe(false)
     expect(loadConfig({ ...base, ABELE_TRUST_PROXY: '' }).trustProxy).toBe(false)

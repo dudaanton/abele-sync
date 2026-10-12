@@ -47,10 +47,18 @@ export class SettlingFileSystem implements FileSystem, PathMatcher {
   private readonly growing = new Set<string>()
   /** Present only when the adapter watches, so the engine's `fs.watch !== undefined` is honest. */
   readonly watch?: (cb: (paths: string[]) => void) => () => void
+  readonly openRead?: FileSystem['openRead']
+  readonly fingerprint?: FileSystem['fingerprint']
+  readonly beginAtomicWrite?: FileSystem['beginAtomicWrite']
+  readonly reopenStage?: FileSystem['reopenStage']
 
   constructor(private readonly disk: SettleableFileSystem) {
     const watch = disk.watch
     if (watch) this.watch = (cb) => watch.call(disk, cb)
+    if (disk.openRead) this.openRead = disk.openRead.bind(disk)
+    if (disk.fingerprint) this.fingerprint = disk.fingerprint.bind(disk)
+    if (disk.beginAtomicWrite) this.beginAtomicWrite = disk.beginAtomicWrite.bind(disk)
+    if (disk.reopenStage) this.reopenStage = disk.reopenStage.bind(disk)
   }
 
   /**
@@ -112,6 +120,19 @@ export class SettlingFileSystem implements FileSystem, PathMatcher {
     // not against the size this one happened to catch it at.
     const now = await this.disk.stat(info.path)
     if (now) this.sizes.set(info.path, now.size)
+  }
+
+  listDirectories() {
+    return this.disk.listDirectories!()
+  }
+  mkdir(path: string) {
+    return this.disk.mkdir!(path)
+  }
+  moveDirectory(from: string, to: string) {
+    return this.disk.moveDirectory!(from, to)
+  }
+  removeDirectory(path: string) {
+    return this.disk.removeDirectory!(path)
   }
 
   /* ── Everything else is the disk's own ───────────────────────────────── */

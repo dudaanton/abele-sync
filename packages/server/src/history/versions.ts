@@ -26,7 +26,7 @@ export async function listVersions(
   db: Kysely<Database>,
   vaultId: string,
   fileId: string,
-  opts: { limit: number; before?: number }
+  opts: { limit: number; before?: number; scopeId?: string }
 ): Promise<VersionInfo[]> {
   await requireFile(db, vaultId, fileId)
   let query = db
@@ -51,6 +51,16 @@ export async function listVersions(
     .orderBy('no', 'desc')
     .limit(opts.limit)
   if (opts.before !== undefined) query = query.where('no', '<', opts.before)
+  if (opts.scopeId !== undefined)
+    query = query.where(
+      'id',
+      'in',
+      db
+        .selectFrom('scope_versions')
+        .select('version_id')
+        .where('scope_id', '=', opts.scopeId)
+        .where('file_id', '=', fileId)
+    )
 
   const rows = await query.execute()
   return rows.map((row) => ({

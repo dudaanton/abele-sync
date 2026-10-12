@@ -5,7 +5,7 @@ import {
   MemoryFileSystem,
   selectiveDefaults,
   type VaultClient,
-} from '../../src/index.js'
+} from '../legacy/index.js'
 import { serverHarness, type Harness } from '../helpers/harness.js'
 import { Device, converge, type DeviceOptions } from '../helpers/device.js'
 import { create, seed, shaOf } from '../helpers/seed.js'

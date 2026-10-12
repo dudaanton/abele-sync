@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { selectiveDefaults, type VaultClient } from '../../src/index.js'
+import { selectiveDefaults, type VaultClient } from '../legacy/index.js'
 import { serverHarness, type Harness } from '../helpers/harness.js'
 import { Device } from '../helpers/device.js'
 import { blob, create, seed, setConflictMode, shaOf } from '../helpers/seed.js'
@@ -55,10 +55,22 @@ async function headText(client: VaultClient, path: string): Promise<string> {
 
 const SERVER = 'server line\n'.repeat(20)
 
-/** The seeder's note over the cap, and a small local one of the joiner's merged into it. */
+/** A small shared base, then a clean line-level merge into the seeder's over-cap head. */
 async function merged(name: string): Promise<Pair> {
   const p = await pair(name, 100)
-  await seed(p.seeder, [await create(p.seeder, 'big.md', SERVER, 100)])
+  const initial = (await seed(p.seeder, [await create(p.seeder, 'big.md', 'start\n', 100)]))
+    .results[0]!
+  if (initial.status === 'rejected') throw new Error('fixture rejected')
+  await p.joiner.sync()
+  await seed(p.seeder, [
+    {
+      op: 'modify',
+      file_id: initial.file_id,
+      base_version_id: initial.version_id,
+      ...(await blob(p.seeder, 'start\n' + SERVER)),
+      mtime: 150,
+    },
+  ])
   await p.joiner.write('big.md', 'local\n', 200)
   const report = await p.joiner.sync()
   expect(report.push.merged).toBe(1)
@@ -86,8 +98,8 @@ describe('an over-cap head the server merged', () => {
 
   it('a local edit does not replace the merged note cleanly (P5)', async () => {
     const p = await merged('overcap-p5')
-    // The local copy is recorded against the bytes it sent, kept by the server as a version of
-    // their own: the create had no base, so that version is the only one the disk derives from.
+    // The local copy is recorded against exactly its sent bytes, retained beneath the clean
+    // merge, not against the over-cap output that this disk could not download.
     const entry = await p.joiner.state.get('big.md')
     const versions = await p.seeder.versions(entry?.fileId ?? '', {})
     const kept = versions.find((v) => v.version_id === entry?.versionId)
@@ -177,11 +189,14 @@ describe('an edit here merged into a head over the cap', () => {
     await p.joiner.sync()
     expect((await p.joiner.state.get('note.md'))?.versionId).toBe(p.first)
 
-    await p.joiner.write('note.md', 'ALPHA\nBETA\ngamma\n')
+    // A separate replacement behind the unchanged beta anchor is provably
+    // independent. Keep the stale-base/over-cap assertions, not the old ambiguous
+    // partial overlap between one replacement and a two-line rewrite.
+    await p.joiner.write('note.md', 'ALPHA\nbeta\nGAMMA\n')
     await p.joiner.sync()
     const text = await headText(p.seeder, 'note.md')
     expect(text).toContain(TEN)
-    expect(text).toContain('BETA\n')
+    expect(text).toContain('GAMMA\n')
   })
 })
 
@@ -227,23 +242,37 @@ describe('a fallback with no version holding the bytes sent', () => {
     await p.joiner.sync()
     const text = await headText(p.seeder, 'n.md')
     for (let k = 0; k < 20; k++) expect(text).toContain(`line ${k}\n`)
-    expect(text).toContain('mine edited\n')
+    expect(text).not.toContain('mine edited\n')
+    const copies = (await p.seeder.manifest(null)).items.filter((i) =>
+      i.path.startsWith('n (Conflicted copy')
+    )
+    expect(copies).toHaveLength(2) // the initial and later create carry distinct bytes
+    const texts = await Promise.all(copies.map((i) => headText(p.seeder, i.path)))
+    expect(texts).toContain('line 17\nline 18\nline 19\nmine edited\n')
   })
 })
 
-describe('a new file here merged into a head over the cap', () => {
+describe('a new file here conflicts with a head over the cap', () => {
   it("an edit of the joined copy keeps the seeder's lines (Q4)", async () => {
     const p = await pair('overcap-q4', 100)
     const lines = Array.from({ length: 20 }, (_, k) => `line ${k}\n`).join('')
     await seed(p.seeder, [await create(p.seeder, 'n.md', lines, 100)])
     await p.joiner.write('n.md', 'line 17\nline 18\nline 19\nmine\n', 200)
     await p.joiner.sync()
-    await p.joiner.write('n.md', 'line 17\nline 18\nline 19\nmine edited\n')
+    const copyPath = p.joiner.paths().find((p) => p.startsWith('n (Conflicted copy'))!
+    await p.joiner.write(copyPath, 'line 17\nline 18\nline 19\nmine edited\n')
     await p.joiner.sync()
     const text = await headText(p.seeder, 'n.md')
     for (let k = 0; k < 20; k++) expect(text).toContain(`line ${k}\n`)
-    expect(text).toContain('mine edited\n')
+    expect(text).not.toContain('mine edited\n')
     expect(text).not.toMatch(/^mine\n/m)
+    const copies = (await p.seeder.manifest(null)).items.filter((i) =>
+      i.path.startsWith('n (Conflicted copy')
+    )
+    expect(copies).toHaveLength(1) // the joined copy is edited in place under its own identity
+    expect(await headText(p.seeder, copies[0]!.path)).toBe(
+      'line 17\nline 18\nline 19\nmine edited\n'
+    )
   })
 })
 

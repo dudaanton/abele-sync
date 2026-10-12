@@ -64,8 +64,17 @@ describe('Adversarial: three offline editors, every arrival order', () => {
           }
         }
         for (const original of originals) expect(shas.has(await shaOf(original))).toBe(true)
-        if (kind === 'same-line' || kind === 'different-lines') {
+        if (kind === 'different-lines') {
+          expect(manifest).toHaveLength(1)
           for (let i = 0; i < 3; i++) expect(await ds[0]!.text('note.md')).toContain(`writer-${i}`)
+        }
+        if (kind === 'same-line') {
+          expect(manifest).toHaveLength(3) // original plus one copy per distinct incoming branch
+          expect(await ds[0]!.text('note.md')).toBe(originals[order[0]!]!)
+          const texts = await Promise.all(
+            manifest.map(async (v) => new TextDecoder().decode(await ds[0]!.client.getBlob(v.sha!)))
+          )
+          expect(texts.sort()).toEqual([...originals].sort())
         }
         const seq = (await ds[0]!.client.state()).head_seq
         await converge(...ds)

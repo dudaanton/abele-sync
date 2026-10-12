@@ -5,8 +5,6 @@ import {
   cleanupFolders,
   cli,
   clientFor,
-  EMAIL,
-  PASSWORD,
   read,
   SETUP_MS,
   syncOnce,
@@ -26,7 +24,6 @@ let a: string, b: string
 
 beforeAll(async () => {
   server = await spawnServer()
-  await server.createAccount(EMAIL, PASSWORD)
   ;({ a, b } = await vaultPair(server, 'Since'))
 }, SETUP_MS)
 

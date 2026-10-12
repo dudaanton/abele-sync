@@ -16,7 +16,6 @@
     "test:watch": "vitest",
     "test:sql": "node scripts/test-sql.mjs",
     "test:sql:disposable": "bash scripts/test-sql-disposable.sh",
-    "upgrade:preflight": "npm run build && node scripts/upgrade-preflight.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },

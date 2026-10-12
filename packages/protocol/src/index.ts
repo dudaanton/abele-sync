@@ -1,5 +1,7 @@
 export const PROTOCOL_VERSION = 1
 
+export * from './v2.js'
+export * from './groups.js'
 export * from './errors.js'
 export * from './paths.js'
 export * from './serverUrl.js'

@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { parseGroupFrontmatter } from '../../src/scoped/groups/frontmatter.js'
+import { parseGroupFrontmatter } from '@abele/sync-protocol'
 it('parses only bounded leading groups YAML, never body links, aliases, tags or recursive over-budget structures', () => {
   expect(parseGroupFrontmatter('---\ngroups: ["[[Root]]"]\n---\n![[Private.png]]')).toEqual({
     status: 'valid',

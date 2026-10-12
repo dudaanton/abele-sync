@@ -22,6 +22,31 @@ const head = (o: Partial<HeadState>): HeadState => ({
 })
 
 describe('decide', () => {
+  it('preserves both oversized note versions instead of attempting an in-memory merge', () => {
+    expect(
+      decide(
+        {
+          op: 'modify',
+          file_id: 'f',
+          base_version_id: 'v1',
+          sha: S1,
+          size: 1024 * 1024 + 1,
+          mtime: 1,
+        },
+        head({}),
+        settings('merge'),
+        false
+      )
+    ).toMatchObject({ kind: 'conflict-file' })
+    expect(
+      decide(
+        { op: 'modify', file_id: 'f', base_version_id: 'v1', sha: S1, size: 1, mtime: 1 },
+        head({ baseSize: 1024 * 1024 + 1 }),
+        settings('merge'),
+        false
+      )
+    ).toMatchObject({ kind: 'conflict-file' })
+  })
   it('1 create on a free path applies', () => {
     expect(
       decide(
@@ -122,7 +147,7 @@ describe('decide', () => {
   it('8 modify over a head that only moved applies at the new path', () => {
     expect(
       decide(
-        { op: 'modify', file_id: 'f', base_version_id: 'v1', sha: S1, size: 1, mtime: 9 },
+        { op: 'modify', file_id: 'f', base_version_id: 'v1', sha: S2, size: 1, mtime: 9 },
         head({ path: 'b.md', sha: S1, baseSha: S1 }),
         settings('merge'),
         false

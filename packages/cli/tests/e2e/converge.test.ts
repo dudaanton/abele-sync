@@ -7,11 +7,8 @@ import {
   bytes,
   cleanupFolders,
   converge,
-  EMAIL,
   listing,
-  PASSWORD,
   read,
-  setConflictMode,
   SETUP_MS,
   touch,
   vaultPair,
@@ -32,7 +29,6 @@ let b: string
 
 beforeAll(async () => {
   server = await spawnServer()
-  await server.createAccount(EMAIL, PASSWORD)
   const pair: Pair = await vaultPair(server, 'Converge')
   a = pair.a
   b = pair.b
@@ -116,8 +112,7 @@ describe('two folders on one vault', () => {
     expect(await read(b, 'shared.md')).toBe('ONE\ntwo\nthree\nfour\nFIVE\n')
   })
 
-  it('in conflict-file mode, keeps the first committer and copies the second aside in both', async () => {
-    await setConflictMode(a, 'conflict-file')
+  it('on a same-line conflict, keeps the first committer and copies the second aside in both', async () => {
     const fromA = 'one\nTWO by laptop\nthree\nfour\nfive\n'
     const fromB = 'one\nTWO by phone\nthree\nfour\nfive\n'
     await write(a, 'shared.md', fromA)

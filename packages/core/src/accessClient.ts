@@ -1,0 +1,46 @@
+import {
+  decodeAccessToken,
+  V2AccessTokenSchema,
+  V2ConnectionSchema,
+  V2IssueTokenRequestSchema,
+  V2IssueTokenResponseSchema,
+  V2TokensResponseSchema,
+  V2RevokeTokenResponseSchema,
+  type V2AccessToken,
+  type V2IssueTokenRequest,
+} from '@abele/sync-protocol'
+import { Http, type ClientOptions } from './http.js'
+
+/** One token connection, identical for personal devices and shared access. */
+export class AccessClient {
+  private readonly http: Http
+  readonly token: V2AccessToken
+  constructor(token: V2AccessToken, transport: Omit<ClientOptions, 'baseUrl' | 'token'>) {
+    this.token = V2AccessTokenSchema.parse(token)
+    this.http = new Http({ ...transport, baseUrl: this.token.address, token: this.token.key })
+  }
+  static fromToken(
+    encoded: string,
+    transport: Omit<ClientOptions, 'baseUrl' | 'token'>
+  ): AccessClient {
+    return new AccessClient(decodeAccessToken(encoded), transport)
+  }
+  connection() {
+    return this.http.json(V2ConnectionSchema, 'GET', '/v2/connection')
+  }
+  issue(request: V2IssueTokenRequest) {
+    return this.http.json(V2IssueTokenResponseSchema, 'POST', '/v2/tokens', {
+      json: V2IssueTokenRequestSchema.parse(request),
+    })
+  }
+  tokens() {
+    return this.http.json(V2TokensResponseSchema, 'GET', '/v2/tokens')
+  }
+  revoke(id: string) {
+    return this.http.json(
+      V2RevokeTokenResponseSchema,
+      'DELETE',
+      `/v2/tokens/${encodeURIComponent(id)}`
+    )
+  }
+}

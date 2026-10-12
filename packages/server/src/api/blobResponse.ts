@@ -22,27 +22,27 @@ export async function sendBlob(
   sha: string,
   rangeHeader: string | undefined
 ): Promise<FastifyReply> {
-  const bytes = await store.get(sha)
-  const range = typeof rangeHeader === 'string' ? parseRange(rangeHeader, bytes.length) : null
+  const size = await store.size(sha)
+  const range = typeof rangeHeader === 'string' ? parseRange(rangeHeader, size) : null
 
   if (range === 'unsatisfiable') {
     return reply
       .code(416)
-      .header('content-range', `bytes */${bytes.length}`)
+      .header('content-range', `bytes */${size}`)
       .type('application/json')
       .send(new AbeleError('invalid_request', 'that range is not inside this blob').toBody())
   }
 
-  const body = range === null ? bytes : bytes.subarray(range.start, range.end + 1)
+  const body = await store.openRange(sha, range?.start ?? 0, range?.end)
   const reading = reply
     .type(OCTET_STREAM)
     .header('accept-ranges', 'bytes')
     .header('cache-control', CACHE_CONTROL)
-    .header('content-length', String(body.length))
+    .header('content-length', String(range === null ? size : range.end - range.start + 1))
   if (range === null) return reading.code(200).send(body)
   return reading
     .code(206)
-    .header('content-range', `bytes ${range.start}-${range.end}/${bytes.length}`)
+    .header('content-range', `bytes ${range.start}-${range.end}/${size}`)
     .send(body)
 }
 

@@ -153,6 +153,23 @@ export class VerdictRecorder {
       }
       await this.remember(target, result, sent.sha, sent.size, sent.mtime, false)
     } else {
+      const stage = verdicts.stages.get(at)
+      if (stage !== undefined) {
+        if (!(await this.disk.untouched(op, sent, target))) {
+          await stage.discard()
+          await this.keepBase(op, result, previous, target)
+          this.count(result)
+          return
+        }
+        this.opts.expected.expect(target, incoming)
+        try {
+          await stage.commit()
+        } catch (error) {
+          this.opts.expected.clear(target)
+          throw error
+        }
+        await stage.discard()
+      }
       const bytes = verdicts.fetched.get(incoming)
       if (bytes !== undefined) {
         await writeExpected(this.fs, this.opts.expected, target, incoming, bytes, result.mtime)

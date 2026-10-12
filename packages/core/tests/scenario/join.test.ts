@@ -5,7 +5,7 @@ import {
   MemoryFileSystem,
   selectiveDefaults,
   type VaultClient,
-} from '../../src/index.js'
+} from '../legacy/index.js'
 import { serverHarness, type Harness } from '../helpers/harness.js'
 import { Device } from '../helpers/device.js'
 import { create, seed, shaOf } from '../helpers/seed.js'
@@ -234,7 +234,7 @@ const SIDES: Record<string, { server: string | Uint8Array; local: string | Uint8
   '.obsidian/app.json': { server: SERVER.settings, local: LOCAL.settings },
 }
 const NOTE: Record<Mode, string> = {
-  merge: 'server line\nlocal line\n',
+  merge: SERVER.note,
   mine: LOCAL.note,
   theirs: SERVER.note,
 }
@@ -263,6 +263,13 @@ async function assertJoined(mode: Mode, j: Joined): Promise<void> {
   const noteHistory = await shasOf(seeder, ids.get('Both.md') ?? '')
   expect(noteHistory).toContain(await shaOf(SERVER.note))
   if (mode !== 'merge') expect(noteHistory).toContain(await shaOf(LOCAL.note))
+  else {
+    const copies = joiner.paths().filter((p) => p.startsWith('Both (Conflicted copy'))
+    expect(copies).toHaveLength(1)
+    expect(await joiner.text(copies[0]!)).toBe(LOCAL.note)
+    expect(heads.get(copies[0]!)).toBe(LOCAL.note)
+    expect(noteHistory).toEqual([await shaOf(SERVER.note)])
+  }
 
   // B2 and I. Other files on both sides: the winner is the head everywhere, the loser a version.
   for (const [path, winner] of Object.entries(WINNER[mode])) {
@@ -300,9 +307,12 @@ async function assertJoined(mode: Mode, j: Joined): Promise<void> {
   expect(heads.get('Case.md')).toBe(SERVER.cased)
   expect(heads.has('case.md')).toBe(false)
 
-  // Nothing else appeared: no conflict copies, nothing the table does not name.
+  // Exactly the table's files, plus the single Markdown conflict identity in merge mode.
   expect([...heads.keys()].sort()).toEqual([
     '.obsidian/app.json',
+    ...(mode === 'merge'
+      ? joiner.paths().filter((p) => p.startsWith('Both (Conflicted copy'))
+      : []),
     'Both.md',
     'Case.md',
     'Gone.md',
@@ -382,12 +392,15 @@ describe('the preference is for the join and nothing after it', () => {
   const sentCreates = (events: Event[]): CommitOp[] =>
     events.flatMap((e) => (e.kind === 'sent' ? e.creates : []))
 
-  it('a rescan by the engine that joined sends no preference: the note is merged', async () => {
+  it('a rescan by the engine that joined sends no preference: the note conflicts', async () => {
     const j = await joinedThenRaced()
     await j.joiner.rescan()
     expect(sentCreates(j.events)).toEqual([expect.objectContaining({ path: 'Late.md' })])
     expect(sentCreates(j.events)[0]).not.toHaveProperty('prefer')
-    expect(await j.joiner.text('Late.md')).toBe('server late\nlocal late\n')
+    expect(await j.joiner.text('Late.md')).toBe('server late\n')
+    const copies = j.joiner.paths().filter((p) => p.startsWith('Late (Conflicted copy'))
+    expect(copies).toHaveLength(1)
+    expect(await j.joiner.text(copies[0]!)).toBe('local late\n')
   })
 
   it('nor does a fresh engine given the same choice, once the cursor is above 0', async () => {
@@ -402,7 +415,10 @@ describe('the preference is for the join and nothing after it', () => {
     await again.rescan()
     expect(sentCreates(j.events)).toEqual([expect.objectContaining({ path: 'Late.md' })])
     expect(sentCreates(j.events)[0]).not.toHaveProperty('prefer')
-    expect(await again.text('Late.md')).toBe('server late\nlocal late\n')
+    expect(await again.text('Late.md')).toBe('server late\n')
+    const copies = again.paths().filter((p) => p.startsWith('Late (Conflicted copy'))
+    expect(copies).toHaveLength(1)
+    expect(await again.text(copies[0]!)).toBe('local late\n')
   })
 
   it('joinFinished: the sync that was joining and got its push answered, whatever it still holds', () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import * as Core from '../../src/index.js'
+import * as Core from '../legacy/index.js'
 
 function fixture(gated = true) {
   const state = new Core.MemoryStateStore(),

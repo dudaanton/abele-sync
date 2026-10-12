@@ -1,7 +1,7 @@
 import type { AddressInfo } from 'node:net'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
-import type { DeviceIdentity } from '../../src/auth/devices.js'
+import type { DeviceIdentity } from '../legacy/src/auth/devices.js'
 import { buildTestApp, type TestApp } from '../helpers/testApp.js'
 
 /**
@@ -15,8 +15,8 @@ const hook = vi.hoisted(() => ({
   next: null as ((device: DeviceIdentity) => Promise<void>) | null,
 }))
 
-vi.mock('../../src/auth/devices.js', async (importOriginal) => {
-  const real = await importOriginal<typeof import('../../src/auth/devices.js')>()
+vi.mock('../legacy/src/auth/devices.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../legacy/src/auth/devices.js')>()
   return {
     ...real,
     authenticateDevice: async (...args: Parameters<typeof real.authenticateDevice>) => {

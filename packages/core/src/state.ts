@@ -19,10 +19,6 @@ export interface Journal {
   ops: CommitOp[]
   idempotencyKey: string
   startedAt: string
-  /** Stable original op indices when owner preflight holds part of a unit. */
-  ownerBinding?: { issuer: string; vaultId: string; credentialFingerprint: string }
-  publicationPhase?: 'prepared' | 'submitted'
-  operationIndices?: number[]
 }
 
 /**
@@ -174,6 +170,5 @@ const copyJournal = (j: Journal | null): Journal | null =>
     ? {
         ...j,
         ops: [...j.ops],
-        ...(j.operationIndices ? { operationIndices: [...j.operationIndices] } : {}),
       }
     : null

@@ -1,28 +1,7 @@
-import { describe, it, expect, vi } from 'vitest'
-import DiffMatchPatch from 'diff-match-patch'
+import { describe, it, expect } from 'vitest'
 import { mergeText, conflictCopyName, frontmatterIsValid } from '../../src/merge/index.js'
 
-/**
- * The characters one mergeText call hands to diff-match-patch, which is where a large conflict
- * costs time. The per-region caps and the per-document budget are what keep this small; a
- * wall-clock limit measured the same thing but failed on a busy machine.
- */
-function charPassWork(run: () => void): { calls: number; chars: number } {
-  const make = vi.spyOn(DiffMatchPatch.prototype, 'patch_make')
-  const apply = vi.spyOn(DiffMatchPatch.prototype, 'patch_apply')
-  try {
-    run()
-    const made = make.mock.calls.reduce(
-      (sum, [a, b]) => sum + String(a).length + (typeof b === 'string' ? b.length : 0),
-      0
-    )
-    const applied = apply.mock.calls.reduce((sum, [, text]) => sum + text.length, 0)
-    return { calls: make.mock.calls.length, chars: made + applied }
-  } finally {
-    make.mockRestore()
-    apply.mockRestore()
-  }
-}
+const conflict = (head: string) => ({ text: head, clean: false, conflictCopy: true })
 
 describe('mergeText', () => {
   it('returns the other side when one side is unchanged', () => {
@@ -35,18 +14,31 @@ describe('mergeText', () => {
       clean: true,
     })
   })
-  it('merges edits to different words on the same line by characters', () => {
-    const r = mergeText('the quick brown fox\n', 'the QUICK brown fox\n', 'the quick brown FOX\n')
-    expect(r).toEqual({ text: 'the QUICK brown FOX\n', clean: true })
+  it('merges adjacent edits on separate lines even when diff3 groups their spans', () => {
+    expect(mergeText('one\ntwo\nthree\n', 'ONE\ntwo\nTHREE\n', 'one\nTWO\nthree\n')).toEqual({
+      text: 'ONE\nTWO\nTHREE\n',
+      clean: true,
+    })
   })
-  it('keeps both sides, head first, when the same words changed', () => {
+  it('keeps a conflict when a replacement plus insertion has uncertain base alignment', () => {
+    // The second side could insert THREE before replacing three with four.
+    // Do not infer replacement coordinates from positions in its two-line hunk.
+    expect(mergeText('one\ntwo\nthree\n', 'ONE\ntwo\nTHREE\n', 'one\ntwo\nTHREE\nfour\n')).toEqual(
+      conflict('ONE\ntwo\nTHREE\n')
+    )
+  })
+  it('conflicts on different words of the same line', () => {
+    const r = mergeText('the quick brown fox\n', 'the QUICK brown fox\n', 'the quick brown FOX\n')
+    expect(r).toEqual(conflict('the QUICK brown fox\n'))
+  })
+  it('preserves the head when the same words changed', () => {
     const r = mergeText('title\n', 'title A\n', 'title B\n')
     expect(r.clean).toBe(false)
-    expect(r.text).toBe('title A\ntitle B\n')
+    expect(r.text).toBe('title A\n')
   })
-  it('appends both texts for an empty base', () => {
+  it('conflicts on competing creates with an empty base', () => {
     const r = mergeText('', 'from laptop\n', 'from phone\n')
-    expect(r.text).toBe('from laptop\nfrom phone\n')
+    expect(r.text).toBe('from laptop\n')
     expect(r.clean).toBe(false)
   })
   it('preserves CRLF and trailing newline from head', () => {
@@ -92,30 +84,24 @@ describe('frontmatterIsValid', () => {
 })
 
 describe('mergeText, conflict regions', () => {
-  it('keeps both sides when the character pass applies only some hunks', () => {
-    // Two hunks: alpha→ALPHA applies; delta→DELTA does not, because head changed its context.
+  it('aborts without publishing a partially merged same-line region', () => {
+    // A disjoint word edit cannot rescue another conflict on the same line.
     const r = mergeText(
       'alpha beta gamma delta\n',
       'alpha beta gamma delta!\n',
       'ALPHA beta gamma DELTA\n'
     )
-    expect(r).toEqual({ text: 'alpha beta gamma delta!\nALPHA beta gamma DELTA\n', clean: false })
+    expect(r).toEqual(conflict('alpha beta gamma delta!\n'))
   })
-  it('keeps the edited line when head deleted it', () => {
-    expect(mergeText('a\nb\nc\n', 'a\nc\n', 'a\nB\nc\n')).toEqual({
-      text: 'a\nB\nc\n',
-      clean: false,
-    })
+  it('conflicts when incoming edits a line head deleted', () => {
+    expect(mergeText('a\nb\nc\n', 'a\nc\n', 'a\nB\nc\n')).toEqual(conflict('a\nc\n'))
   })
-  it('keeps both insertions, head first, when both sides insert at the same spot', () => {
-    expect(mergeText('a\nb\n', 'a\nX\nb\n', 'a\nY\nb\n')).toEqual({
-      text: 'a\nX\nY\nb\n',
-      clean: false,
-    })
+  it('conflicts when both sides insert at the same spot', () => {
+    expect(mergeText('a\nb\n', 'a\nX\nb\n', 'a\nY\nb\n')).toEqual(conflict('a\nX\nb\n'))
   })
-  it('applies the character pass when head shifted the line', () => {
+  it('conflicts on same-line edits even when head shifted characters', () => {
     const r = mergeText('the quick brown fox\n', 'the QUICKER brown fox\n', 'the quick brown FOX\n')
-    expect(r).toEqual({ text: 'the QUICKER brown FOX\n', clean: true })
+    expect(r).toEqual(conflict('the QUICKER brown fox\n'))
   })
 })
 
@@ -138,7 +124,7 @@ describe('mergeText, line endings', () => {
   it('follows the non-empty side when the other is empty', () => {
     expect(mergeText('', '', 'a\r\n')).toEqual({ text: 'a\r\n', clean: true })
     expect(mergeText('', '', 'a')).toEqual({ text: 'a', clean: true })
-    expect(mergeText('a\r\n', 'b\r\n', '')).toEqual({ text: 'b\r\n', clean: false })
+    expect(mergeText('a\r\n', 'b\r\n', '')).toEqual(conflict('b\r\n'))
   })
 })
 
@@ -157,7 +143,7 @@ describe('mergeText, long spans', () => {
     const r = mergeText(base, head, 'New paragraph.\n')
     expect(r.clean).toBe(false)
     expect(r.text).toContain('ADIPISCING')
-    expect(r.text).toContain('New paragraph.')
+    expect(r).toEqual(conflict(head))
   })
   it('keeps a head edit to the middle line of a paragraph incoming replaced', () => {
     const first = 'Sed ut perspiciatis unde omnis iste natus error sit voluptatem accusantium.\n'
@@ -165,22 +151,16 @@ describe('mergeText, long spans', () => {
     const r = mergeText(first + base + last, first + head + last, 'Short.\n')
     expect(r.clean).toBe(false)
     expect(r.text).toContain('ADIPISCING')
-    expect(r.text).toContain('Short.')
+    expect(r).toEqual(conflict(first + head + last))
   })
 })
 
 describe('mergeText, large conflicts', () => {
-  it('merges a 5000-line document changed entirely on both sides without a character pass', () => {
+  it('returns the whole head for a 5000-line document changed entirely on both sides', () => {
     const lines = (prefix: string) =>
       Array.from({ length: 5000 }, (_, i) => `${prefix} ${i}\n`).join('')
-    let r = { text: '', clean: true }
-    const work = charPassWork(() => {
-      r = mergeText(lines('base'), lines('head'), lines('incoming'))
-    })
-    expect(work).toEqual({ calls: 0, chars: 0 })
-    expect(r.clean).toBe(false)
-    expect(r.text).toContain('head 4999\n')
-    expect(r.text).toContain('incoming 4999\n')
+    const r = mergeText(lines('base'), lines('head'), lines('incoming'))
+    expect(r).toEqual(conflict(lines('head')))
   })
 })
 
@@ -194,8 +174,8 @@ describe('mergeText, empty documents', () => {
     expect(mergeText('a\n', 'a\n', '')).toEqual({ text: '', clean: true })
     expect(mergeText('a\n', '', 'a\n')).toEqual({ text: '', clean: true })
   })
-  it('keeps the edit when one side deleted everything and the other edited', () => {
-    expect(mergeText('a\n', '', 'b\n')).toEqual({ text: 'b\n', clean: false })
+  it('conflicts without resurrecting text when head deleted everything', () => {
+    expect(mergeText('a\n', '', 'b\n')).toEqual(conflict(''))
   })
 })
 
@@ -262,68 +242,51 @@ describe('frontmatterIsValid, edge cases', () => {
   })
 })
 
-describe('mergeText, character-pass budget', () => {
-  // A region of 50 lines of 80 characters is 4 050 bytes a side: under the per-region cap, and
-  // 12 150 bytes of budget per attempt, so the sixth such region exhausts the 64 KB budget.
+describe('mergeText, bounded line-only conflicts', () => {
+  // Large regions remain whole-document conflicts, never concatenation.
   const region = (r: number, side: string) =>
     Array.from({ length: 50 }, (_, i) => `${side} ${r} ${i}`.padEnd(80, '.') + '\n').join('')
   const doc = (regions: number, side: string) =>
     Array.from({ length: regions }, (_, r) => region(r, side) + `sep ${r}\n`).join('')
 
-  it('merges 100 conflict regions of 4 KB each within the 64 KB budget, unclean', () => {
-    let r = { text: '', clean: true }
-    const work = charPassWork(() => {
-      r = mergeText(doc(100, 'base'), doc(100, 'head'), doc(100, 'incoming'))
-    })
-    // Five regions fit the budget; the sixth exhausts it and the other 95 are never attempted.
-    expect(work.calls).toBe(5)
-    expect(work.chars).toBeLessThanOrEqual(64 * 1024)
-    expect(r.clean).toBe(false)
-    expect(r.text).toContain('head 99 49')
-    expect(r.text).toContain('incoming 99 49')
+  it('aborts 100 conflict regions of 4 KB each without partial publication', () => {
+    expect(mergeText(doc(100, 'base'), doc(100, 'head'), doc(100, 'incoming'))).toEqual(
+      conflict(doc(100, 'head'))
+    )
   })
 
-  it('does not attempt a region over 64 lines or 4 KB a side, even with budget left', () => {
+  it('returns the whole head around the former character-region size bounds', () => {
     const lines = (n: number, side: string) =>
       Array.from({ length: n }, (_, i) => `${side} ${i}\n`).join('')
-    const attempts = (base: string, head: string, incoming: string) =>
-      charPassWork(() => mergeText(base, head, incoming)).calls
-    expect(attempts(lines(64, 'b'), lines(64, 'h'), lines(64, 'i'))).toBe(1)
-    expect(attempts(lines(65, 'b'), lines(65, 'h'), lines(65, 'i'))).toBe(0)
+    for (const n of [64, 65])
+      expect(mergeText(lines(n, 'b'), lines(n, 'h'), lines(n, 'i'))).toEqual(
+        conflict(lines(n, 'h'))
+      )
     const long = (side: string) => side + 'x'.repeat(4096) + '\n'
-    expect(attempts(long('b'), long('h'), long('i'))).toBe(0)
+    expect(mergeText(long('b'), long('h'), long('i'))).toEqual(conflict(long('h')))
   })
 
-  it('leaves two small regions that merge by characters clean', () => {
+  it('conflicts on small same-line regions too', () => {
     const base = 'the quick brown fox\nsep\nlazy dogs sleep\n'
     const head = 'the QUICK brown fox\nsep\nLAZY dogs sleep\n'
     const incoming = 'the quick brown FOX\nsep\nlazy dogs SLEEP\n'
-    expect(mergeText(base, head, incoming)).toEqual({
-      text: 'the QUICK brown FOX\nsep\nLAZY dogs SLEEP\n',
-      clean: true,
-    })
+    expect(mergeText(base, head, incoming)).toEqual(conflict(head))
   })
 
-  it('keeps a later region as both sides once earlier regions spent the budget', () => {
+  it('aborts all regions including later same-line changes', () => {
     const small = {
       base: 'the quick brown fox\n',
       head: 'the QUICK brown fox\n',
       incoming: 'the quick brown FOX\n',
     }
     const alone = mergeText(small.base, small.head, small.incoming)
-    expect(alone).toEqual({ text: 'the QUICK brown FOX\n', clean: true })
+    expect(alone).toEqual(conflict(small.head))
 
     const r = mergeText(
       doc(6, 'base') + small.base,
       doc(6, 'head') + small.head,
       doc(6, 'incoming') + small.incoming
     )
-    // Every big region conflicts and is kept as both sides; the small one, which merges cleanly
-    // on its own, is kept as both sides too because the budget ran out before it.
-    const bothSides = Array.from(
-      { length: 6 },
-      (_, i) => region(i, 'head') + region(i, 'incoming') + `sep ${i}\n`
-    ).join('')
-    expect(r).toEqual({ text: bothSides + small.head + small.incoming, clean: false })
+    expect(r).toEqual(conflict(doc(6, 'head') + small.head))
   })
 })

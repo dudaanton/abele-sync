@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { sql } from 'kysely'
 import { createDb, type Dialect } from '../../src/db/connect.js'
 import { hasPgTestDb, tempDb, type TempDb } from '../helpers/tempDb.js'
-import { runMigrations } from '../../src/db/migrate.js'
+import { runRetainedEngineMigrations as runMigrations } from '../helpers/retainedEngineMigrations.js'
 
 const TABLES = [
   'accounts',

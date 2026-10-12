@@ -2,7 +2,7 @@ import type { FileKind, Usage } from '@abele/sync-protocol'
 import { sql, type Kysely, type Transaction } from 'kysely'
 import { readJson, writeJson } from '../db/json.js'
 import type { Database } from '../db/schema.js'
-import { getVaultSettings } from '../vault/vaults.js'
+import { getVaultSettings } from '../access/spaceSettings.js'
 import { lastWithContent } from './trash.js'
 
 /**

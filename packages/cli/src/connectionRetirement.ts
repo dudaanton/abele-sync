@@ -127,7 +127,8 @@ export async function resumeConnectionRetirement(
       refuse()
     record.binding = ConnectionBindingSchema.parse(record.binding)
     if (
-      (record.binding.mode === 'personal') !== (record.ledgerFile === 'state.db') ||
+      record.binding.mode !== 'token' ||
+      record.ledgerFile !== 'state.db' ||
       (expectedLedger && expectedLedger !== record.ledgerFile)
     )
       refuse()

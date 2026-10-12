@@ -1,4 +1,4 @@
-import type { VaultClient } from './client.js'
+import type { EngineClient } from './engineClient.js'
 import { messageOf } from './engineTypes.js'
 
 /**
@@ -21,7 +21,7 @@ export function after(ms: number, fn: () => void): Timer {
 
 /** The engine, as its socket and its timers need it. */
 export interface WakeContext {
-  client: VaultClient
+  client: EngineClient
   log: (line: string) => void
   /** The first and the longest wait before trying a server again. */
   backoffMs: readonly [number, number]

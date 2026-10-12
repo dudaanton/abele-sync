@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { selectiveDefaults, type SelectiveSettings, type VaultClient } from '../../src/index.js'
+import { selectiveDefaults, type SelectiveSettings, type VaultClient } from '../legacy/index.js'
 import { serverHarness, type Harness } from '../helpers/harness.js'
 import { Device, converge } from '../helpers/device.js'
 

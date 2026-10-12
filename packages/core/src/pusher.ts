@@ -6,7 +6,8 @@ import {
   type JoinPrefer,
 } from '@abele/sync-protocol'
 import { pool } from './apply.js'
-import type { CommitOutcome, VaultClient } from './client.js'
+import type { CommitOutcome } from './engineClient.js'
+import type { EngineClient } from './engineClient.js'
 import type { ExpectedWrites } from './echo.js'
 import { EngineError } from './errors.js'
 import type { FileSystem } from './fs.js'
@@ -17,16 +18,9 @@ import { batches, preferring } from './pushBatches.js'
 import { PushDisk } from './pushDisk.js'
 import { FINAL_REFUSALS, VerdictRecorder } from './pushRecord.js'
 import { sourcesFromOps, sourcesFromScan, type Sources } from './pushSources.js'
+import { TransferBudget } from './streaming.js'
 import { VerdictPlanner } from './pushVerdicts.js'
 import type { StateStore, Journal } from './state.js'
-import {
-  heldOwnerUnits,
-  dropOwnerHold,
-  settleOwnerUnit,
-  type OwnerPushHooks,
-} from './ownerHooks.js'
-
-import { prepareOwnerJournal } from './ownerPrepare.js'
 export { batches } from './pushBatches.js'
 
 /**
@@ -105,7 +99,8 @@ export interface PushReport {
 }
 
 /** What a replay needs: everything but the keys, which the journal already holds. */
-export interface ResumeOptions extends OwnerPushHooks {
+export interface ResumeOptions {
+  transferBudget?: import('./streaming.js').TransferBudget
   /** The registry the host's watcher checks, so the engine does not push its own writes back. */
   expected: ExpectedWrites
   /** How many blobs to upload at once. */
@@ -183,7 +178,7 @@ export interface PushOptions extends ResumeOptions {
  * has to be written down as it now is, or every scan from here on will hash it again.
  */
 export async function push(
-  client: VaultClient,
+  client: EngineClient,
   fs: FileSystem,
   state: StateStore,
   scan: ScanResult,
@@ -194,17 +189,7 @@ export async function push(
   await pusher.refresh(scan)
   const newKey = opts.keys ?? (() => crypto.randomUUID())
   const sources = sourcesFromScan(fs, scan)
-  const held = await heldOwnerUnits(state, !!opts.beforeUpload)
-  const heldCreates = new Set(
-      held.flatMap((unit) => unit.ops.flatMap((op) => (op.op === 'create' ? [op.path] : [])))
-    ),
-    heldFiles = new Set(
-      held.flatMap((unit) => unit.ops.flatMap((op) => ('file_id' in op ? [op.file_id] : [])))
-    )
-  const fresh = scan.ops.filter((op) =>
-    op.op === 'create' ? !heldCreates.has(op.path) : !heldFiles.has(op.file_id)
-  )
-  const all = batches(pusher.sendable(preferring(fresh, opts.prefer)))
+  const all = batches(pusher.sendable(preferring(scan.ops, opts.prefer)))
   const progress = opts.onProgress
   if (progress !== undefined)
     pusher.countDown(
@@ -227,18 +212,14 @@ export async function push(
  * first time, because nothing was ever written under that key.
  */
 export async function resumeJournal(
-  client: VaultClient,
+  client: EngineClient,
   fs: FileSystem,
   state: StateStore,
   opts: ResumeOptions
 ): Promise<PushReport | null> {
-  const journal = await state.getJournal(),
-    held = await heldOwnerUnits(state, !!opts.beforeUpload)
-  const units = [
-    ...(journal ? [journal] : []),
-    ...held.filter((unit) => unit.idempotencyKey !== journal?.idempotencyKey),
-  ]
-  if (units.length === 0) return null
+  const pending = await state.getJournal()
+  if (!pending) return null
+  const units = [pending]
   // Older servers discarded receipts after a day. They cannot distinguish a
   // never-applied join from an applied one whose answer was lost. Do not repeat
   // a destructive user choice after that window, even against an upgraded server
@@ -246,11 +227,6 @@ export async function resumeJournal(
   const report = emptyReport(),
     pusher = new Pusher(client, fs, state, opts, report, new Map())
   for (const journal of units) {
-    if (opts.beforeUpload || opts.onSettled) {
-      const binding = await client.ownerPublicationIdentity()
-      if (!journal.ownerBinding || JSON.stringify(journal.ownerBinding) !== JSON.stringify(binding))
-        throw new EngineError('lost', 'owner journal binding requires reviewed recovery')
-    }
     const age = Date.now() - Date.parse(journal.startedAt)
     if (
       (!Number.isFinite(age) || age >= 24 * 60 * 60 * 1000) &&
@@ -266,14 +242,9 @@ export async function resumeJournal(
     await pusher.batch(
       journal.ops,
       journal.idempotencyKey,
-      journal.publicationPhase === 'submitted'
-        ? { bytes: async () => null }
-        : await sourcesFromOps(fs, state, journal.ops),
+      await sourcesFromOps(fs, state, journal.ops),
       journal.batchId,
-      journal.startedAt,
-      journal.operationIndices,
-      journal.ownerBinding,
-      journal.publicationPhase
+      journal.startedAt
     )
   }
   return report
@@ -291,6 +262,7 @@ const emptyReport = (): PushReport => ({
 
 /** One run of the pusher: the adapters, the options and the report it is filling in. */
 class Pusher {
+  private readonly transferBudget: TransferBudget
   /** How many ops of this push are not through yet, and who is told as it falls. */
   private left = 0
   private progress: ((left: number) => void) | null = null
@@ -307,7 +279,7 @@ class Pusher {
   private readonly recorder: VerdictRecorder
 
   constructor(
-    private readonly client: VaultClient,
+    private readonly client: EngineClient,
     fs: FileSystem,
     private readonly state: StateStore,
     private readonly opts: ResumeOptions,
@@ -316,6 +288,7 @@ class Pusher {
     diskPaths: Map<string, string>
   ) {
     this.hash = opts.hash ?? sha256
+    this.transferBudget = opts.transferBudget ?? new TransferBudget()
     this.concurrency = opts.concurrency ?? DEFAULT_CONCURRENCY
     this.refused = opts.refused ?? new Map()
     const disk = new PushDisk(fs, state, opts, this.hash, diskPaths)
@@ -385,23 +358,11 @@ class Pusher {
     key: string,
     sources: Sources,
     batchId?: string,
-    startedAt?: string,
-    operationIndices?: number[],
-    ownerBinding?: Journal['ownerBinding'],
-    publicationPhase?: Journal['publicationPhase']
+    startedAt?: string
   ): Promise<void> {
     // Refused or recorded, a batch's ops are through once it has returned.
     const after = this.left - ops.length
-    await this.sendBatch(
-      ops,
-      key,
-      sources,
-      batchId,
-      startedAt,
-      operationIndices,
-      ownerBinding,
-      publicationPhase
-    )
+    await this.sendBatch(ops, key, sources, batchId, startedAt)
     this.fall(this.left - after)
   }
 
@@ -410,65 +371,27 @@ class Pusher {
     key: string,
     sources: Sources,
     batchId?: string,
-    startedAt?: string,
-    operationIndices?: number[],
-    ownerBinding?: Journal['ownerBinding'],
-    publicationPhase?: Journal['publicationPhase']
+    startedAt?: string
   ): Promise<void> {
-    if (this.opts.beforeUpload || this.opts.onSettled)
-      ownerBinding ??= await this.client.ownerPublicationIdentity()
-    let journal: Journal = {
+    const journal: Journal = {
       batchId: batchId ?? crypto.randomUUID(),
       ops,
       idempotencyKey: key,
       startedAt: startedAt ?? new Date().toISOString(),
-      ...(operationIndices ? { operationIndices } : {}),
-      ...(ownerBinding
-        ? { ownerBinding, publicationPhase: publicationPhase ?? ('prepared' as const) }
-        : {}),
     }
-    if (this.opts.beforeUpload || this.opts.onSettled) await heldOwnerUnits(this.state, true)
     await this.state.setJournal(journal)
-    const prepared = await prepareOwnerJournal(this.state, journal, this.opts.beforeUpload)
-    for (const op of prepared.held) {
-      const path =
-        op.op === 'create'
-          ? op.path
-          : op.op === 'move'
-            ? op.to_path
-            : (await this.state.byFileId(op.file_id))?.wirePath
-      if (path) this.report.kept.push(path)
-    }
-    if (!prepared.journal) return
-    journal = prepared.journal
-    ops = journal.ops
-    // Submitted transport is immutable. External refusal caches and mutable
-    // local upload state may affect new work, never a receipt replay body.
-    const submitted = journal.publicationPhase === 'submitted'
-    if (!submitted) await this.upload(ops, sources)
-    const sending = submitted ? ops : this.sendable(ops)
+    await this.upload(ops, sources)
+    const sending = this.sendable(ops)
     if (sending.length === 0) {
       await this.state.setJournal(null)
       return
     }
-    if (journal.ownerBinding) {
-      journal = {
-        ...journal,
-        ops: sending,
-        operationIndices: sending.map(
-          (op) => journal.operationIndices?.[ops.indexOf(op)] ?? ops.indexOf(op)
-        ),
-        publicationPhase: 'submitted',
-      }
-      await this.state.setJournal(journal)
-    } else if (sending.length !== ops.length)
-      await this.state.setJournal({ ...journal, ops: sending })
+    if (sending.length !== ops.length) await this.state.setJournal({ ...journal, ops: sending })
 
     let outcome: CommitOutcome
     try {
       outcome = await this.client.commitRaw(sending, key)
     } catch (error) {
-      if (journal.publicationPhase === 'submitted') throw error
       if (!(error instanceof AbeleError) || !isFinalForBatch(error)) throw error
       this.opts.log?.(
         `push: the server refused the batch of ${sending.length}: ${error.code} ${error.message}`
@@ -489,9 +412,6 @@ class Pusher {
         `the commit answered ${results.length} results for ${sending.length} ops`
       )
     }
-    const hookIndices = sending.map((op, index) =>
-      journal.ownerBinding ? (journal.operationIndices?.[index] ?? index) : ops.indexOf(op)
-    )
     const verdicts = await this.planner.plan(sending, results)
     if (verdicts.staged.size > 0) {
       const heads = [...verdicts.staged.values()]
@@ -512,18 +432,7 @@ class Pusher {
           if (op !== undefined) await this.recorder.take(op, results[at], at, verdicts)
         }
       }
-      if (this.opts.onSettled)
-        await settleOwnerUnit(
-          this.client,
-          journal,
-          sending,
-          results,
-          this.opts.onSettled,
-          hookIndices,
-          outcome.body.creation_outcomes
-        )
       await this.opts.onCommitted?.(sending)
-      if (this.opts.beforeUpload) await dropOwnerHold(this.state, key)
       await this.state.setJournal(null)
     })
   }
@@ -576,13 +485,30 @@ class Pusher {
   /** One blob onto the server, unless it is there already or refused for good. */
   private async uploadOne(sha: string, sources: Sources): Promise<void> {
     if (await this.client.hasBlob(sha)) return
-    const bytes = await sources.bytes(sha)
-    if (bytes === null) {
-      this.opts.log?.(`push: no file on this disk holds ${sha}`)
-      return
-    }
     try {
-      await this.client.putBlob(sha, bytes)
+      const upload = async () => {
+        if (sources.open && this.client.putBlobSource) {
+          const source = await sources.open(sha)
+          if (!source) {
+            this.opts.log?.(`push: no file on this disk holds ${sha}`)
+            return
+          }
+          await this.client.putBlobSource(
+            { sha, size: source.size },
+            source,
+            undefined,
+            this.transferBudget.maxChunkBytes
+          )
+        } else {
+          const bytes = await sources.bytes(sha)
+          if (bytes === null) {
+            this.opts.log?.(`push: no file on this disk holds ${sha}`)
+            return
+          }
+          await this.client.putBlob(sha, bytes)
+        }
+      }
+      await this.transferBudget.run(upload)
     } catch (error) {
       if (!(error instanceof AbeleError)) throw error
       // The server will not have these bytes at any price: over its cap, or over the

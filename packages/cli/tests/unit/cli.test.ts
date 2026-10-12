@@ -1,8 +1,7 @@
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
-import { PassThrough, Writable } from 'node:stream'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { encodeText, selectiveDefaults, sha256 } from '@abele/sync-core'
 import { runCli } from '../../src/cli.js'
@@ -11,102 +10,83 @@ import { acquireLock } from '../../src/lock.js'
 import type { CliIo } from '../../src/context.js'
 import { SqliteStateStore } from '../../src/sqliteState.js'
 import { ignoreFile, scopeKey, stateDbFile } from '../../src/vault.js'
-
-/**
- * The program on fakes: a `fetch` that answers the routes each command uses, a temporary
- * directory for the vault, and the lines the command printed. Nothing here starts a server;
- * `tests/e2e` does that against the real one.
- */
+import { tokenFor, connection } from '../helpers/token.js'
 
 const AT = '2026-09-05T10:00:00.000Z'
-const USAGE = {
-  live_bytes: 4096,
-  history_bytes: 1024,
-  trash_bytes: 0,
-  quota_bytes: null,
-  by_kind: {},
-}
-const DEVICE_TOKEN = 'absd_never_printed'
-const PASSWORD = 'hunter2-never-printed'
-
-/** What a fake route answers with: a body to encode as json, bytes, or a whole response. */
-type Answer = unknown
-type Handler = (req: { url: URL; body: unknown }) => Answer
-
-interface Fake {
-  fetch: typeof fetch
-  calls: string[]
-}
-
-function fakeServer(routes: Record<string, Handler>): Fake {
+const TOKEN = tokenFor('https://sync.example.com')
+type Handler = (req: { url: URL; body: unknown }) => unknown
+const json = (body: unknown, status = 200) => Response.json(body, { status })
+function fakeServer(routes: Record<string, Handler>) {
   const calls: string[] = []
   const impl: typeof fetch = async (input, init) => {
-    const href =
-      typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url
-    const url = new URL(href)
-    const method = (init?.method ?? 'GET').toUpperCase()
-    const key = `${method} ${url.pathname}`
+    const url = new URL(
+      typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    )
+    const key = `${init?.method ?? 'GET'} ${url.pathname}`
     calls.push(key)
     const handler = routes[key]
-    if (handler === undefined) {
+    if (!handler)
       return json({ error: { code: 'not_found', message: `no fake route for ${key}` } }, 404)
-    }
-    const answer = handler({ url, body: bodyOf(init?.body) })
+    const answer = handler({
+      url,
+      body: typeof init?.body === 'string' ? JSON.parse(init.body) : null,
+    })
     if (answer instanceof Response) return answer
-    // A body of bytes wants a view onto an `ArrayBuffer`, which every fixture here is.
     if (answer instanceof Uint8Array) {
-      return new Response(answer as Uint8Array<ArrayBuffer>, { status: 200 })
+      const range = new Headers(init?.headers).get('range')
+      if (range) {
+        const match = /^bytes=(\d+)-(\d+)$/.exec(range)
+        if (!match) throw new Error(`invalid fake range: ${range}`)
+        const start = Number(match[1]),
+          end = Number(match[2])
+        if (start > end || end >= answer.length)
+          throw new Error(`out-of-bounds fake range: ${range}`)
+        return new Response(answer.slice(start, end + 1) as Uint8Array<ArrayBuffer>, {
+          status: 206,
+          headers: { 'content-range': `bytes ${start}-${end}/${answer.length}` },
+        })
+      }
+      return new Response(answer as Uint8Array<ArrayBuffer>)
     }
-    return json(answer, 200)
+    return json(answer)
   }
   return { fetch: impl, calls }
 }
-
-const json = (body: unknown, status: number): Response =>
-  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
-
-function bodyOf(body: BodyInit | null | undefined): unknown {
-  if (typeof body !== 'string') return null
-  try {
-    return JSON.parse(body)
-  } catch {
-    return null
-  }
+it('the restore transport returns the exact requested inclusive range', async () => {
+  const bytes = encodeText('back again\n')
+  const fake = fakeServer({ 'GET /v2/files/f1/content': () => bytes })
+  const response = await fake.fetch(
+    'https://sync.example.com/v2/files/f1/content?version_id=ver2',
+    {
+      headers: { range: 'bytes=0-0' },
+    }
+  )
+  expect(response.status).toBe(206)
+  expect(response.headers.get('content-range')).toBe(`bytes 0-0/${bytes.length}`)
+  expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes.slice(0, 1))
+})
+class DeafSocket {
+  addEventListener() {}
+  removeEventListener() {}
+  send() {}
+  close() {}
 }
-
 interface Run {
   code: number
   out: string[]
   err: string[]
-  /** Everything the command printed, for the checks that no secret is among it. */
   all: string
 }
-
-interface Options {
-  fetch?: typeof fetch
-  env?: NodeJS.ProcessEnv
-  WebSocket?: typeof WebSocket
-  stdin?: CliIo['stdin']
-  stderr?: NodeJS.WritableStream
-}
-
-interface Launched {
-  done: Promise<Run>
-  /** The lines so far, for a command that has not finished yet. */
-  out: string[]
-  err: string[]
-}
-
-/** Starts a command and hands back its lines as they arrive: for `run` without `--once`. */
-function launch(argv: string[], opts: Options = {}): Launched {
-  const out: string[] = []
-  const err: string[] = []
-  const io: CliIo = { out: (line) => out.push(line), err: (line) => err.push(line) }
-  if (opts.fetch) io.fetch = opts.fetch
-  if (opts.WebSocket) io.WebSocket = opts.WebSocket
-  if (opts.stdin) io.stdin = opts.stdin
-  if (opts.stderr) io.stderr = opts.stderr
-  const done = runCli(argv, opts.env ?? {}, io).then((code) => ({
+function launch(argv: string[], fetchImpl = fetch, env: NodeJS.ProcessEnv = {}) {
+  const out: string[] = [],
+    err: string[] = []
+  const io: CliIo = {
+    out: (s) => out.push(s),
+    err: (s) => err.push(s),
+    fetch: fetchImpl,
+    WebSocket: DeafSocket as unknown as typeof WebSocket,
+  }
+  const done = runCli(argv, env, io).then((code) => ({
     code,
     out,
     err,
@@ -114,81 +94,44 @@ function launch(argv: string[], opts: Options = {}): Launched {
   }))
   return { done, out, err }
 }
-
-const cli = (argv: string[], opts: Options = {}): Promise<Run> => launch(argv, opts).done
-
-/**
- * Waits for the daemon to have got somewhere, rather than for a guessed number of milliseconds.
- * One that never gets there is told to stop before the failure is thrown, so the test fails on
- * what the daemon printed instead of hanging on a signal nobody sends.
- */
-async function until(started: Launched, done: () => boolean, ms = 5_000): Promise<void> {
-  const deadline = Date.now() + ms
-  while (!done() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10))
-  if (done()) return
-  process.kill(process.pid, 'SIGTERM')
+const cli = (args: string[], fetchImpl = fetch, env: NodeJS.ProcessEnv = {}) =>
+  launch(args, fetchImpl, env).done
+/** Emit only to in-process handlers. A setup failure must not send an OS signal to Vitest. */
+async function until(started: ReturnType<typeof launch>, check: () => boolean) {
+  let finished: Run | undefined
+  void started.done.then((run) => {
+    finished = run
+  })
+  const deadline = Date.now() + 5000
+  while (!check() && !finished && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10))
+  if (check()) return
+  if (!finished && process.listenerCount('SIGTERM')) process.emit('SIGTERM')
   const run = await started.done
-  throw new Error(`the daemon never got that far; it printed:\n${run.all}`)
+  throw new Error(`daemon did not reach barrier:\n${run.all}`)
 }
-
-/**
- * A socket that never opens and never says anything. The daemon subscribes to the event stream
- * on `start()`, and a test has no server to open one against; without this the engine would try
- * to reach `sync.example.com` for real.
- */
-class DeafSocket {
-  addEventListener(): void {}
-  removeEventListener(): void {}
-  send(): void {}
-  close(): void {}
-}
-
-const DEAF = DeafSocket as unknown as typeof WebSocket
-
 let dir: string
-
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'abele-cli-'))
 })
-
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true })
 })
-
-/** A vault that has already been set up, so a command has something to open. */
-async function setUp(): Promise<void> {
+function setUp() {
   writeConfig(dir, {
-    serverUrl: 'https://sync.example.com',
+    serverUrl: connectionAddress,
     vaultId: 'v1',
     deviceId: 'd1',
-    deviceToken: DEVICE_TOKEN,
+    deviceToken: TOKEN,
     deviceName: 'daemon-test',
     selective: selectiveDefaults(),
   })
 }
-
-const enrolment: Record<string, Handler> = {
-  'POST /v1/auth/login': () => ({ account_token: 'abst_test', expires_at: AT }),
-  'POST /v1/devices': () => ({ device_id: 'd1', device_token: DEVICE_TOKEN }),
-}
-
-const vault = (name: string): unknown => ({ id: 'v1', name, role: 'owner', usage: USAGE })
-
-/** A vault with nothing in it: what one sync of an empty folder asks the server for. */
-const EMPTY_VAULT: Record<string, Handler> = {
-  'GET /v1/vaults/v1/state': () => ({ head_seq: 0, settings: {}, usage: USAGE }),
-  'GET /v1/vaults/v1/manifest': () => ({ items: [], next: null, head_seq: 0 }),
-  'GET /v1/vaults/v1/changes': () => ({ items: [], head_seq: 0, next_since: 0 }),
-}
-
-/** A vault three commits in, with nothing new: a device at cursor 3 has only the feed to ask. */
-const SETTLED_VAULT: Record<string, Handler> = {
-  'GET /v1/vaults/v1/state': () => ({ head_seq: 3, settings: {}, usage: USAGE }),
-  'GET /v1/vaults/v1/manifest': () => ({ items: [], next: null, head_seq: 3 }),
-  'GET /v1/vaults/v1/changes': () => ({ items: [], head_seq: 3, next_since: 3 }),
-}
-
-/** Reads or writes the daemon's state database, closed again before the daemon opens it. */
+const connectionAddress = 'https://sync.example.com'
+const empty = (cursor = 0): Record<string, Handler> => ({
+  'GET /v2/connection': () => connection,
+  'GET /v2/manifest': () => ({ items: [], next: null, cursor }),
+  'GET /v2/changes': () => ({ items: [], next: null, cursor }),
+})
 async function withState<T>(fn: (state: SqliteStateStore) => Promise<T>): Promise<T> {
   const state = SqliteStateStore.open(stateDbFile(dir))
   try {
@@ -197,919 +140,484 @@ async function withState<T>(fn: (state: SqliteStateStore) => Promise<T>): Promis
     state.close()
   }
 }
-
-describe('the command line', () => {
-  it('answers --help without doing anything', async () => {
+describe('command line and token connect', () => {
+  it('answers help without doing anything', async () => {
     const run = await cli(['--help'])
     expect(run.code).toBe(0)
-    expect(run.all).toContain('abele-sync')
-    expect(run.all).toContain('init')
+    expect(run.all).toContain('connect')
+    expect(run.all).not.toContain('init --')
   })
-
-  it('refuses a command it does not have, with the usage', async () => {
-    const run = await cli(['sing'])
-    expect(run.code).toBe(2)
-    expect(run.err.join('\n')).toContain("unknown command 'sing'")
-    expect(run.err.join('\n')).toContain('Usage:')
-  })
-
-  it('refuses no command at all, with the usage', async () => {
-    const run = await cli([])
-    expect(run.code).toBe(2)
-    expect(run.err.join('\n')).toContain('Usage:')
-  })
-})
-
-describe('init', () => {
-  it('logs in, enrols and writes a config nobody else can read', async () => {
-    const fake = fakeServer({ ...enrolment, 'GET /v1/vaults': () => [vault('Notes')] })
-    const run = await cli(
-      [
-        'init',
-        '--server',
-        'https://sync.example.com',
-        '--dir',
-        dir,
-        '--email',
-        'someone@example.com',
-        '--password',
-        PASSWORD,
-      ],
-      { fetch: fake.fetch }
-    )
-
-    expect(run.code).toBe(0)
-    const cfg = readConfig(dir)
-    expect(cfg?.vaultId).toBe('v1')
-    expect(cfg?.deviceToken).toBe(DEVICE_TOKEN)
-    const mode = (await stat(join(stateFolder(dir), 'config.json'))).mode & 0o777
-    expect(mode).toBe(0o600)
-    expect(run.all).not.toContain(DEVICE_TOKEN)
-    expect(run.all).not.toContain(PASSWORD)
-  })
-
-  it('takes the password from ABELE_PASSWORD and never prints it', async () => {
-    const fake = fakeServer({ ...enrolment, 'GET /v1/vaults': () => [vault('Notes')] })
-    const run = await cli(['init', '--server', 'https://s', '--dir', dir, '--email', 'a@b.c'], {
-      fetch: fake.fetch,
-      env: { ABELE_PASSWORD: PASSWORD },
+  for (const args of [[], ['sing']])
+    it(`refuses missing/unknown command ${args}`, async () => {
+      const run = await cli(args)
+      expect(run.code).toBe(2)
+      expect(run.all).toContain('Usage:')
     })
-    expect(run.code).toBe(0)
-    expect(run.all).not.toContain(PASSWORD)
-    expect(readConfig(dir)?.deviceToken).toBe(DEVICE_TOKEN)
+  it('validates a token, writes a private config, and never prints either bearer spelling', async () => {
+    const fake = fakeServer(empty())
+    const run = await cli(['connect', '--dir', dir, '--token', TOKEN], fake.fetch)
+    expect(run.code, run.all).toBe(0)
+    expect(readConfig(dir)?.deviceToken).toBe(TOKEN)
+    expect((await stat(join(stateFolder(dir), 'config.json'))).mode & 0o777).toBe(0o600)
+    expect((await stat(stateFolder(dir))).mode & 0o777).toBe(0o700)
+    expect(run.all).not.toContain(TOKEN)
+    expect(run.all).not.toContain('a'.repeat(43))
+    expect(fake.calls).toEqual(['GET /v2/connection'])
   })
-
-  it('asks for a password when neither the flag nor the environment has one', async () => {
-    const fake = fakeServer(enrolment)
-    const run = await cli(['init', '--server', 'https://s', '--dir', dir, '--email', 'a@b.c'], {
-      fetch: fake.fetch,
-    })
-    expect(run.code).toBe(2)
-    expect(run.err.join('\n')).toContain('ABELE_PASSWORD')
+  it('accepts ABELE_TOKEN and refuses a missing token before any request', async () => {
+    const fake = fakeServer(empty())
+    expect((await cli(['connect', '--dir', dir], fake.fetch)).code).toBe(2)
     expect(fake.calls).toEqual([])
+    const run = await cli(['connect', '--dir', dir], fake.fetch, { ABELE_TOKEN: TOKEN })
+    expect(run.code, run.all).toBe(0)
+    expect(run.all).not.toContain(TOKEN)
   })
-
-  it('creates a vault named after the directory when the account has none', async () => {
-    let created: unknown = null
-    const fake = fakeServer({
-      ...enrolment,
-      'GET /v1/vaults': () => [],
-      'POST /v1/vaults': ({ body }) => {
-        created = body
-        return { id: 'v1' }
-      },
-    })
-    const run = await cli(
-      ['init', '--server', 'https://s', '--dir', dir, '--email', 'a@b.c', '--password', PASSWORD],
-      { fetch: fake.fetch }
-    )
-    expect(run.code).toBe(0)
-    expect(created).toEqual({ name: basename(dir) })
-  })
-
-  it('will not choose between several vaults', async () => {
-    const fake = fakeServer({
-      ...enrolment,
-      'GET /v1/vaults': () => [vault('Notes'), { ...(vault('Work') as object), id: 'v2' }],
-    })
-    const run = await cli(
-      ['init', '--server', 'https://s', '--dir', dir, '--email', 'a@b.c', '--password', PASSWORD],
-      { fetch: fake.fetch }
-    )
-    expect(run.code).toBe(2)
-    expect(run.err.join('\n')).toContain('--vault')
-    expect(readConfig(dir)).toBeNull()
-  })
-
-  it('refuses to set up a vault that is already set up', async () => {
-    await setUp()
-    const fake = fakeServer(enrolment)
-    const run = await cli(
-      ['init', '--server', 'https://s', '--dir', dir, '--email', 'a@b.c', '--password', PASSWORD],
-      { fetch: fake.fetch }
-    )
-    expect(run.code).toBe(2)
-    expect(run.err.join('\n')).toContain('already set up')
+  it('refuses to replace an existing config without requesting authority', async () => {
+    setUp()
+    const fake = fakeServer(empty())
+    expect((await cli(['connect', '--dir', dir, '--token', TOKEN], fake.fetch)).code).toBe(2)
     expect(fake.calls).toEqual([])
   })
 })
-
 describe('run', () => {
-  it('syncs once and says what it did', async () => {
-    await setUp()
-    const fake = fakeServer(EMPTY_VAULT)
-    const run = await cli(['run', '--dir', dir, '--once'], { fetch: fake.fetch })
+  it('syncs once, reports and logs the summary', async () => {
+    setUp()
+    const run = await cli(['run', '--dir', dir, '--once'], fakeServer(empty()).fetch)
     expect(run.err).toEqual([])
     expect(run.code).toBe(0)
-    expect(run.out.join('\n')).toContain('sync: done')
-    const log = await readFile(join(stateFolder(dir), 'log'), 'utf8')
-    expect(log).toContain('sync: done')
+    expect(run.all).toContain('sync: done')
+    expect(await readFile(join(stateFolder(dir), 'log'), 'utf8')).toContain('sync: done')
   })
-
-  it('refuses a directory that was never set up', async () => {
+  it('refuses an unconfigured directory', async () => {
     const run = await cli(['run', '--dir', dir, '--once'])
     expect(run.code).toBe(2)
-    expect(run.err.join('\n')).toContain('init')
+    expect(run.all).toContain('connect')
   })
-
-  it('will not run beside another daemon on the same vault', async () => {
-    await setUp()
-    // This very process holds the lock, as a running daemon would.
+  it('does not run beside another daemon', async () => {
+    setUp()
     const release = await acquireLock(dir)
     try {
       const run = await cli(['run', '--dir', dir, '--once'])
       expect(run.code).toBe(3)
-      expect(run.err.join('\n')).toContain(String(process.pid))
+      expect(run.all).toContain(String(process.pid))
     } finally {
       release()
     }
   })
-
-  it('reports a server it cannot reach and exits non-zero', async () => {
-    await setUp()
-    const unreachable: typeof fetch = () => Promise.reject(new Error('ECONNREFUSED'))
-    const run = await cli(['run', '--dir', dir, '--once'], { fetch: unreachable })
+  it('reports unreachable server and exits nonzero', async () => {
+    setUp()
+    const run = await cli(['run', '--dir', dir, '--once'], async () => {
+      throw new Error('ECONNREFUSED')
+    })
     expect(run.code).toBe(1)
     expect(run.out).toEqual([])
-    expect(run.err.join('\n')).toContain('never reached the server')
+    expect(run.all).toContain('never reached the server')
   })
-
-  it('drops the lock when the vault will not open', async () => {
-    await setUp()
-    // A directory where the database goes: nothing can open that, and the failure comes after
-    // the lock was taken.
-    await mkdir(join(stateFolder(dir), 'state.db'))
-    const run = await cli(['run', '--dir', dir, '--once'])
-    expect(run.code).toBe(1)
-    expect(run.err.join('\n')).toContain('state database')
-    expect(existsSync(join(stateFolder(dir), 'lock'))).toBe(false)
-  })
-
-  it('walks the manifest again when the selective settings changed since the last sync', async () => {
-    await setUp()
-    const cfg = readConfig(dir)!
+  for (const command of [
+    ['run', '--once'],
+    ['restore', '--deleted', 'gone.md'],
+  ])
+    it(`drops the lock when the ledger cannot open: ${command[0]}`, async () => {
+      setUp()
+      await mkdir(stateDbFile(dir))
+      const run = await cli([...command, '--dir', dir])
+      expect(run.code).toBe(1)
+      expect(run.all).toContain('state database')
+      expect(existsSync(join(stateFolder(dir), 'lock'))).toBe(false)
+    })
+  for (const value of ['1', 'often'])
+    it(`refuses invalid interval ${value}`, async () => {
+      setUp()
+      const run = await cli(['run', '--dir', dir, '--once', '--interval', value])
+      expect(run.code).toBe(2)
+    })
+  it('rescans once for selective and ignore changes, not on ordinary idle runs', async () => {
+    setUp()
+    const cfg = readConfig(dir)!,
+      fake = fakeServer(empty(3))
+    const walks = () => fake.calls.filter((c) => c === 'GET /v2/manifest').length
+    const once = async () => {
+      const r = await cli(['run', '--dir', dir, '--once'], fake.fetch)
+      expect(r.code, r.all).toBe(0)
+    }
+    await once()
+    await once()
+    expect(walks()).toBe(1)
     writeConfig(dir, { ...cfg, selective: { ...cfg.selective, video: false } })
-    const fake = fakeServer(SETTLED_VAULT)
-    const walks = (): number =>
-      fake.calls.filter((call) => call === 'GET /v1/vaults/v1/manifest').length
-    const once = async (): Promise<void> => {
-      const run = await cli(['run', '--dir', dir, '--once'], { fetch: fake.fetch })
-      expect(run.err).toEqual([])
-      expect(run.code).toBe(0)
-    }
-
-    // A first sync walks the manifest; the next, on the same settings, follows the feed alone.
     await once()
-    expect(walks()).toBe(1)
-    await once()
-    expect(walks()).toBe(1)
-
-    // Video switched on: the feed has moved past the clips this device passed over.
-    writeConfig(dir, { ...cfg, selective: { ...cfg.selective, video: true } })
     await once()
     expect(walks()).toBe(2)
-    const log = await readFile(join(stateFolder(dir), 'log'), 'utf8')
-    expect(log).toContain('rescan: what this device syncs changed')
-    // And once walked, not walked again.
-    await once()
-    expect(walks()).toBe(2)
-  })
-
-  it('walks the manifest again when the ignore file changed since the last sync', async () => {
-    await setUp()
-    const cfg = readConfig(dir)!
     await writeFile(ignoreFile(dir), '*.tmp\n')
-    const fake = fakeServer(SETTLED_VAULT)
-    const walks = (): number =>
-      fake.calls.filter((call) => call === 'GET /v1/vaults/v1/manifest').length
-    const once = async (): Promise<void> => {
-      const run = await cli(['run', '--dir', dir, '--once'], { fetch: fake.fetch })
-      expect(run.err).toEqual([])
-      expect(run.code).toBe(0)
-    }
-
     await once()
-    await once()
-    expect(walks()).toBe(1)
-    // The pattern dropped: what it kept out of the feed is out there to fetch.
+    expect(walks()).toBe(3)
     await writeFile(ignoreFile(dir), '')
     await once()
-    expect(walks()).toBe(2)
-    // The file gone altogether is a different scope from an empty one; either way, once.
+    expect(walks()).toBe(4)
     await rm(ignoreFile(dir))
     await once()
     await once()
-    expect(walks()).toBe(3)
-
-    // The key itself: the ignore file's text is part of it, and so is its absence.
-    expect(scopeKey(cfg.selective, '*.tmp\n')).not.toBe(scopeKey(cfg.selective, ''))
+    expect(walks()).toBe(5)
     expect(scopeKey(cfg.selective, '')).not.toBe(scopeKey(cfg.selective, null))
-    expect(scopeKey(cfg.selective, null)).toBe(scopeKey({ ...cfg.selective }, null))
-  })
-
-  it('refuses an interval shorter than the floor', async () => {
-    await setUp()
-    const run = await cli(['run', '--dir', dir, '--once', '--interval', '1'])
-    expect(run.code).toBe(2)
-    expect(run.err.join('\n')).toContain('at least 5')
-  })
-
-  it('refuses an interval that is not a number of seconds', async () => {
-    await setUp()
-    const run = await cli(['run', '--dir', dir, '--once', '--interval', 'often'])
-    expect(run.code).toBe(2)
-    expect(run.err.join('\n')).toContain('--interval')
+    expect(await readFile(join(stateFolder(dir), 'log'), 'utf8')).toContain(
+      'rescan: what this device syncs changed'
+    )
   })
 })
-
-describe('the daemon loop', () => {
-  it('walks the manifest on start when the scope changed, and records it only once it got through', async () => {
-    await setUp()
-    // A device that synced to the head under some other scope.
+describe('daemon loop', () => {
+  it('records a changed scope only after a successful startup rescan', async () => {
+    setUp()
     await withState(async (state) => {
       await state.setCursor(3)
-      state.setMeta('scope', 'the scope of some earlier config')
+      state.setMeta('scope', 'earlier')
     })
-    let failWalks = 1
+    let failures = 1
     const fake = fakeServer({
-      ...SETTLED_VAULT,
-      'GET /v1/vaults/v1/manifest': () =>
-        failWalks-- > 0
+      ...empty(3),
+      'GET /v2/manifest': () =>
+        failures-- > 0
           ? json({ error: { code: 'internal', message: 'not now' } }, 500)
-          : { items: [], next: null, head_seq: 3 },
+          : { items: [], next: null, cursor: 3 },
     })
-    const walks = (): number =>
-      fake.calls.filter((call) => call === 'GET /v1/vaults/v1/manifest').length
-    const key = (): Promise<string | null> => withState(async (state) => state.getMeta('scope'))
-    const session = async (done: (line: string) => boolean): Promise<Run> => {
-      const started = launch(['run', '--dir', dir], { fetch: fake.fetch, WebSocket: DEAF })
-      await until(started, () => started.out.some(done))
-      process.kill(process.pid, 'SIGTERM')
+    const session = async () => {
+      const started = launch(['run', '--dir', dir], fake.fetch)
+      await until(started, () => started.out.some((s) => s.startsWith('sync: done')))
+      process.emit('SIGTERM')
       const run = await started.done
-      expect(run.code).toBe(0)
+      expect(run.code, run.all).toBe(0)
       return run
     }
-
-    // The rescan is the first run and its walk fails; the run `start` prompted follows it,
-    // finds the cursor wound back and walks for itself. The key stays what it was.
-    const first = await session((line) => line.startsWith('sync: done'))
-    expect(first.out.join('\n')).toContain('sync: failed')
-    expect(walks()).toBe(2)
-    expect(await key()).toBe('the scope of some earlier config')
-
-    // Next start: the scope still reads as changed, so the walk is made again — and recorded.
-    await session((line) => line.startsWith('sync: done'))
-    expect(walks()).toBe(3)
-    expect(await key()).toBe(scopeKey(readConfig(dir)!.selective, null))
-
-    // And a start on a recorded scope has only the feed to follow.
-    await session((line) => line.startsWith('sync: done'))
-    expect(walks()).toBe(3)
+    expect((await session()).all).toContain('sync: failed')
+    expect(await withState(async (s) => s.getMeta('scope'))).toBe('earlier')
+    await session()
+    expect(await withState(async (s) => s.getMeta('scope'))).toBe(
+      scopeKey(readConfig(dir)!.selective, null)
+    )
+    const walks = fake.calls.filter((c) => c === 'GET /v2/manifest').length
+    await session()
+    expect(fake.calls.filter((c) => c === 'GET /v2/manifest')).toHaveLength(walks)
   })
-
-  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
-    it(`syncs until ${signal}, then lets go of everything`, async () => {
-      await setUp()
-      expect(process.listenerCount('SIGTERM')).toBe(0)
-      expect(process.listenerCount('SIGINT')).toBe(0)
-
-      const started = launch(['run', '--dir', dir], {
-        fetch: fakeServer(EMPTY_VAULT).fetch,
-        WebSocket: DEAF,
-      })
-      await until(started, () => started.out.some((line) => line.startsWith('state:')))
+  for (const signal of ['SIGTERM', 'SIGINT'] as const)
+    it(`releases resources and handlers on ${signal}`, async () => {
+      setUp()
+      expect(process.listenerCount(signal)).toBe(0)
+      const started = launch(['run', '--dir', dir], fakeServer(empty()).fetch)
+      await until(started, () => started.out.some((s) => s.startsWith('state:')))
       expect(started.out[0]).toContain(`watching ${dir}`)
       expect(existsSync(join(stateFolder(dir), 'lock'))).toBe(true)
-
-      process.kill(process.pid, signal)
+      process.emit(signal)
       const run = await started.done
-
       expect(run.code).toBe(0)
       expect(run.err).toEqual([])
-      expect(run.out.join('\n')).toContain(`stopping on ${signal}`)
-      // The lock is gone, and no handler of ours is left on the process either.
+      expect(run.all).toContain(`stopping on ${signal}`)
       expect(existsSync(join(stateFolder(dir), 'lock'))).toBe(false)
       expect(process.listenerCount('SIGTERM')).toBe(0)
       expect(process.listenerCount('SIGINT')).toBe(0)
-      // What was printed was written down as well.
-      const log = await readFile(join(stateFolder(dir), 'log'), 'utf8')
-      expect(log).toContain('state:')
-      expect(log).toContain(`stopping on ${signal}`)
+      expect(await readFile(join(stateFolder(dir), 'log'), 'utf8')).toContain(
+        `stopping on ${signal}`
+      )
     })
-  }
 })
-
 describe('status', () => {
-  it('prints the cursor, the head, what is pending, the last sync and the usage', async () => {
-    await setUp()
-    const fake = fakeServer({
-      'GET /v1/vaults/v1/state': () => ({ head_seq: 7, settings: {}, usage: USAGE }),
-      'GET /v1/vaults/v1/usage': () => ({ ...USAGE, top: [] }),
-    })
-    await writeFile(join(dir, 'fresh.md'), 'a note nobody has pushed yet')
-    const run = await cli(['status', '--dir', dir], { fetch: fake.fetch })
-
-    expect(run.code).toBe(0)
-    const printed = run.out.join('\n')
-    expect(printed).toContain('cursor     0')
-    expect(printed).toContain('head_seq   7')
-    expect(printed).toContain('pending    1')
-    expect(printed).toContain('last sync  never')
-    expect(printed).toContain('last error none')
-    expect(printed).toContain('live 4.1 kB')
-    expect(run.all).not.toContain(DEVICE_TOKEN)
+  it('prints scope, cursor, head, pending and local summary without leaking the token', async () => {
+    setUp()
+    await writeFile(join(dir, 'fresh.md'), 'pending note')
+    const run = await cli(['status', '--dir', dir], fakeServer(empty(7)).fetch)
+    expect(run.code, run.all).toBe(0)
+    for (const line of [
+      'cursor     0',
+      'head_seq   7',
+      'pending    1',
+      'last sync  never',
+      'last error none',
+      'scope      folder /',
+    ])
+      expect(run.all).toContain(line)
+    expect(run.all).not.toContain(TOKEN)
   })
-})
-
-describe('status and the vault cap', () => {
-  it('counts nothing as pending that the vault would not take', async () => {
-    await setUp()
-    const fake = fakeServer({
-      'GET /v1/vaults/v1/state': () => ({
-        head_seq: 0,
-        settings: { max_file_bytes: 10 },
-        usage: USAGE,
-      }),
-      'GET /v1/vaults/v1/usage': () => ({ ...USAGE, top: [] }),
-    })
-    await writeFile(join(dir, 'big.md'), 'well over ten bytes of note')
+  it('counts no oversized file as pending', async () => {
+    setUp()
+    await writeFile(join(dir, 'big.md'), 'over ten bytes of note')
     await writeFile(join(dir, 'tiny.md'), 'ok')
-    const run = await cli(['status', '--dir', dir], { fetch: fake.fetch })
-    expect(run.code).toBe(0)
-    expect(run.out.join('\n')).toContain('pending    1')
+    const run = await cli(
+      ['status', '--dir', dir],
+      fakeServer({
+        ...empty(),
+        'GET /v2/connection': () => ({
+          ...connection,
+          limits: { max_file_bytes: 10, quota_bytes: null },
+        }),
+      }).fetch
+    )
+    expect(run.code, run.all).toBe(0)
+    expect(run.all).toContain('pending    1')
   })
 })
-
-describe('history', () => {
-  const versions = [
-    {
-      version_id: 'ver2',
-      no: 2,
-      seq: 2,
-      op: 'modify',
-      path: 'note.md',
-      sha: 'b'.repeat(64),
-      size: 20,
-      mtime: 2000,
-      actor: { kind: 'device', id: 'd1', name: 'laptop' },
-      at: AT,
-      merge: null,
-    },
-    {
-      version_id: 'ver1',
-      no: 1,
-      seq: 1,
-      op: 'create',
-      path: 'note.md',
-      sha: 'a'.repeat(64),
-      size: 10,
-      mtime: 1000,
-      actor: { kind: 'device', id: 'd1', name: 'laptop' },
-      at: AT,
-      merge: null,
-    },
-  ]
-  const found: Record<string, Handler> = {
-    'GET /v1/vaults/v1/manifest': () => ({
-      items: [
-        {
-          file_id: 'f1',
-          path: 'note.md',
-          kind: 'note',
-          version_id: 'ver2',
-          seq: 2,
-          sha: 'b'.repeat(64),
-          size: 20,
-          mtime: 2000,
-        },
-      ],
-      next: null,
-      head_seq: 2,
-    }),
-    'GET /v1/vaults/v1/files/f1/versions': () => versions,
-  }
-
-  it('lists the versions, newest first', async () => {
-    await setUp()
-    const fake = fakeServer(found)
-    const run = await cli(['history', '--dir', dir, 'note.md'], { fetch: fake.fetch })
-    expect(run.code).toBe(0)
+const versions = [2, 1].map((n) => ({
+  version_id: `ver${n}`,
+  no: n,
+  seq: n,
+  op: n === 1 ? 'create' : 'modify',
+  path: 'note.md',
+  sha: (n === 1 ? 'a' : 'b').repeat(64),
+  size: n * 10,
+  mtime: n * 1000,
+  actor: { kind: 'key', id: 'd1', name: 'laptop' },
+  at: AT,
+  merge: null,
+}))
+const head = {
+  file_id: 'f1',
+  path: 'note.md',
+  kind: 'note',
+  version_id: 'ver2',
+  sha: 'b'.repeat(64),
+  size: 20,
+  mtime: 2000,
+}
+const found: Record<string, Handler> = {
+  'GET /v2/manifest': () => ({ items: [head], next: null, cursor: 2 }),
+  'GET /v2/files/f1/history': () => versions,
+}
+describe('history via v2', () => {
+  it('lists newest first', async () => {
+    setUp()
+    const run = await cli(['history', '--dir', dir, 'note.md'], fakeServer(found).fetch)
+    expect(run.code, run.all).toBe(0)
     expect(run.out[0]).toContain('ver2')
     expect(run.out[0]).toContain('#2')
     expect(run.out[0]).toContain('laptop')
+    expect(run.out[0]).toContain('1970-01-01T00:00:02.000Z')
+    expect(run.all).not.toContain(AT)
     expect(run.out[1]).toContain('ver1')
+    expect(run.out[1]).toContain('1970-01-01T00:00:01.000Z')
   })
-
-  it('diffs two versions of a note', async () => {
-    await setUp()
-    const fake = fakeServer({
-      ...found,
-      'GET /v1/vaults/v1/files/f1/versions/ver1': () => encodeText('one\ntwo\nthree\n'),
-      'GET /v1/vaults/v1/files/f1/versions/ver2': () => encodeText('one\ntwo point five\nthree\n'),
+  for (const binary of [false, true])
+    it(`diffs ${binary ? 'binary' : 'text'} versions with file/version authorization`, async () => {
+      setUp()
+      const fake = fakeServer({
+        ...found,
+        'GET /v2/files/f1/content': ({ url }) =>
+          url.searchParams.get('version_id') === 'ver1'
+            ? binary
+              ? new Uint8Array([0, 1, 2])
+              : encodeText('one\ntwo\nthree\n')
+            : binary
+              ? new Uint8Array([0, 1, 2, 3])
+              : encodeText('one\ntwo point five\nthree\n'),
+      })
+      const run = await cli(['history', '--dir', dir, 'note.md', '--diff', '1', '2'], fake.fetch)
+      expect(run.code, run.all).toBe(0)
+      if (binary) expect(run.all).toContain('binary versions differ')
+      else for (const s of ['@@', '-two', '+two point five', ' three']) expect(run.all).toContain(s)
     })
-    const run = await cli(['history', '--dir', dir, 'note.md', '--diff', '1', '2'], {
-      fetch: fake.fetch,
-    })
-    expect(run.code).toBe(0)
-    const printed = run.out.join('\n')
-    expect(printed).toContain('@@')
-    expect(printed).toContain('-two')
-    expect(printed).toContain('+two point five')
-    expect(printed).toContain(' three')
-  })
-
-  it('says so rather than printing bytes when the versions are not text', async () => {
-    await setUp()
-    const fake = fakeServer({
-      ...found,
-      'GET /v1/vaults/v1/files/f1/versions/ver1': () => new Uint8Array([0, 1, 2]),
-      'GET /v1/vaults/v1/files/f1/versions/ver2': () => new Uint8Array([0, 1, 2, 3]),
-    })
-    const run = await cli(['history', '--dir', dir, 'note.md', '--diff', 'ver1', 'ver2'], {
-      fetch: fake.fetch,
-    })
-    expect(run.code).toBe(0)
-    expect(run.out.join('\n')).toContain('binary versions differ')
-  })
-
-  it('refuses a --diff that does not name two versions, before it asks anything', async () => {
-    await setUp()
-    const fake = fakeServer(found)
-    const run = await cli(['history', '--dir', dir, 'note.md', '--diff', 'ver1'], {
-      fetch: fake.fetch,
-    })
+  it('refuses a missing diff argument before requests', async () => {
+    setUp()
+    const fake = fakeServer(found),
+      run = await cli(['history', '--dir', dir, 'note.md', '--diff', 'ver1'], fake.fetch)
     expect(run.code).toBe(2)
-    expect(run.err.join('\n')).toContain('two versions')
+    expect(run.all).toContain('two versions')
     expect(fake.calls).toEqual([])
   })
-
-  it('refuses a version the file does not have', async () => {
-    await setUp()
-    const fake = fakeServer(found)
-    const run = await cli(['history', '--dir', dir, 'note.md', '--diff', 'ver1', 'ver9'], {
-      fetch: fake.fetch,
-    })
+  it('refuses an unknown version', async () => {
+    setUp()
+    const run = await cli(
+      ['history', '--dir', dir, 'note.md', '--diff', 'ver1', 'ver9'],
+      fakeServer(found).fetch
+    )
     expect(run.code).toBe(2)
-    expect(run.err.join('\n')).toContain('ver9')
+    expect(run.all).toContain('ver9')
   })
 })
-
-describe('restore', () => {
-  it('brings a deleted file back and syncs it onto the disk', async () => {
-    await setUp()
-    const bytes = encodeText('back again\n')
-    const sha = await sha256(bytes)
-    let restored = false
+const trash = [
+  {
+    file_id: 'f1',
+    path: 'gone.md',
+    kind: 'note',
+    deleted_at: AT,
+    last_version_id: 'ver1',
+    size: 4,
+  },
+]
+const restored = {
+  status: 'applied',
+  file_id: 'f1',
+  version_id: 'ver2',
+  seq: 2,
+  path: 'gone.md',
+  sha: 'a'.repeat(64),
+  size: 4,
+  mtime: 1000,
+}
+describe('restore via v2', () => {
+  it('restores deleted bytes and syncs them onto disk', async () => {
+    setUp()
+    const bytes = encodeText('back again\n'),
+      sha = await sha256(bytes)
+    let done = false
     const fake = fakeServer({
-      'GET /v1/vaults/v1/trash': () => [
-        {
-          file_id: 'f1',
-          path: 'gone.md',
-          kind: 'note',
-          deleted_at: AT,
-          last_version_id: 'ver1',
-          size: bytes.length,
-        },
-      ],
-      'POST /v1/vaults/v1/trash/f1/restore': () => {
-        restored = true
-        return {
-          status: 'applied',
-          file_id: 'f1',
-          version_id: 'ver2',
-          seq: 2,
-          path: 'gone.md',
-          sha,
-          size: bytes.length,
-          mtime: 1000,
-        }
+      ...empty(2),
+      'GET /v2/trash': () => trash,
+      'POST /v2/files/f1/restore': () => {
+        done = true
+        return { ...restored, sha, size: bytes.length }
       },
-      'GET /v1/vaults/v1/state': () => ({ head_seq: 2, settings: {}, usage: USAGE }),
-      'GET /v1/vaults/v1/manifest': () => ({
-        items: restored
-          ? [
-              {
-                file_id: 'f1',
-                path: 'gone.md',
-                kind: 'note',
-                version_id: 'ver2',
-                seq: 2,
-                sha,
-                size: bytes.length,
-                mtime: 1000,
-              },
-            ]
-          : [],
+      'GET /v2/manifest': () => ({
+        items: done ? [{ ...head, path: 'gone.md', sha, size: bytes.length }] : [],
         next: null,
-        head_seq: 2,
+        cursor: 2,
       }),
-      'GET /v1/vaults/v1/changes': () => ({ items: [], head_seq: 2, next_since: 2 }),
-      [`GET /v1/blobs/${sha}`]: () => bytes,
+      'GET /v2/files/f1/content': () => bytes,
     })
-
-    const run = await cli(['restore', '--dir', dir, '--deleted', 'gone.md'], { fetch: fake.fetch })
+    const run = await cli(['restore', '--dir', dir, '--deleted', 'gone.md'], fake.fetch)
+    expect(run.code, run.all).toBe(0)
     expect(run.err).toEqual([])
-    expect(run.code).toBe(0)
-    expect(run.out.join('\n')).toContain('restored gone.md')
+    expect(run.all).toContain('restored gone.md')
     expect(await readFile(join(dir, 'gone.md'), 'utf8')).toBe('back again\n')
   })
-
-  it('says when nothing at that path was deleted', async () => {
-    await setUp()
-    const fake = fakeServer({ 'GET /v1/vaults/v1/trash': () => [] })
-    const run = await cli(['restore', '--dir', dir, '--deleted', 'gone.md'], { fetch: fake.fetch })
+  it('reports no deleted file at the requested path', async () => {
+    setUp()
+    const run = await cli(
+      ['restore', '--dir', dir, '--deleted', 'gone.md'],
+      fakeServer({ 'GET /v2/trash': () => [] }).fetch
+    )
     expect(run.code).toBe(2)
-    expect(run.err.join('\n')).toContain('gone.md')
+    expect(run.all).toContain('gone.md')
   })
-
-  it('will not restore a version and a deleted file at once', async () => {
-    await setUp()
-    const fake = fakeServer({ 'GET /v1/vaults/v1/trash': () => [] })
-    const run = await cli(['restore', '--dir', dir, '--deleted', 'gone.md', '--version', 'ver1'], {
-      fetch: fake.fetch,
+  for (const flags of [[], ['--deleted', 'gone.md', '--version', 'ver1']])
+    it(`rejects missing or contradictory restore arguments ${flags}`, async () => {
+      setUp()
+      const fake = fakeServer({}),
+        run = await cli(['restore', '--dir', dir, ...flags], fake.fetch)
+      expect(run.code).toBe(2)
+      expect(fake.calls).toEqual([])
     })
-    expect(run.code).toBe(2)
-    expect(run.err.join('\n')).toContain('--deleted')
-    expect(fake.calls).toEqual([])
-  })
-
-  it('drops the lock when the vault will not open', async () => {
-    await setUp()
-    await mkdir(join(stateFolder(dir), 'state.db'))
-    const run = await cli(['restore', '--dir', dir, '--deleted', 'gone.md'])
-    expect(run.code).toBe(1)
-    expect(run.err.join('\n')).toContain('state database')
-    expect(existsSync(join(stateFolder(dir), 'lock'))).toBe(false)
-  })
-
-  it('needs a path', async () => {
-    await setUp()
-    const run = await cli(['restore', '--dir', dir])
-    expect(run.code).toBe(2)
-    expect(run.err.join('\n')).toContain('path')
+  it('restores beside a daemon without touching its disk or lock', async () => {
+    setUp()
+    const release = await acquireLock(dir)
+    try {
+      const fake = fakeServer({
+        'GET /v2/trash': () => trash,
+        'POST /v2/files/f1/restore': () => restored,
+      })
+      const run = await cli(['restore', '--dir', dir, '--deleted', 'gone.md'], fake.fetch)
+      expect(run.code, run.all).toBe(0)
+      expect(run.all).toContain('on the server; the daemon will bring it down')
+      expect(existsSync(join(dir, 'gone.md'))).toBe(false)
+      expect((await readFile(join(stateFolder(dir), 'lock'), 'utf8')).split('\n')[0]).toBe(
+        String(process.pid)
+      )
+      await expect(acquireLock(dir)).rejects.toThrow(/another abele-sync is running/)
+      expect(fake.calls.some((c) => c.includes('/manifest') || c.includes('/changes'))).toBe(false)
+    } finally {
+      release()
+    }
   })
 })
-
-/** What a server says about a token it no longer takes. */
-const REVOKED: Handler = () =>
-  json({ error: { code: 'unauthorized', message: 'the device token was revoked' } }, 401)
-
-const REVOKED_VAULT: Record<string, Handler> = {
-  'GET /v1/vaults/v1/state': REVOKED,
-  'GET /v1/vaults/v1/manifest': REVOKED,
-  'GET /v1/vaults/v1/changes': REVOKED,
-  'GET /v1/vaults/v1/usage': REVOKED,
+const revoked: Handler = () =>
+  json({ error: { code: 'unauthorized', message: 'token revoked' } }, 401)
+const denied = {
+  'GET /v2/connection': revoked,
+  'GET /v2/manifest': revoked,
+  'GET /v2/changes': revoked,
 }
-
-const HINT = 'run `abele-sync init --force`'
-
-describe('a token the server no longer takes', () => {
-  it('ends run --once with the hint, non-zero', async () => {
-    await setUp()
-    const run = await cli(['run', '--dir', dir, '--once'], {
-      fetch: fakeServer(REVOKED_VAULT).fetch,
+const hint = 'disconnect locally and connect with a new token'
+describe('revoked token', () => {
+  for (const once of [true, false])
+    it(`stops ${once ? 'once' : 'daemon'} with the hint and releases handlers/lock`, async () => {
+      setUp()
+      const run = await cli(
+        ['run', '--dir', dir, ...(once ? ['--once'] : [])],
+        fakeServer(denied).fetch
+      )
+      expect(run.code, run.all).toBe(4)
+      expect(run.all).toContain(hint)
+      expect(existsSync(join(stateFolder(dir), 'lock'))).toBe(false)
+      expect(process.listenerCount('SIGTERM')).toBe(0)
+      expect(process.listenerCount('SIGINT')).toBe(0)
+      if (!once)
+        expect(
+          (await readFile(join(stateFolder(dir), 'log'), 'utf8')).match(/failed: /g)
+        ).toHaveLength(1)
     })
-    expect(run.code).toBe(4)
-    expect(run.err.join('\n')).toContain('revoked')
-    expect(run.err.join('\n')).toContain(HINT)
-    expect(existsSync(join(stateFolder(dir), 'lock'))).toBe(false)
+  it('reports locally persisted revocation without requests or printing credentials', async () => {
+    setUp()
+    const fake = fakeServer(denied)
+    expect((await cli(['run', '--dir', dir, '--once'], fake.fetch)).code).toBe(4)
+    const count = fake.calls.length,
+      run = await cli(['status', '--dir', dir], fake.fetch)
+    expect(run.code).toBe(0)
+    expect(run.all).toMatch(/state\s+revoked/)
+    expect(fake.calls).toHaveLength(count)
+    expect(run.all).not.toContain(TOKEN)
   })
-
-  it('ends the daemon with the hint, non-zero, and no handler left on the process', async () => {
-    await setUp()
-    const run = await cli(['run', '--dir', dir], {
-      fetch: fakeServer(REVOKED_VAULT).fetch,
-      WebSocket: DEAF,
-    })
-    expect(run.code).toBe(4)
-    expect(run.out.join('\n')).toContain('stopping: ')
-    expect(run.err.join('\n')).toContain(HINT)
-    expect(process.listenerCount('SIGTERM')).toBe(0)
-    expect(process.listenerCount('SIGINT')).toBe(0)
-    expect(existsSync(join(stateFolder(dir), 'lock'))).toBe(false)
-    // The engine's own line is in the log once, and the daemon did not write it a second time.
-    const log = await readFile(join(stateFolder(dir), 'log'), 'utf8')
-    expect(log.match(/failed: /g)).toHaveLength(1)
-  })
-
-  it('reports a revoked daemon locally without recontacting the server or printing its token', async () => {
-    await setUp()
-    const fake = fakeServer(REVOKED_VAULT)
-    expect((await cli(['run', '--dir', dir, '--once'], { fetch: fake.fetch })).code).toBe(4)
-    const calls = fake.calls.length
-    const status = await cli(['status', '--dir', dir], { fetch: fake.fetch })
-    expect(status.code).toBe(0)
-    expect(status.out.join('\n')).toMatch(/state\s+revoked/)
-    expect(fake.calls).toHaveLength(calls)
-    expect(status.all).not.toContain(DEVICE_TOKEN)
-  })
-
-  it('does not inherit the revoked marker when enrolment replaces the personal credential', async () => {
-    await setUp()
-    expect(
-      (await cli(['run', '--dir', dir, '--once'], { fetch: fakeServer(REVOKED_VAULT).fetch })).code
-    ).toBe(4)
-    writeConfig(dir, {
-      ...readConfig(dir)!,
-      deviceId: 'fresh-device',
-      deviceToken: 'absd_fresh_credential',
-    })
-    const fake = fakeServer(EMPTY_VAULT)
-    expect((await cli(['run', '--dir', dir, '--once'], { fetch: fake.fetch })).code).toBe(0)
-    expect(fake.calls).toContain('GET /v1/vaults/v1/state')
-  })
-
-  it('has status say what to do', async () => {
-    await setUp()
-    const run = await cli(['status', '--dir', dir], { fetch: fakeServer(REVOKED_VAULT).fetch })
+  it('status gives recovery advice on first authorization refusal', async () => {
+    setUp()
+    const run = await cli(['status', '--dir', dir], fakeServer(denied).fetch)
     expect(run.code).toBe(1)
-    expect(run.err.join('\n')).toContain(HINT)
-    expect(run.all).not.toContain(DEVICE_TOKEN)
+    expect(run.all).toContain(hint)
+    expect(run.all).not.toContain(TOKEN)
   })
 })
-
-describe('init --force', () => {
-  const again = (vaultId: string): Promise<Run> =>
-    cli(
-      [
-        'init',
-        '--force',
-        '--server',
-        'https://sync.example.com',
-        '--dir',
-        dir,
-        '--email',
-        'a@b.c',
-        '--password',
-        PASSWORD,
-      ],
-      {
-        fetch: fakeServer({
-          ...enrolment,
-          'POST /v1/devices': () => ({ device_id: 'd2', device_token: 'absd_the_second' }),
-          'GET /v1/vaults': () => [{ ...(vault('Notes') as object), id: vaultId }],
-        }).fetch,
-      }
-    )
-
-  it('replaces the config and keeps the state when the vault is the same', async () => {
-    await setUp()
-    await withState(async (state) => state.setCursor(7))
-    const run = await again('v1')
-    expect(run.code).toBe(0)
-    expect(run.out.join('\n')).toContain('kept state.db')
-    expect(readConfig(dir)).toMatchObject({ deviceId: 'd2', deviceToken: 'absd_the_second' })
-    expect(await withState(async (state) => state.getCursor())).toBe(7)
-    expect(run.all).not.toContain('absd_the_second')
-  })
-
-  it('removes the state when the vault is another', async () => {
-    await setUp()
-    await withState(async (state) => state.setCursor(7))
-    const run = await again('v2')
-    expect(run.code).toBe(0)
-    expect(run.out.join('\n')).toContain('removed state.db')
-    expect(existsSync(stateDbFile(dir))).toBe(false)
-    expect(readConfig(dir)).toMatchObject({ vaultId: 'v2', deviceId: 'd2' })
-  })
-
-  it("goes by the state's own word about its vault when the config cannot be read", async () => {
-    await setUp()
-    await withState(async (state) => {
-      await state.setCursor(7)
-      state.setMeta('vault', 'v1')
-    })
-    await writeFile(join(stateFolder(dir), 'config.json'), '{not json')
-    const run = await again('v1')
-    expect(run.code).toBe(0)
-    expect(run.out.join('\n')).toContain('kept state.db')
-    expect(readConfig(dir)).toMatchObject({ vaultId: 'v1', deviceId: 'd2' })
-  })
-
-  it('removes a state that never said which vault it described', async () => {
-    await setUp()
-    await withState(async (state) => state.setCursor(7))
-    await writeFile(join(stateFolder(dir), 'config.json'), '{not json')
-    const run = await again('v1')
-    expect(run.code).toBe(0)
-    expect(run.out.join('\n')).toContain('removed state.db')
-    expect(existsSync(stateDbFile(dir))).toBe(false)
-  })
-})
-
-describe('the password prompt', () => {
-  it('asks at a terminal, echoes nothing, and sends what was typed', async () => {
-    let sent: unknown = null
-    const fake = fakeServer({
-      ...enrolment,
-      'POST /v1/auth/login': ({ body }) => {
-        sent = body
-        return { account_token: 'abst_test', expires_at: AT }
-      },
-      'GET /v1/vaults': () => [vault('Notes')],
-    })
-    const stdin = Object.assign(new PassThrough(), { isTTY: true })
-    const shown: string[] = []
-    const stderr = new Writable({
-      write: (chunk: Buffer, _encoding, done) => {
-        shown.push(chunk.toString())
-        done()
-      },
-    })
-    stdin.end(`${PASSWORD}\n`)
-
-    const run = await cli(['init', '--server', 'https://s', '--dir', dir, '--email', 'a@b.c'], {
-      fetch: fake.fetch,
-      stdin,
-      stderr,
-    })
-
-    expect(run.code).toBe(0)
-    expect(sent).toMatchObject({ password: PASSWORD })
-    expect(shown.join('')).toContain('password: ')
-    expect(shown.join('')).not.toContain(PASSWORD)
-    expect(run.all).not.toContain(PASSWORD)
-  })
-
-  it('does not ask when there is no terminal to ask at', async () => {
-    const fake = fakeServer(enrolment)
-    const stdin = Object.assign(new PassThrough(), { isTTY: false })
-    const run = await cli(['init', '--server', 'https://s', '--dir', dir, '--email', 'a@b.c'], {
-      fetch: fake.fetch,
-      stdin,
-      stderr: new PassThrough(),
-    })
-    expect(run.code).toBe(2)
-    expect(run.err.join('\n')).toContain('ABELE_PASSWORD')
-    expect(fake.calls).toEqual([])
-  })
-})
-
-describe('the temp folder', () => {
-  const leftover = (): string => join(stateFolder(dir), 'tmp', 'half-written')
-
-  it('is left alone by status and history, which take no lock', async () => {
-    await setUp()
+describe('retained temp files', () => {
+  const leftover = () => join(stateFolder(dir), 'tmp', 'half-written')
+  it('leaves temp data alone in status/history but sweeps it on an owned run', async () => {
+    setUp()
     await mkdir(join(stateFolder(dir), 'tmp'), { recursive: true })
-    await writeFile(leftover(), 'the daemon may be writing this')
-    const fake = fakeServer({
-      'GET /v1/vaults/v1/state': () => ({ head_seq: 0, settings: {}, usage: USAGE }),
-      'GET /v1/vaults/v1/usage': () => ({ ...USAGE, top: [] }),
-      'GET /v1/vaults/v1/manifest': () => ({ items: [], next: null, head_seq: 0 }),
-      'GET /v1/vaults/v1/trash': () => [],
-    })
-    expect((await cli(['status', '--dir', dir], { fetch: fake.fetch })).code).toBe(0)
+    await writeFile(leftover(), 'retained')
+    const fake = fakeServer({ ...empty(), 'GET /v2/trash': () => [] })
+    expect((await cli(['status', '--dir', dir], fake.fetch)).code).toBe(0)
     expect(existsSync(leftover())).toBe(true)
-    const history = await cli(['history', '--dir', dir, 'nowhere.md'], { fetch: fake.fetch })
-    expect(history.code).toBe(2)
+    expect((await cli(['history', '--dir', dir, 'nowhere.md'], fake.fetch)).code).toBe(2)
     expect(existsSync(leftover())).toBe(true)
-  })
-
-  it('is swept by run once it holds the lock, and gone when it exits', async () => {
-    await setUp()
-    await mkdir(join(stateFolder(dir), 'tmp'), { recursive: true })
-    await writeFile(leftover(), 'what a killed daemon left')
-    const run = await cli(['run', '--dir', dir, '--once'], { fetch: fakeServer(EMPTY_VAULT).fetch })
-    expect(run.code).toBe(0)
+    expect((await cli(['run', '--dir', dir, '--once'], fake.fetch)).code).toBe(0)
     expect(existsSync(leftover())).toBe(false)
-    expect(existsSync(join(stateFolder(dir), 'tmp'))).toBe(false)
   })
 })
-
-describe('the summary', () => {
-  it('is printed by the daemon after every sync, and read back by status with the refusals', async () => {
-    await setUp()
-    const note = 'thirty bytes of note, or so..'
-    await writeFile(join(dir, 'big.md'), note)
-    const fake = fakeServer({
-      ...EMPTY_VAULT,
-      // The vault has the bytes already, so nothing is uploaded; the commit refuses the op.
-      [`HEAD /v1/blobs/${await sha256(encodeText(note))}`]: () => ({}),
-      'POST /v1/vaults/v1/commit': () => ({
-        head_seq: 0,
-        results: [
-          {
-            status: 'rejected',
-            code: 'too_large',
-            message: 'the file is 30 bytes; the limit is 10',
-          },
-        ],
-      }),
-      'GET /v1/vaults/v1/usage': () => ({ ...USAGE, top: [] }),
-    })
-    const started = launch(['run', '--dir', dir], { fetch: fake.fetch, WebSocket: DEAF })
-    await until(started, () => started.out.some((line) => line.startsWith('sync: done (pulled')))
-    process.kill(process.pid, 'SIGTERM')
-    const run = await started.done
-    expect(run.code).toBe(0)
-    const summary = run.out.find((line) => line.startsWith('sync: done (pulled'))!
-    expect(summary).toContain('rejected 1')
-    const log = await readFile(join(stateFolder(dir), 'log'), 'utf8')
-    expect(log).toContain(summary)
-    expect(log).toContain('push: create refused: too_large the file is 30 bytes')
-
-    const status = await cli(['status', '--dir', dir], { fetch: fake.fetch })
-    expect(status.code).toBe(0)
-    const printed = status.out.join('\n')
-    expect(printed).toContain(`summary    ${summary}`)
-    expect(printed).toContain('refused    push: create refused: too_large the file is 30 bytes')
-  })
-})
-
-describe('restore beside a running daemon', () => {
-  let held: (() => void) | null = null
-  afterEach(() => {
-    held?.()
-    held = null
-  })
-
-  it('restores on the server, touches nothing on the disk, and exits clean', async () => {
-    await setUp()
-    // This very process holds the lock, as a running daemon would; the test's end lets it go.
-    held = await acquireLock(dir)
-    let restored = false
-    const fake = fakeServer({
-      'GET /v1/vaults/v1/trash': () => [
-        {
-          file_id: 'f1',
-          path: 'gone.md',
-          kind: 'note',
-          deleted_at: AT,
-          last_version_id: 'ver1',
-          size: 4,
-        },
+it('persists summary and refusals for local status', async () => {
+  setUp()
+  const note = 'thirty bytes of note, or so..'
+  await writeFile(join(dir, 'big.md'), note)
+  const fake = fakeServer({
+    ...empty(),
+    [`PUT /v2/uploads/${await sha256(encodeText(note))}`]: () =>
+      new Response(null, { status: 204 }),
+    'POST /v2/commit': () => ({
+      cursor: 0,
+      results: [
+        { status: 'rejected', code: 'too_large', message: 'the file is 30 bytes; the limit is 10' },
       ],
-      'POST /v1/vaults/v1/trash/f1/restore': () => {
-        restored = true
-        return {
-          status: 'applied',
-          file_id: 'f1',
-          version_id: 'ver2',
-          seq: 2,
-          path: 'gone.md',
-          sha: 'a'.repeat(64),
-          size: 4,
-          mtime: 1000,
-        }
-      },
-    })
-    const run = await cli(['restore', '--dir', dir, '--deleted', 'gone.md'], { fetch: fake.fetch })
-    expect(run.err).toEqual([])
-    expect(run.code).toBe(0)
-    expect(run.out.join('\n')).toContain(
-      'restored gone.md on the server; the daemon will bring it down'
-    )
-    expect(restored).toBe(true)
-    expect(existsSync(join(dir, 'gone.md'))).toBe(false)
-    // The daemon's lock is still the daemon's.
-    const lock = join(stateFolder(dir), 'lock')
-    expect((await readFile(lock, 'utf8')).split('\n')[0]).toBe(String(process.pid))
-    await expect(acquireLock(dir)).rejects.toThrow(/another abele-sync is running/)
-    // Nothing was synced: no state, no pull.
-    expect(fake.calls.some((call) => call.includes('/changes') || call.includes('/manifest'))).toBe(
-      false
-    )
+    }),
   })
+  const started = launch(['run', '--dir', dir], fake.fetch)
+  await until(started, () => started.out.some((s) => s.startsWith('sync: done (pulled')))
+  process.emit('SIGTERM')
+  const run = await started.done
+  expect(run.code, run.all).toBe(0)
+  const summary = run.out.find((s) => s.startsWith('sync: done (pulled'))!
+  expect(summary).toContain('rejected 1')
+  const log = await readFile(join(stateFolder(dir), 'log'), 'utf8')
+  expect(log).toContain(summary)
+  expect(log).toContain('push: create refused: too_large')
+  const status = await cli(['status', '--dir', dir], fake.fetch)
+  expect(status.code, status.all).toBe(0)
+  expect(status.all).toContain(`summary    ${summary}`)
+  expect(status.all).toContain('refused    push: create refused: too_large')
 })
-
-describe('what a server says', () => {
-  it('is printed as one plain line, whatever it tried to draw', async () => {
-    await setUp()
-    const fake = fakeServer({
-      'GET /v1/vaults/v1/state': () =>
-        json(
-          {
-            error: {
-              code: 'internal',
-              message: 'one\u001b[31m line\nsync: done (pulled 9)\r\u0007and no more',
-            },
+it('prints server errors as a single sanitized line', async () => {
+  setUp()
+  const fake = fakeServer({
+    'GET /v2/connection': () =>
+      json(
+        {
+          error: {
+            code: 'internal',
+            message: 'one\u001b[31m line\nsync: done (pulled 9)\r\u0007and no more',
           },
-          500
-        ),
-    })
-    const run = await cli(['status', '--dir', dir], { fetch: fake.fetch })
-    expect(run.code).toBe(1)
-    // The escape byte is gone and the text it was meant to colour stays, as text.
-    expect(run.err).toEqual(['one[31m line sync: done (pulled 9) and no more'])
+        },
+        500
+      ),
   })
+  const run = await cli(['status', '--dir', dir], fake.fetch)
+  expect(run.code).toBe(1)
+  expect(run.err).toEqual(['one[31m line sync: done (pulled 9) and no more'])
 })

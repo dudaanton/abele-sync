@@ -8,6 +8,7 @@ import { runCli } from '../../src/cli.js'
 import { writeConfig } from '../../src/config.js'
 import { codeArg, codeFingerprint, codeGroups, codePluginId } from '../../src/pluginCode.js'
 import { SqliteStateStore } from '../../src/sqliteState.js'
+import { tokenFor } from '../helpers/token.js'
 import { stateDbFile } from '../../src/vault.js'
 
 const path = (id: string) => `.obsidian/plugins/${id}/main.js`
@@ -86,7 +87,7 @@ describe('plugin code command boundaries', () => {
         serverUrl: 'https://sync.example.invalid',
         vaultId: 'vault',
         deviceId: 'device',
-        deviceToken: 'absd_test',
+        deviceToken: tokenFor('https://sync.example.invalid'),
         deviceName: 'Local device',
         selective: selectiveDefaults(),
       })

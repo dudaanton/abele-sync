@@ -17,11 +17,18 @@ import {
   EngineError,
   ExternalStateError,
   isHidden,
+  MAX_CHUNK_BYTES,
+  fingerprintSource,
+  type ChunkSource,
+  type SourceStamp,
+  type ContentIdentity,
   type FileInfo,
   type FileSystem,
 } from '@abele/sync-core'
 import { caseKey } from '@abele/sync-protocol'
 import { syncParents, syncPath } from './nodeFsDurability.js'
+import { NodeStages } from './nodeStages.js'
+import type { AtomicStage } from '@abele/sync-core'
 import {
   containedIn,
   isMissing,
@@ -57,6 +64,8 @@ export interface NodeFileSystemOptions {
    * reason to wake one. Hidden *files* are still listed; the scan's filter passes over them.
    */
   skipHidden?: boolean
+  /** Token sync models empty folders explicitly; do not prune them on file removal. */
+  preserveEmptyDirectories?: boolean
   effectGuard?: () => void
   effectTracker?: <T>(work: () => Promise<T>) => Promise<T>
 }
@@ -76,6 +85,7 @@ export interface NodeFileSystemOptions {
 export class NodeFileSystem implements FileSystem {
   private readonly ignoreDirs: ReadonlySet<string>
   private readonly skipHidden: boolean
+  private readonly preserveEmptyDirectories: boolean
   /**
    * Whether this platform watches a whole tree at once. Probed once, at construction, because a
    * host that cannot watch has to fall back to the periodic sync before it starts the engine.
@@ -88,6 +98,7 @@ export class NodeFileSystem implements FileSystem {
   /** The root resolved once: what every path is built from and tested against. */
   private readonly base: string
   private readonly effectGuard?: () => void
+  private readonly stages: NodeStages
 
   constructor(
     private readonly root: string,
@@ -95,23 +106,106 @@ export class NodeFileSystem implements FileSystem {
   ) {
     this.base = resolve(root)
     this.effectGuard = options.effectGuard
+    this.stages = new NodeStages(
+      this.base,
+      this,
+      () => this.checkEffect(),
+      options.effectTracker ?? ((work) => work())
+    )
     if (options.effectTracker) {
       const track = options.effectTracker
       const write = this.writeAtomic.bind(this),
         move = this.move.bind(this),
-        remove = this.remove.bind(this)
+        remove = this.remove.bind(this),
+        createDirectory = this.mkdir.bind(this),
+        removeDirectory = this.removeDirectory.bind(this),
+        moveDirectory = this.moveDirectory.bind(this)
       this.writeAtomic = (...args) => track(() => write(...args))
       this.move = (...args) => track(() => move(...args))
       this.remove = (...args) => track(() => remove(...args))
+      this.mkdir = (...args) => track(() => createDirectory(...args))
+      this.removeDirectory = (...args) => track(() => removeDirectory(...args))
+      this.moveDirectory = (...args) => track(() => moveDirectory(...args))
     }
     this.ignoreDirs = new Set([STATE_DIR, ...(options.ignoreDirs ?? [])])
     this.skipHidden = options.skipHidden === true
+    this.preserveEmptyDirectories = options.preserveEmptyDirectories === true
     this.supportsWatch = supportsRecursiveWatch(root)
     if (this.supportsWatch) this.watch = (cb) => this.startWatch(cb)
   }
 
   async *list(): AsyncIterable<FileInfo> {
     yield* this.walk(this.base, '')
+  }
+
+  async *listDirectories(): AsyncIterable<{ path: string; identity: string; mtime: number }> {
+    const walk = async function* (
+      self: NodeFileSystem,
+      directory: string,
+      prefix: string
+    ): AsyncIterable<{ path: string; identity: string; mtime: number }> {
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue
+        const path = prefix ? `${prefix}/${entry.name}` : entry.name
+        if (self.isIgnored(path) || (self.skipHidden && isHiddenFolder(entry.name, prefix)))
+          continue
+        const absolute = await self.contained(path)
+        const stat = await lstat(absolute)
+        if (!stat.isDirectory() || stat.isSymbolicLink()) continue
+        yield {
+          path,
+          identity: `${stat.dev}:${stat.ino}`,
+          mtime: Math.max(0, Math.round(stat.mtimeMs)),
+        }
+        yield* walk(self, absolute, path)
+      }
+    }
+    yield* walk(this, this.base, '')
+  }
+
+  async mkdir(path: string): Promise<void> {
+    this.checkEffect()
+    const target = await this.contained(path)
+    try {
+      const existing = await lstat(target)
+      if (!existing.isDirectory() || existing.isSymbolicLink())
+        throw new EngineError('conflict', `not a real directory: ${path}`)
+      return
+    } catch (error) {
+      if (!isMissing(error)) throw error
+    }
+    this.checkEffect()
+    await mkdir(await this.contained(path), { recursive: true })
+    const created = await lstat(target)
+    if (!created.isDirectory() || created.isSymbolicLink())
+      throw new EngineError('conflict', `not a real directory: ${path}`)
+  }
+
+  async moveDirectory(from: string, to: string): Promise<void> {
+    this.checkEffect()
+    const source = await this.contained(from),
+      target = await this.contained(to)
+    const stat = await lstat(source)
+    if (!stat.isDirectory() || stat.isSymbolicLink())
+      throw new EngineError('io', 'not a real directory')
+    try {
+      await lstat(target)
+      throw new EngineError('io', `already exists: ${to}`)
+    } catch (error) {
+      if (!isMissing(error)) throw error
+    }
+    await mkdir(dirname(target), { recursive: true })
+    this.checkEffect()
+    await rename(await this.contained(from), await this.contained(to))
+  }
+
+  async removeDirectory(path: string): Promise<void> {
+    this.checkEffect()
+    try {
+      await rmdir(await this.contained(path))
+    } catch (error) {
+      if (!isMissing(error)) throw error
+    }
   }
 
   /**
@@ -155,7 +249,8 @@ export class NodeFileSystem implements FileSystem {
         if (!opened.isFile() || opened.dev !== named.dev || opened.ino !== named.ino) {
           throw new EngineError('conflict', `${path} changed under the read; nothing was read`)
         }
-        return await handle.readFile()
+        const bytes = await handle.readFile()
+        return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
       } finally {
         await handle.close()
       }
@@ -163,6 +258,84 @@ export class NodeFileSystem implements FileSystem {
       if (cause instanceof EngineError) throw cause
       throw new EngineError('io', `cannot read ${path}`, cause)
     }
+  }
+
+  async openRead(path: string, expected?: SourceStamp): Promise<ChunkSource> {
+    const target = await this.contained(path)
+    const handle = await open(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+    try {
+      const initial = await handle.stat()
+      if (!initial.isFile()) throw new EngineError('io', `not a file: ${path}`)
+      const stamp: SourceStamp = {
+        size: initial.size,
+        mtime: Math.max(0, Math.round(initial.mtimeMs)),
+        generation: `${initial.dev}:${initial.ino}:${initial.mtimeMs}:${initial.ctimeMs}`,
+      }
+      const assertUnchanged = async () => {
+        await this.contained(path)
+        const current = await lstat(target)
+        const generation = `${current.dev}:${current.ino}:${current.mtimeMs}:${current.ctimeMs}`
+        if (
+          generation !== stamp.generation ||
+          current.size !== stamp.size ||
+          (expected !== undefined &&
+            (expected.generation !== stamp.generation ||
+              expected.size !== stamp.size ||
+              expected.mtime !== stamp.mtime))
+        )
+          throw new EngineError('conflict', `${path} changed under the read`)
+      }
+      await assertUnchanged()
+      return {
+        size: stamp.size,
+        stamp,
+        read: async (offset, length, signal) => {
+          signal?.throwIfAborted()
+          if (
+            !Number.isSafeInteger(offset) ||
+            offset < 0 ||
+            !Number.isSafeInteger(length) ||
+            length < 1 ||
+            length > MAX_CHUNK_BYTES ||
+            offset + length > stamp.size
+          )
+            throw new EngineError('io', 'invalid bounded read')
+          await assertUnchanged()
+          const bytes = new Uint8Array(length)
+          let filled = 0
+          while (filled < length) {
+            signal?.throwIfAborted()
+            const result = await handle.read(bytes, filled, length - filled, offset + filled)
+            if (result.bytesRead === 0) throw new EngineError('io', 'truncated bounded read')
+            filled += result.bytesRead
+          }
+          await assertUnchanged()
+          return bytes
+        },
+        assertUnchanged,
+        close: () => handle.close(),
+      }
+    } catch (error) {
+      await handle.close()
+      throw error
+    }
+  }
+
+  async fingerprint(path: string, signal?: AbortSignal): Promise<ContentIdentity & SourceStamp> {
+    const source = await this.openRead(path)
+    const stamp = source.stamp!
+    return { ...(await fingerprintSource(source, MAX_CHUNK_BYTES, signal)), ...stamp }
+  }
+
+  beginAtomicWrite(
+    path: string,
+    mtime: number,
+    expectedBase: ContentIdentity | null
+  ): Promise<AtomicStage> {
+    return this.stages.begin(path, mtime, expectedBase)
+  }
+  reopenStage(id: string): Promise<AtomicStage> {
+    return this.stages.reopen(id)
   }
 
   async writeAtomic(path: string, bytes: Uint8Array, mtime: number): Promise<void> {
@@ -287,6 +460,7 @@ export class NodeFileSystem implements FileSystem {
    * enough), and the first refusal ends the climb. Never the vault itself, never the state folder.
    */
   private async pruneAbove(path: string): Promise<void> {
+    if (this.preserveEmptyDirectories) return
     const segments = path.split('/').slice(0, -1)
     const scopedStaging = path.startsWith(`${STATE_DIR}/scoped-outbox/`)
     while (segments.length > 0) {

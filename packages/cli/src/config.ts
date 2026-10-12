@@ -21,11 +21,13 @@ import {
 import type { JoinPrefer } from '@abele/sync-protocol'
 import { STATE_DIR } from './nodeFs.js'
 
-/** Everything the daemon needs to reach a vault, including the secret it signs in with. */
+/** One local token connection. Historical file-engine identity field names are
+ * local bookkeeping only; none selects account/device authority or a v1 route. */
 export interface DaemonConfig {
   serverUrl: string
   vaultId: string
   deviceId: string
+  /** Encoded v2 token, not a login/device credential, despite the retained local field name. */
   deviceToken: string
   deviceName: string
   selective: SelectiveSettings
@@ -66,19 +68,7 @@ export function ensureStateFolder(dir: string): string {
  * `null`: a daemon that treated a damaged config as "not set up" would ask for a fresh login and
  * write over the token that is still in the file.
  */
-export function assertNoAgentConnection(dir: string): void {
-  if (
-    ['agent.json', 'agent.sqlite', 'agent.sqlite-wal', 'agent.sqlite-shm'].some((name) =>
-      existsSync(join(stateFolder(dir), name))
-    )
-  )
-    throw new EngineError(
-      'conflict',
-      'this vault has an agent connection; use the agent commands, never personal fallback'
-    )
-}
 export function readConfig(dir: string): DaemonConfig | null {
-  assertNoAgentConnection(dir)
   const file = join(stateFolder(dir), CONFIG_FILE)
   let text: string
   try {
@@ -198,9 +188,9 @@ export function personalBinding(cfg: DaemonConfig, generation = 1): ConnectionBi
   return ConnectionBindingSchema.parse({
     endpoint: cfg.serverUrl,
     vaultId: cfg.vaultId,
-    mode: 'personal',
+    mode: 'token',
     principalId: cfg.deviceId,
-    principalType: 'device',
+    principalType: 'token',
     grantId: null,
     generation,
     credentialAssociation: createHash('sha256').update(cfg.deviceToken).digest('hex'),

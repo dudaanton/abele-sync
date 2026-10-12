@@ -1,12 +1,13 @@
 import {
   AbeleError,
   normalisePath,
+  nextFreeName,
   validatePath,
   type Actor,
   type CommitOp,
   type CommitOpResult,
   type CommitResponse,
-  type Principal,
+  type V2CommitOp,
 } from '@abele/sync-protocol'
 import type { Kysely, Transaction } from 'kysely'
 import type { BlobStore } from '../blobs/store.js'
@@ -15,14 +16,15 @@ import { writeJson } from '../db/json.js'
 import type { Database } from '../db/schema.js'
 import type { EventHub } from '../events/hub.js'
 import { newId } from '../ids.js'
-import { getVaultSettings } from '../vault/vaults.js'
+import { getVaultSettings } from '../access/spaceSettings.js'
 import { headSeqOf } from './changes.js'
 import { corrupt, mustExist, type ContentOp, type Ctx, type LoadedHead } from './commitCtx.js'
-import { checkLimits, loadHead, pathTakenFor, requireBlobs } from './commitHead.js'
+import { checkLimits, loadHead, pathTakenFor, requireBlobs, takenPredicate } from './commitHead.js'
 import { applied, applyOp, headWins, keepBothSides, keepLoser, mergeOp } from './commitWrite.js'
 import { fileAnswer, replayIfAnswered, type KeyedRun } from './keyed.js'
 import { withVaultLock } from './lock.js'
 import { decide, type Decision } from './resolve.js'
+import { replayCreateDivergence, replayDivergence } from './conflictDedup.js'
 
 export interface CommitDeps {
   db: Kysely<Database>
@@ -30,13 +32,17 @@ export interface CommitDeps {
   store: BlobStore
   hub: EventHub
   now?: () => Date
-  writer?: Principal
   config?: { configurationDirectories?: readonly string[] }
   /**
    * The idempotency key the request came under, if any: looked up and answered inside the
    * commit's transaction (`keyed.ts`). A request already answered throws `Replay`.
    */
   keyed?: KeyedRun
+  /** Token access callbacks run under the same lock/transaction as engine operations. */
+  before?: (ctx: Ctx) => Promise<void>
+  authorize?: (ctx: Ctx, op: V2CommitOp) => Promise<void>
+  runDirectory?: (ctx: Ctx, op: Exclude<V2CommitOp, CommitOp>) => Promise<CommitOpResult>
+  afterOp?: (ctx: Ctx) => Promise<void>
 }
 
 /** Audit rows go in batches of this many, well under any dialect's parameter limit. */
@@ -66,7 +72,7 @@ export async function commitChosen(
   deps: CommitDeps,
   vaultId: string,
   actor: Actor,
-  choose: (trx: Transaction<Database>) => Promise<Array<CommitOp | CommitOpResult>>
+  choose: (trx: Transaction<Database>) => Promise<Array<V2CommitOp | CommitOpResult>>
 ): Promise<CommitResponse> {
   const at = deps.now?.() ?? new Date()
   const { ops, ran, results, headSeq, creationOutcomes } = await withVaultLock(
@@ -74,7 +80,6 @@ export async function commitChosen(
     deps.dialect,
     vaultId,
     async (trx) => {
-      if (deps.keyed !== undefined) await replayIfAnswered(trx, deps.keyed, at)
       const settings = await getVaultSettings({ db: trx }, vaultId)
       const ctx: Ctx = {
         trx,
@@ -83,10 +88,11 @@ export async function commitChosen(
         actor,
         settings,
         at,
-        ...(deps.writer === undefined ? {} : { writer: deps.writer }),
         configurationDirectories: deps.config?.configurationDirectories,
       }
-      const ops: CommitOp[] = []
+      await deps.before?.(ctx)
+      if (deps.keyed !== undefined) await replayIfAnswered(trx, deps.keyed, at, vaultId)
+      const ops: V2CommitOp[] = []
       const ran: CommitOpResult[] = []
       const results: CommitOpResult[] = []
       for (const item of await choose(trx)) {
@@ -94,7 +100,19 @@ export async function commitChosen(
           results.push(item)
           continue
         }
-        const result = await runOp(ctx, item)
+        let rejection: CommitOpResult | undefined
+        try {
+          await deps.authorize?.(ctx, item)
+        } catch (error) {
+          if (!(error instanceof AbeleError) || error.code === 'internal') throw error
+          rejection = { status: 'rejected', code: error.code, message: error.message }
+        }
+        const result =
+          rejection ??
+          (item.op === 'mkdir' || item.op === 'move_directory' || item.op === 'delete_directory'
+            ? await deps.runDirectory!(ctx, item)
+            : await runEngineOp(ctx, item))
+        await deps.afterOp?.(ctx)
         ops.push(item)
         ran.push(result)
         results.push(result)
@@ -147,7 +165,31 @@ interface Resolved {
 }
 
 /** One op: decided while nothing is written, then carried out. */
-async function runOp(ctx: Ctx, op: CommitOp): Promise<CommitOpResult> {
+export async function runEngineOp(ctx: Ctx, op: CommitOp): Promise<CommitOpResult> {
+  // Dedup precedes limits/decision: head advancement, a policy change or a full vault
+  // must not turn an already-delivered branch into a new write.
+  if (op.op === 'create' || op.op === 'modify') {
+    try {
+      const cleaned = cleanPaths(op) as ContentOp
+      const head = await loadHead(ctx, cleaned, false)
+      if (cleaned.op === 'create') {
+        const replay = await replayCreateDivergence(ctx, cleaned, head)
+        if (replay) return replay
+      }
+      // A new modify after deletion revives the original, even if identical branch bytes
+      // were delivered to a conflict copy earlier. This creates no new conflict identity.
+      if (head && head.baseIsKnown !== 'other-file' && !(cleaned.op === 'modify' && head.deleted)) {
+        const replay = await replayDivergence(ctx, cleaned, head, () =>
+          requireBlobs(ctx, cleaned, { kind: 'conflict-file', status: 'conflict' })
+        )
+        if (replay) return replay
+      }
+    } catch (error) {
+      if (error instanceof AbeleError && error.code !== 'internal')
+        return { status: 'rejected', code: error.code, message: error.message }
+      throw error
+    }
+  }
   const resolved = await resolveOp(ctx, op)
   if (resolved.decision.kind === 'reject') {
     return { status: 'rejected', code: resolved.decision.code, message: resolved.decision.message }
@@ -179,6 +221,26 @@ async function resolveOp(ctx: Ctx, op: CommitOp): Promise<Resolved> {
     await checkLimits(ctx, cleaned, head)
     const taken = await pathTakenFor(ctx, cleaned, head)
     const decision = decide(cleaned, head, ctx.settings, taken)
+    if (decision.kind === 'apply' && head?.deleted) {
+      // Plan revival placement before any row/sequence is written, under the same
+      // lock as authorization. Includes explicit directories and canonical ancestry.
+      decision.path = ctx.restoreDestination
+        ? await ctx.restoreDestination(decision.path)
+        : nextFreeName(decision.path, await takenPredicate(ctx, decision.path))
+      if (
+        await pathTakenFor(
+          ctx,
+          {
+            op: 'move',
+            file_id: head.fileId,
+            base_version_id: head.versionId,
+            to_path: decision.path,
+          },
+          head
+        )
+      )
+        throw new AbeleError('path_taken', 'generated restore destination is occupied')
+    }
     await requireBlobs(ctx, cleaned, decision)
     return { op: cleaned, head, decision }
   } catch (error) {
@@ -207,7 +269,7 @@ async function execute(ctx: Ctx, { op, head, decision }: Resolved): Promise<Comm
     case 'merge':
       return mergeOp(ctx, op as ContentOp, mustExist(head))
     case 'conflict-file':
-      // A copy the quota has no room for keeps the incoming text in history instead.
+      // Delivery requires a visible copy; insufficient quota is an explicit refusal.
       return keepBothSides(ctx, op as ContentOp, mustExist(head))
     case 'head-wins':
       return headWins(mustExist(head))
@@ -240,7 +302,7 @@ async function writeAudit(
   db: Kysely<Database>,
   vaultId: string,
   actor: Actor,
-  ops: CommitOp[],
+  ops: V2CommitOp[],
   results: CommitOpResult[],
   at: Date
 ): Promise<void> {
@@ -268,8 +330,8 @@ async function writeAudit(
 }
 
 /** The path an op was about: the one it named, else the one its result landed on. */
-function auditPath(op: CommitOp, result: CommitOpResult): string | null {
-  if (op.op === 'create') return op.path
-  if (op.op === 'move') return op.to_path
+function auditPath(op: V2CommitOp, result: CommitOpResult): string | null {
+  if (op.op === 'create' || op.op === 'mkdir') return op.path
+  if (op.op === 'move' || op.op === 'move_directory') return op.to_path
   return result.status === 'rejected' ? null : result.path
 }

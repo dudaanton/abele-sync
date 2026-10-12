@@ -1,9 +1,8 @@
 import type { ChangeItem } from '@abele/sync-protocol'
-import type { VaultClient } from './client.js'
+import type { EngineClient } from './engineClient.js'
 import type { ExpectedWrites } from './echo.js'
 import type { FileSystem } from './fs.js'
 import { Puller } from './pullRun.js'
-import type { PersonalNoteHook } from './personalNoteEvents.js'
 import type { ScanFilter } from './scanner.js'
 import type { Staged } from './defer.js'
 import type { StateStore } from './state.js'
@@ -27,9 +26,9 @@ import type { StateStore } from './state.js'
  */
 
 export interface PullOptions {
+  transferBudget?: import('./streaming.js').TransferBudget
   /** Personal note deliveries keep automatic reactions enabled, including shared edits.
    * Persist this exact-version event for delayed native cache acknowledgement. */
-  onPersonalNoteApplied?: PersonalNoteHook
   /** Which files this device syncs at all; an excluded change is passed over. */
   filter: ScanFilter
   /** Wire paths with a local edit in flight: the scan's `dirty`, plus whatever the push holds. */
@@ -123,7 +122,7 @@ export interface PullReport {
  * pointing at the last page it finished rather than at the beginning.
  */
 export async function pull(
-  client: VaultClient,
+  client: EngineClient,
   fs: FileSystem,
   state: StateStore,
   opts: PullOptions
@@ -146,7 +145,7 @@ export async function pull(
  * edit stood in the way of comes back in `held`; everything else was applied or needed nothing.
  */
 export async function applyStaged(
-  client: VaultClient,
+  client: EngineClient,
   fs: FileSystem,
   state: StateStore,
   changes: ChangeItem[],

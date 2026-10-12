@@ -3,10 +3,12 @@ import { ExpectedWrites } from './echo.js'
 import { ExternalStateError } from './external/state.js'
 import { sha256 } from './hash.js'
 import type { FileSystem } from './fs.js'
+import type { EngineClient } from './engineClient.js'
 import { PullPlacer } from './pullPlace.js'
 import type { StateEntry, StateStore } from './state.js'
 
 interface Intent {
+  stageId?: string
   owner?: string
   fileId: string
   versionId: string
@@ -22,6 +24,13 @@ interface Intent {
 export function decodePullIntent(raw: string, fileId: string): Intent {
   try {
     const value = JSON.parse(raw) as Intent
+    if (
+      value?.stageId !== undefined &&
+      (typeof value.stageId !== 'string' ||
+        value.stageId.length === 0 ||
+        value.stageId.length > 128)
+    )
+      throw new Error('invalid stage id')
     if (
       value?.owner !== undefined &&
       (typeof value.owner !== 'string' || !value.owner || value.owner.length > 128)
@@ -69,17 +78,20 @@ export function decodePullIntent(raw: string, fileId: string): Intent {
     throw new ExternalStateError('recovery-required', { cause })
   }
 }
-/** Metadata-only recovery of already-recorded normal pull writes. Never installs,
+/** Legacy intents use metadata-only recovery. Stage intents resume their authorized
+ * immutable version before ordinary scanning, using the supplied streaming client.
+ * Legacy recovery never installs,
  * overwrites, renames or removes a file. The established PullPlacer provenance check
  * requires this exact intent AND its still-current pre-write ledger base.
  */
 export async function recoverPendingPullWrites(
   fs: FileSystem,
   state: StateStore,
-  fileIds: readonly string[]
+  fileIds: readonly string[],
+  client?: Pick<EngineClient, 'getBlob' | 'openVersion'>
 ): Promise<void> {
   const placer = new PullPlacer(
-    {
+    client ?? {
       getBlob: async () => {
         throw new ExternalStateError('recovery-required')
       },
@@ -121,6 +133,10 @@ export async function recoverPendingPullWrites(
     if ((await placer.pending.matching(change, entry)) === null)
       throw new ExternalStateError('recovery-required')
     await placer.adopt(change, entry)
+    if (intent.stageId !== undefined && (await state.getMeta?.(`pull-write:${fileId}`)) != null) {
+      if (!client?.openVersion || !fs.reopenStage) throw new ExternalStateError('recovery-required')
+      await placer.place(change, intent.sha!, entry, new Map(), new Map())
+    }
     // adopt either recorded the completed installation or preserved both local bytes
     // and the earlier base, retiring only a definite not-written intent.
     if ((await state.getMeta?.(`pull-write:${fileId}`)) != null)

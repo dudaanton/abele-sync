@@ -5,7 +5,7 @@ import {
   type CommitResponse,
 } from '@abele/sync-protocol'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { EngineError, SyncClient, encodeText, sha256, type VaultClient } from '../../src/index.js'
+import { EngineError, SyncClient, encodeText, sha256, type VaultClient } from '../legacy/index.js'
 import { BASE_URL, serverHarness, TEST_PASSWORD, type Harness } from '../helpers/harness.js'
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))

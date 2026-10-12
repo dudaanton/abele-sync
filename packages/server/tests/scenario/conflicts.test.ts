@@ -61,17 +61,18 @@ describe('conflicts: spec §6, one row at a time', () => {
     expect(laptop.text('Note.md')).toBe('ONE\ntwo\nthree\nfour\nFIVE\n')
   })
 
-  it('note, overlapping edits, merge mode: both lines survive, head first', async () => {
+  it('note, overlapping edits, merge mode: original and complete conflict copy converge', async () => {
     const { laptop, phone } = await pair('merge', { 'Note.md': base })
     laptop.write('Note.md', 'one\nTWO by laptop\nthree\nfour\nfive\n')
     phone.write('Note.md', 'one\nTWO by phone\nthree\nfour\nfive\n')
     await laptop.sync()
-    expect((await phone.sync())?.results[0]).toMatchObject({ status: 'merged' })
+    expect((await phone.sync())?.results[0]).toMatchObject({ status: 'conflict' })
     await converge(laptop, phone)
-    const text = laptop.text('Note.md') ?? ''
-    expect(text).toBe('one\nTWO by laptop\nTWO by phone\nthree\nfour\nfive\n')
-    expect(text.indexOf('by laptop')).toBeLessThan(text.indexOf('by phone'))
-    expect(paths(laptop)).toEqual(['Note.md'])
+    for (const d of [laptop, phone]) {
+      expect(d.text('Note.md')).toBe('one\nTWO by laptop\nthree\nfour\nfive\n')
+      expect(d.text(conflictCopy(d, 'Note') ?? '')).toBe('one\nTWO by phone\nthree\nfour\nfive\n')
+      expect(paths(d)).toHaveLength(2)
+    }
   })
 
   it('note, overlapping edits, conflict-file mode: the original keeps the first committer, the copy holds the second', async () => {
@@ -135,15 +136,18 @@ describe('conflicts: spec §6, one row at a time', () => {
   })
 
   describe('create vs create at one path', () => {
-    it('note in merge mode: both texts, head first', async () => {
+    it('note in merge mode: competing creates stay in two complete files', async () => {
       const { laptop, phone } = await pair('merge')
       laptop.write('New.md', 'from laptop\n')
       phone.write('New.md', 'from phone\n')
       await laptop.sync()
-      expect((await phone.sync())?.results[0]).toMatchObject({ status: 'merged', path: 'New.md' })
+      expect((await phone.sync())?.results[0]).toMatchObject({ status: 'conflict', path: 'New.md' })
       await converge(laptop, phone)
-      expect(laptop.text('New.md')).toBe('from laptop\nfrom phone\n')
-      expect(paths(laptop)).toEqual(['New.md'])
+      for (const d of [laptop, phone]) {
+        expect(d.text('New.md')).toBe('from laptop\n')
+        expect(d.text(conflictCopy(d, 'New') ?? '')).toBe('from phone\n')
+        expect(paths(d)).toHaveLength(2)
+      }
     })
 
     it('note in conflict-file mode: the second becomes a conflicted copy', async () => {
@@ -231,19 +235,20 @@ describe('conflicts: spec §6, one row at a time', () => {
     }
   })
 
-  it('move onto a path vs a new file there, merge mode: the texts merge, the id is the moved file’s', async () => {
+  it('move onto a path vs a new file there, merge mode: the moved identity stays and the create becomes a copy', async () => {
     const { laptop, phone } = await pair('merge', { 'A.md': 'from A\n' })
     const movedId = laptop.state.get('A.md')?.fileId
     laptop.mv('A.md', 'B.md')
     await laptop.sync()
     phone.write('B.md', 'a new B on the phone\n')
     expect((await phone.sync())?.results).toEqual([
-      expect.objectContaining({ status: 'merged', file_id: movedId, path: 'B.md' }),
+      expect.objectContaining({ status: 'conflict', file_id: movedId, path: 'B.md' }),
     ])
     await converge(laptop, phone)
     for (const d of [laptop, phone]) {
-      expect(paths(d)).toEqual(['B.md'])
-      expect(d.text('B.md')).toBe('from A\na new B on the phone\n')
+      expect(paths(d)).toHaveLength(2)
+      expect(d.text('B.md')).toBe('from A\n')
+      expect(d.text(conflictCopy(d, 'B') ?? '')).toBe('a new B on the phone\n')
       expect(d.state.get('B.md')?.fileId).toBe(movedId)
     }
   })

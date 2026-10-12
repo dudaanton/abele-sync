@@ -1,14 +1,13 @@
-import { caseKey, nextFreeName, type CommitOpResult } from '@abele/sync-protocol'
+import { AbeleError, caseKey, type CommitOpResult } from '@abele/sync-protocol'
 import { sql } from 'kysely'
 import { forgetUpload } from '../blobs/pending.js'
 import { addRef } from '../blobs/refs.js'
 import { writeJson } from '../db/json.js'
 import { bumpUsage } from '../history/usage.js'
 import { retentionClass } from '../history/retentionClass.js'
-import { recordVersionSecurity } from '../scoped/versionSecurity.js'
-import { recordFolderVersion } from '../scoped/admissions.js'
 import { newId } from '../ids.js'
 import { conflictCopyName, frontmatterIsValid, mergeText } from '../merge/index.js'
+import { MAX_TEXT_MERGE_BYTES } from './resolve.js'
 import {
   corrupt,
   mergeBase,
@@ -18,9 +17,10 @@ import {
   type LoadedHead,
   type NewVersion,
 } from './commitCtx.js'
-import { liveBytes, storedBlob, takenPredicate } from './commitHead.js'
+import { liveBytes, pathTakenFor, storedBlob } from './commitHead.js'
 import { fileKind } from './kinds.js'
 import type { Decision } from './resolve.js'
+import { conflictResult, recordDivergence, replayDivergence } from './conflictDedup.js'
 
 /**
  * A decision carried out (see `commit.ts`): the versions it writes, the file row pointed at the
@@ -36,12 +36,8 @@ export async function applyOp(
   decision: Extract<Decision, { kind: 'apply' }>,
   inputSourceVersionId?: string
 ): Promise<CommitOpResult> {
-  // A file coming back from the trash takes the next free name if its own is gone.
-  const path = head?.deleted
-    ? ctx.restoreDestination
-      ? await ctx.restoreDestination(decision.path)
-      : nextFreeName(decision.path, await takenPredicate(ctx, decision.path))
-    : decision.path
+  // Revival placement was checked before any writes in resolveOp.
+  const path = decision.path
   const fileId = head?.fileId ?? newId()
   const { versionId, seq } = await writeVersion(ctx, head, {
     fileId,
@@ -86,20 +82,40 @@ export async function applyOp(
  * version holds and the copy does not.
  */
 export async function mergeOp(ctx: Ctx, op: ContentOp, head: LoadedHead): Promise<CommitOpResult> {
+  if (op.sha === head.sha) return applied(head)
   if (op.op === 'modify' && (head.baseIsKnown !== 'yes' || head.baseSha === null))
     return keepBothSides(ctx, op, head)
   const baseSha = op.op === 'modify' ? head.baseSha : null
+  for (const [sha, what] of [
+    [baseSha, 'base'],
+    [head.sha, 'head'],
+    [op.sha, 'incoming'],
+  ] as const) {
+    if (sha === null) continue
+    let size: number
+    try {
+      size = await ctx.store.size(sha)
+    } catch (error) {
+      if (what !== 'incoming' && error instanceof AbeleError && error.code === 'not_found')
+        throw corrupt(`the ${what} blob ${sha} is not in the store`)
+      throw error
+    }
+    if (size > MAX_TEXT_MERGE_BYTES) return keepBothSides(ctx, op, head)
+  }
   const base = baseSha === null ? '' : (await storedBlob(ctx, baseSha, 'base')).toString('utf8')
   const current = (await storedBlob(ctx, requireSha(head), 'head')).toString('utf8')
   const incoming = await ctx.store.get(op.sha)
   const merged = mergeText(base, current, incoming.toString('utf8'))
-  if (merged.conflictCopy || !frontmatterIsValid(merged.text)) return keepBothSides(ctx, op, head)
+  if (!merged.clean || merged.conflictCopy || !frontmatterIsValid(merged.text))
+    return keepBothSides(ctx, op, head)
 
   const bytes = Buffer.from(merged.text, 'utf8')
   // The limits were checked against what was sent; a merge is bytes nobody sent.
   if (await overLimits(ctx, head, bytes.length)) return keepBothSides(ctx, op, head)
   const { sha, size } = await ctx.store.put(bytes)
-  const mtime = ctx.at.getTime()
+  // Content time comes only from the edits, never receipt/publication time.
+  // Use the actual head, not the auxiliary incoming version written below.
+  const mtime = Math.max(head.mtime, op.mtime)
   const before = bytes.equals(incoming) ? head : await keepIncoming(ctx, op, head)
   const { versionId, seq } = await writeVersion(ctx, before, {
     fileId: head.fileId,
@@ -146,20 +162,21 @@ async function overLimits(ctx: Ctx, head: LoadedHead, size: number): Promise<boo
  * breaks the frontmatter, or the vault copies conflicts aside: neither side is lost and
  * nothing over a limit is written. The head stays where it is, and the incoming text
  * goes into a conflict copy beside it — a file
- * the user sees — provided the copy fits the quota: it is within the file limit, since the
- * incoming bytes passed it. When it does not fit (and a merge over the quota usually means a
- * copy is over it too, a copy being all of the incoming text beside all of the head), the
- * incoming text is kept as a version in the file's history, under the head, as a losing binary
- * is (`keepLoser`): nothing new is live, and *Version history* brings it back.
+ * the user sees — provided the copy fits the quota. Otherwise refuse explicitly, before
+ * consuming the upload or writing history: history alone is not successful Markdown delivery.
  */
 export async function keepBothSides(
   ctx: Ctx,
   op: ContentOp,
   head: LoadedHead
 ): Promise<CommitOpResult> {
+  const replay = await replayDivergence(ctx, op, head)
+  if (replay) return replay
   const { quota_bytes } = ctx.settings
   const copyFits = quota_bytes === null || (await liveBytes(ctx)) + op.size <= quota_bytes
-  return copyFits ? conflictCopyOp(ctx, op, head) : keepLoser(ctx, op, head)
+  if (!copyFits)
+    return { status: 'rejected', code: 'quota_exceeded', message: 'no room for a conflict copy' }
+  return conflictCopyOp(ctx, op, head)
 }
 
 /**
@@ -170,11 +187,37 @@ export async function keepBothSides(
  * head can put it at the path without waiting for the feed.
  */
 async function conflictCopyOp(ctx: Ctx, op: ContentOp, head: LoadedHead): Promise<CommitOpResult> {
-  const wanted = conflictCopyName(head.path, ctx.actor.name, ctx.at)
-  const path = ctx.conflictDestination
-    ? await ctx.conflictDestination(wanted)
-    : nextFreeName(wanted, await takenPredicate(ctx, wanted))
-  if (path === null) return keepLoser(ctx, op, head)
+  // Bounded opaque candidates do not disclose how many hidden files occupy a name.
+  let path: string | null = null
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const wanted = conflictCopyName(
+      head.path,
+      ctx.actor.name,
+      ctx.at,
+      attempt === 0 ? '' : newId().replace(/-/g, '').slice(0, 12)
+    )
+    if (ctx.conflictDestination) path = await ctx.conflictDestination(wanted)
+    else {
+      try {
+        const occupied = await pathTakenFor(
+          ctx,
+          { op: 'move', file_id: '', base_version_id: '', to_path: wanted },
+          { fileId: '', path: wanted } as LoadedHead
+        )
+        path = occupied ? null : wanted
+      } catch (error) {
+        if (!(error instanceof AbeleError && error.code === 'path_taken')) throw error
+        path = null
+      }
+    }
+    if (path !== null) break
+  }
+  if (path === null)
+    return {
+      status: 'rejected',
+      code: 'not_found',
+      message: 'authorized conflict placement unavailable',
+    }
   const fileId = newId()
   const { versionId } = await writeVersion(ctx, null, {
     fileId,
@@ -190,19 +233,8 @@ async function conflictCopyOp(ctx: Ctx, op: ContentOp, head: LoadedHead): Promis
     merge: null,
   })
   await pointFile(ctx, null, fileId, versionId, path, false)
-  return {
-    status: 'conflict',
-    file_id: head.fileId,
-    version_id: head.versionId,
-    seq: head.seq,
-    path: head.path,
-    sha: requireSha(head),
-    size: head.size,
-    mtime: head.mtime,
-    conflict_path: path,
-    conflict_file_id: fileId,
-    conflict_version_id: versionId,
-  }
+  await recordDivergence(ctx, op, head, { fileId, versionId, path })
+  return conflictResult(head, fileId, versionId, path)
 }
 
 /**
@@ -357,12 +389,11 @@ async function writeVersion(
       retention_class: retentionClass(fileKind(v.path, ctx.settings)),
     })
     .execute()
-  await recordVersionSecurity(ctx, head, v, versionId)
   await ctx.authorizeOutput?.(v, versionId)
-  await recordFolderVersion(ctx, v, versionId)
   if (v.sha !== null) {
     await addRef(ctx.trx, ctx.store, v.sha, v.size, at)
-    if (!ctx.scopedWriter) await forgetUpload(ctx.trx, ctx.vaultId, v.sha)
+    if (ctx.consumeUpload) await ctx.consumeUpload(v.sha)
+    else await forgetUpload(ctx.trx, ctx.vaultId, v.sha)
   }
 
   const wasLive = head !== null && !head.deleted
@@ -401,4 +432,11 @@ async function pointFile(
     return
   }
   await ctx.trx.updateTable('files').set(columns).where('id', '=', fileId).execute()
+  if (deleted)
+    await ctx.trx
+      .updateTable('conflict_divergences')
+      .set({ disposition: 'deleted' })
+      .where('vault_id', '=', ctx.vaultId)
+      .where('conflict_file_id', '=', fileId)
+      .execute()
 }

@@ -2,17 +2,17 @@ import { sql } from 'kysely'
 import type { Dialect } from '../../src/db/connect.js'
 import { Migrator } from 'kysely/migration'
 import { describe, expect, it } from 'vitest'
-import * as init from '../../src/db/migrations/001_init.js'
-import * as versionsVaultSha from '../../src/db/migrations/002_versions_vault_sha.js'
-import * as wideNumbers from '../../src/db/migrations/003_wide_numbers.js'
-import * as devicesEnrolledBy from '../../src/db/migrations/004_devices_enrolled_by.js'
-import * as blobUploads from '../../src/db/migrations/005_blob_uploads.js'
-import * as uploadOwners from '../../src/db/migrations/006_upload_owners.js'
-import { runMigrations as migrate } from '../../src/db/migrate.js'
+import * as init from '../legacy/src/db/migrations/001_init.js'
+import * as versionsVaultSha from '../legacy/src/db/migrations/002_versions_vault_sha.js'
+import * as wideNumbers from '../legacy/src/db/migrations/003_wide_numbers.js'
+import * as devicesEnrolledBy from '../legacy/src/db/migrations/004_devices_enrolled_by.js'
+import * as blobUploads from '../legacy/src/db/migrations/005_blob_uploads.js'
+import * as uploadOwners from '../legacy/src/db/migrations/006_upload_owners.js'
+import { runRetainedEngineMigrations as migrate } from '../helpers/retainedEngineMigrations.js'
 // This regression owns the 006↔007 boundary, independently of later scoped releases.
 const runMigrations: typeof migrate = (db, schema) =>
   migrate(db, schema, '007_version_retention_class')
-import { up, down } from '../../src/db/migrations/007_version_retention_class.js'
+import { up, down } from '../legacy/src/db/migrations/007_version_retention_class.js'
 import { hasPgTestDb, tempDb } from '../helpers/tempDb.js'
 
 /** The deployed schema, independent of whichever migration production adds next. */

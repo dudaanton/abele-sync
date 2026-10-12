@@ -1,4 +1,5 @@
 import type { CommitOp, ErrorCode, FileKind, VaultSettings, VersionOp } from '@abele/sync-protocol'
+export const MAX_TEXT_MERGE_BYTES = 1024 * 1024
 
 /**
  * What the server knows about the file an op names, live or deleted, plus how the
@@ -168,6 +169,8 @@ function decideModify(
   if (head.versionId === op.base_version_id) return apply('modify', head.path, op)
   // Row 7: modification wins over deletion; the file comes back with the new content.
   if (head.deleted) return apply('modify', head.path, op)
+  // Equal Markdown bytes are not a divergence and need no base-content merge.
+  if (head.kind === 'note' && head.sha === op.sha) return { kind: 'noop', status: 'applied' }
   // Row 23: without the actual base content, a note cannot be safely merged. Keep the
   // head and copy the incoming bytes aside, regardless of conflict mode or old merge metadata.
   // A known delete version has no content either; only creates have a genuine empty base.
@@ -202,6 +205,9 @@ function decideMove(
   if (head.baseIsKnown === 'other-file') return otherFilesBase()
   if (head.deleted) return reject('not_found', `file ${op.file_id} has been deleted`)
   if (pathTaken) return reject('path_taken', `another file is at ${op.to_path}`)
+  // The same rename arriving via another connection is already delivered. A
+  // directory move must not make its redundant descendant rename look divergent.
+  if (head.path === op.to_path) return { kind: 'noop', status: 'applied' }
   const content = { sha: head.sha, size: head.size, mtime: head.mtime }
   if (head.versionId === op.base_version_id) return apply('move', op.to_path, content)
   // Row 17: only the content changed since the base; the move carries the head's blob.
@@ -241,6 +247,12 @@ function contentRace(op: ContentOp, head: HeadState, settings: VaultSettings): D
     // Merged in from this very base already: the head holds all of it that it ever will.
     // An old version's bytes alone are no such thing — sent from a base, they may be a revert.
     if (head.incoming === 'merged') return { kind: 'head-wins', status: 'merged' }
+    if (
+      op.size > MAX_TEXT_MERGE_BYTES ||
+      head.size > MAX_TEXT_MERGE_BYTES ||
+      (head.baseSize ?? 0) > MAX_TEXT_MERGE_BYTES
+    )
+      return { kind: 'conflict-file', status: 'conflict' }
     return settings.conflict === 'merge'
       ? { kind: 'merge', path: head.path, status: 'merged' }
       : { kind: 'conflict-file', status: 'conflict' }

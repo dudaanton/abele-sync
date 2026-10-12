@@ -9,12 +9,14 @@ import { openVault, recoverVault, buildEngine } from '../../src/vault.js'
 import { NodeFileSystem } from '../../src/nodeFs.js'
 import type { CommandContext } from '../../src/context.js'
 
+import { tokenFor } from '../helpers/token.js'
+
 let dir: string
 const cfg = {
   serverUrl: 'https://synthetic.example.test',
   vaultId: 'vault',
   deviceId: 'device',
-  deviceToken: 'absd_synthetic',
+  deviceToken: tokenFor('https://synthetic.example.test'),
   deviceName: 'test',
   selective: selectiveDefaults(),
 }
@@ -54,7 +56,7 @@ describe('owned CLI effects after long awaits', () => {
     const lock = await acquireLock(dir)
     const fetch = vi.fn(async () => {
       await Promise.resolve()
-      writeConfig(dir, { ...cfg, deviceToken: 'absd_replacement' })
+      writeConfig(dir, { ...cfg, deviceToken: tokenFor(cfg.serverUrl, 'b'.repeat(43)) })
       return new Response(
         JSON.stringify({ upload_id: 'upload', part_size: 8 * 1024 * 1024, parts: 2, received: [] })
       )
@@ -66,7 +68,7 @@ describe('owned CLI effects after long awaits', () => {
         vault.client.putBlob('a'.repeat(64), new Uint8Array(8 * 1024 * 1024 + 1))
       ).rejects.toMatchObject({ code: 'lost' })
       expect(fetch).toHaveBeenCalledTimes(1)
-      expect(readConfig(dir)!.deviceToken).toBe('absd_replacement')
+      expect(readConfig(dir)!.deviceToken).toBe(tokenFor(cfg.serverUrl, 'b'.repeat(43)))
     } finally {
       vault.close()
       lock()

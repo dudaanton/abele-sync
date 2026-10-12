@@ -71,21 +71,21 @@ export async function runStatus(opts: StatusOptions, ctx: CommandContext): Promi
     // this device's — or a file over it would read as pending here and as nothing there.
     const cap = state.settings.max_file_bytes
     const filter: ScanFilter = {
-      excluded: (path, size) => size > cap || vault.filter.excluded(path, size),
+      excluded: (path, size) =>
+        !vault.client.includes(path) || size > cap || vault.filter.excluded(path, size),
     }
     const found = await scan(vault.fs, vault.state, filter)
     // What the guard holds is waiting for a person, not for the next sync.
     const held = await readHeldDeletes(vault.state)
     const holding = new Set(held.map((one) => one.fileId))
     const pending = found.ops.filter((op) => op.op !== 'delete' || !holding.has(op.file_id))
-    const usage = await vault.client.usage()
     const tail = readLogTail(dir)
 
     const say = (label: string, value: string): void => {
       ctx.io.out(`${label.padEnd(10)} ${value}`)
     }
-    say('vault', `${vault.cfg.vaultId} at ${vault.cfg.serverUrl}`)
-    say('device', `${vault.cfg.deviceName} (${vault.cfg.deviceId})`)
+    say('space', `${vault.cfg.vaultId} at ${vault.cfg.serverUrl}`)
+    say('token', vault.cfg.deviceId)
     say('cursor', String(cursor))
     say('head_seq', String(state.head_seq))
     // A daemon's push in flight is counted down by the daemon: the state learns a file is
@@ -102,11 +102,9 @@ export async function runStatus(opts: StatusOptions, ctx: CommandContext): Promi
     say('last error', tail.lastError ?? 'none')
     for (const line of tail.refused) say('refused', line)
     for (const collision of found.collisions) say('held', collisionLine(collision))
-    say(
-      'usage',
-      `live ${humanBytes(usage.live_bytes)}, history ${humanBytes(usage.history_bytes)}, ` +
-        `trash ${humanBytes(usage.trash_bytes)}`
-    )
+    const connection = await vault.client.connection()
+    say('scope', `${connection.scope.kind} ${connection.scope.path}`)
+    say('limit', humanBytes(connection.limits.max_file_bytes))
     return EXIT_OK
   } finally {
     vault.close()

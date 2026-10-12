@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import SqliteDatabase from 'better-sqlite3'
-import { decodeExternalDocument, SyncClient, type ConnectionBinding } from '@abele/sync-core'
+import { decodeExternalDocument, V2EngineClient, type ConnectionBinding } from '@abele/sync-core'
 import { personalBinding, readConfigDescriptor, stateFolder, type DaemonConfig } from './config.js'
 import { assertLocalSafety, guardedFetch } from './externalSafety.js'
 import { assertPreparedInventory, materializeForDisconnect } from './externalMaterialization.js'
@@ -66,14 +66,12 @@ export async function preparePersonalRetirement(
       throw new Error('connection changed during retirement preparation')
   }
   const clientFor = (effectGuard: () => void) =>
-    new SyncClient({
-      baseUrl: cfg.serverUrl,
-      token: cfg.deviceToken,
+    new V2EngineClient(cfg.deviceToken, {
       fetch: guardedFetch(ctx.fetch, () => {
         check()
         effectGuard()
       }),
-    }).forVault(cfg.vaultId)
+    })
   let scripts: string | undefined
   await materializeForDisconnect(
     dir,

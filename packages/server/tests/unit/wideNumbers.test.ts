@@ -9,7 +9,7 @@ import {
   SqliteIntrospector,
   SqliteQueryCompiler,
 } from 'kysely'
-import { down, up, WIDE_COLUMNS } from '../../src/db/migrations/003_wide_numbers.js'
+import { down, up, WIDE_COLUMNS } from '../legacy/src/db/migrations/003_wide_numbers.js'
 
 /** A Kysely that runs nothing and remembers every statement it was handed. */
 function recording(dialect: 'pg' | 'sqlite'): { db: Kysely<unknown>; statements: string[] } {

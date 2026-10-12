@@ -1,12 +1,13 @@
 import { caseKey, normalisePath, type ChangeItem } from '@abele/sync-protocol'
 import { bytesFor, settledStat, writeExpected } from './apply.js'
-import type { VaultClient } from './client.js'
+import type { EngineClient } from './engineClient.js'
 import { EngineError } from './errors.js'
 import type { FileInfo, FileSystem } from './fs.js'
+import { fingerprintFile } from './fs.js'
+import { downloadToStage, TransferBudget } from './streaming.js'
 import type { PullOptions } from './puller.js'
 import { PendingPullWrites } from './pullWrite.js'
 import type { StateEntry, StateStore } from './state.js'
-import { personalNoteDelivery } from './personalNoteEvents.js'
 
 /**
  * A change put onto this disk: its file carried to where the change says, its bytes written or
@@ -25,27 +26,23 @@ const sameStat = (a: FileInfo | null, b: FileInfo | null): boolean =>
 
 /** The disk half of one pull: the adapters and the options it runs over. */
 export class PullPlacer {
+  private readonly budget: TransferBudget
   /** Shas the server answered with bytes that do not hash to them; nothing of theirs is written. */
   readonly lying = new Set<string>()
   readonly pending: PendingPullWrites
 
   constructor(
-    private readonly client: Pick<VaultClient, 'getBlob'>,
+    private readonly client: Pick<EngineClient, 'getBlob' | 'openVersion'>,
     private readonly fs: FileSystem,
     private readonly state: StateStore,
     private readonly opts: Pick<
       PullOptions,
-      | 'dirty'
-      | 'expected'
-      | 'filter'
-      | 'onAside'
-      | 'log'
-      | 'preserveMissing'
-      | 'onPersonalNoteApplied'
+      'dirty' | 'expected' | 'filter' | 'onAside' | 'log' | 'preserveMissing' | 'transferBudget'
     >,
     private readonly hash: (bytes: Uint8Array) => Promise<string>
   ) {
     this.pending = new PendingPullWrites(state)
+    this.budget = opts.transferBudget ?? new TransferBudget()
   }
 
   /**
@@ -69,7 +66,7 @@ export class PullPlacer {
     // Metadata can be preserved by an editor (or rounded by a filesystem).
     // Never overwrite a target on that evidence alone.
     try {
-      return (await this.hash(await this.fs.read(entry.path))) !== entry.sha
+      return (await fingerprintFile(this.fs, entry.path, this.hash)).sha !== entry.sha
     } catch {
       return true
     }
@@ -85,6 +82,7 @@ export class PullPlacer {
     const pending = await this.pending.matching(change, entry)
     if (pending === null) return false
     const notWritten = async (): Promise<false> => {
+      if (pending.stageId !== undefined) return false
       // Once the planned result is absent or edited, the intent cannot authorize a later save.
       await this.pending.clear(change.file_id)
       return false
@@ -97,7 +95,8 @@ export class PullPlacer {
     const have = await this.fs.stat(pending.target)
     if (have === null || have.size !== change.size) return notWritten()
     try {
-      if ((await this.hash(await this.fs.read(pending.target))) !== change.sha) return notWritten()
+      if ((await fingerprintFile(this.fs, pending.target, this.hash)).sha !== change.sha)
+        return notWritten()
     } catch {
       return notWritten()
     }
@@ -117,7 +116,7 @@ export class PullPlacer {
     const before = await this.fs.stat(target)
     if (before === null) return false
     try {
-      if ((await this.hash(await this.fs.read(target))) !== change.sha) return false
+      if ((await fingerprintFile(this.fs, target, this.hash)).sha !== change.sha) return false
     } catch {
       return false
     }
@@ -188,6 +187,22 @@ export class PullPlacer {
     // must not become the new baseline merely because the download has not begun yet.
     const firstTarget = await this.fs.stat(target)
     const beforeFrom = from === null ? null : await this.fs.stat(from)
+    // A durable stage is authorized by this exact version and unchanged ledger base.
+    // Recover it before ordinary clearance: a crash may already have moved the old name.
+    const pending = await this.pending.matching(change, entry)
+    if (pending?.stageId && this.fs.reopenStage && this.client.openVersion) {
+      if (pending.target !== target || pending.from !== from) return false
+      const occupant = await this.state.get(target)
+      if (occupant && occupant.fileId !== change.file_id) return false
+      if (
+        from !== null &&
+        beforeFrom !== null &&
+        firstTarget !== null &&
+        caseKey(from) !== caseKey(target)
+      )
+        return false
+      return this.streamPlace(change, sha, entry, target, from, firstTarget, beforeFrom)
+    }
     if (entry !== null && (await this.edited(entry))) return false
     const state = await this.clear(target, from, change, sha)
     if (state === 'held') return false
@@ -215,6 +230,14 @@ export class PullPlacer {
     // leaves the file where it was, and the change is held with the reason in the log.
     const beforeTarget = state.free
     if (!state.removed && !sameStat(firstTarget, beforeTarget)) return false
+    if (
+      this.fs.beginAtomicWrite &&
+      this.fs.reopenStage &&
+      this.client.openVersion &&
+      change.size !== null
+    ) {
+      return this.streamPlace(change, sha, entry, target, from, beforeTarget, beforeFrom)
+    }
     let bytes: Uint8Array | null = null
     if (entry === null || entry.sha !== sha) {
       bytes = await this.bytesOf(sha, fetched, local)
@@ -277,6 +300,59 @@ export class PullPlacer {
     return true
   }
 
+  private async streamPlace(
+    change: ChangeItem,
+    sha: string,
+    entry: StateEntry | null,
+    target: string,
+    from: string | null,
+    beforeTarget: FileInfo | null,
+    beforeFrom: FileInfo | null
+  ): Promise<boolean> {
+    const identity = { sha, size: change.size! }
+    const pending = await this.pending.matching(change, entry)
+    const base =
+      beforeTarget !== null
+        ? await fingerprintFile(this.fs, target, this.hash)
+        : from !== null && beforeFrom !== null
+          ? await fingerprintFile(this.fs, from, this.hash)
+          : null
+    const stage =
+      pending?.stageId !== undefined
+        ? await this.fs.reopenStage!(pending.stageId)
+        : await this.fs.beginAtomicWrite!(target, change.mtime ?? 0, base)
+    if (!pending?.stageId) await this.pending.prepare(change, entry, target, from, stage.id)
+    try {
+      const source = await this.client.openVersion!(change.file_id, change.version_id, identity)
+      await downloadToStage(source, stage, identity, this.budget, undefined, async () => {
+        if (
+          !sameStat(beforeTarget, await this.fs.stat(target)) ||
+          !sameStat(beforeFrom, from === null ? null : await this.fs.stat(from)) ||
+          (!pending?.stageId && entry !== null && (await this.edited(entry)))
+        )
+          throw new EngineError('conflict', 'pull target changed during transfer')
+        if (from !== null && beforeFrom !== null) await this.fs.move(from, target)
+        this.opts.expected.expect(target, sha)
+      })
+      await this.remember(
+        change,
+        sha,
+        target,
+        { size: identity.size, mtime: change.mtime ?? 0 },
+        from
+      )
+      await stage.discard()
+      return true
+    } catch (error) {
+      this.opts.expected.clear(target)
+      if (!this.inTheWay(error)) throw error
+      await this.pending.clear(change.file_id)
+      await stage.discard()
+      this.opts.log?.(`pull: holding ${target}: ${(error as Error).message}`)
+      return false
+    }
+  }
+
   /**
    * Make the target ready to receive the file, or say why it cannot be.
    *
@@ -320,7 +396,9 @@ export class PullPlacer {
     // over: held, the change would stand in the cursor's way for good.
     if (this.opts.filter.excluded(change.path, there.size)) return 'aside'
     try {
-      return (await this.hash(await this.fs.read(target))) === sha ? { have: there } : 'held'
+      return (await fingerprintFile(this.fs, target, this.hash)).sha === sha
+        ? { have: there }
+        : 'held'
     } catch {
       // It was there a moment ago and cannot be read now: leave it to the next pull.
       return 'held'
@@ -342,13 +420,6 @@ export class PullPlacer {
     from: string | null = null
   ): Promise<void> {
     const have = await settledStat(this.fs, target, sha, wrote, this.hash)
-    const event =
-      this.opts.onPersonalNoteApplied && change.kind === 'note'
-        ? personalNoteDelivery(change)
-        : null
-    const exact = event ? await this.client.getBlob(sha) : null
-    if (event && (!exact || exact.length !== event.size || (await this.hash(exact)) !== event.sha))
-      throw new EngineError('protocol', 'personal note delivery integrity mismatch')
     await this.state.transaction(async () => {
       if (from !== null) await this.state.delete(from)
       await this.state.put({
@@ -360,7 +431,6 @@ export class PullPlacer {
         size: have.size,
         mtime: have.mtime,
       })
-      if (event && exact) await this.opts.onPersonalNoteApplied!(event, exact)
       await this.pending.clear(change.file_id)
     })
   }

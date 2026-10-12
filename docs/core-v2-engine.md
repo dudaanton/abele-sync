@@ -1,0 +1,199 @@
+# Core v2 engine binding
+
+The plugin can bind a token connection to the retained production `SyncEngine`
+using `V2EngineClient` from `@abele/sync-core`. Root, folder and group connections use the
+same transport, scanner, pull/push pipeline, file journal, staging store and
+recovery guards. No v1 request is made by this adapter.
+
+## Construct one engine per connection
+
+```ts
+import { AccessClient, V2EngineClient, SyncEngine, selectiveDefaults } from '@abele/sync-core'
+
+const access = AccessClient.fromToken(encodedToken, { fetch: hostFetch })
+const connection = await access.connection()
+// Surface scope_updating/scope_unavailable as connection state, not an empty scope.
+if (connection.status !== 'active') throw new Error(connection.status)
+
+const client = new V2EngineClient(encodedToken, {
+  fetch: hostFetch,
+  WebSocket: hostWebSocket,
+})
+
+// Return true only if another active connection still covers this local identity/path.
+// Take the host's normal path-coordinator lock while deciding and applying changes.
+client.onRemoval = async (serverFileId, path) => otherConnectionsCoverThisPath(path)
+
+const engine = new SyncEngine({
+  client,
+  fs: connectionFileSystem,
+  state: connectionStateStore,
+  selective: selectiveDefaults(),
+  stillHeld: () => hostOwnsThisConnection(),
+  // Use the host's existing immutable code/settings review gate.
+  defer: (path) => hostStagesExecutableOrSettings(path),
+  onSync: (report) => updateConnectionReport(report),
+  onFail: (error, kind) => updateConnectionError(error, kind),
+})
+
+const unsubscribeStatus = engine.onStatus(updateConnectionStatus)
+engine.start()
+// Or await engine.sync() for an explicit bounded cycle.
+
+// Before replacing the engine or closing its ledger:
+await engine.stop()
+unsubscribeStatus()
+```
+
+`hostFetch`, `hostWebSocket`, filesystem, state store and host callbacks are ports,
+not globals imported by core. The adapter accepts the same HTTP options as
+`AccessClient` except `baseUrl` and raw `token`: the encoded token supplies those.
+Do not hand it a login/device token or translate a token into a legacy grant.
+
+Keep separate durable ledgers, journals and metadata for each local connection
+ID. All engines may use the same host filesystem, but the host still owns
+cross-connection path serialization. A successful fast connection must never
+acknowledge another connection's unsent bytes. The acceptance fixture exercises
+separate ledgers on one filesystem per device; it does not replace the plugin's
+path coordinator or claim simultaneous live-host verification.
+
+## Filesystem and state ports
+
+The existing `FileSystem` file methods remain unchanged. Token connections also
+need directory ports:
+
+- `listDirectories()` yields `{path, identity, mtime}` for real directories,
+  excluding engine-owned folders and symlinks. `identity` is stable across a
+  local rename; it is not a server ID or read authority.
+- `mkdir(path)` preserves existing content and refuses file/symlink obstacles.
+- `moveDirectory(from, to)` preserves local directory identity and contents,
+  refusing an occupied target. It is used for remote directory moves where safe.
+- `removeDirectory(path)` removes only an empty directory. Never implement this
+  as recursive deletion: untracked/local work must produce an obstacle, not loss.
+
+The Node adapter implements these ports. Construct it with
+`preserveEmptyDirectories: true`; file removal must not prune explicitly synced
+empty folders. The plugin must supply equivalent adapter methods.
+
+`StateStore.getMeta` and `setMeta` are mandatory for token connections. Core owns
+`v2-directories` (validated directory identities, pending idempotent operation,
+and deferred empty-folder cleanup) and `v2-departures` (scope departures that
+must not be republished), `v2-authored-departures` (protecting an author's retained
+local note across uncertain group-departure responses), and `v2-local-group-links`
+(stable connection-local link bindings across rename/restart). Do not share or
+mutate these documents from another connection. The ordinary file journal/checkpoint remains the retained engine's
+journal/checkpoint. Missing metadata methods fail explicitly.
+
+Directory commits are journaled before HTTP. An uncertain response is replayed
+with the same key and body; explicit stale-base replies allow a feed refresh.
+Remote directory effects and scope departures can occur while decoding scoped
+pages, so the adapter declares `readEffects`. Engine stop drains these calls
+before the host may close the ledger. Filesystem/state effects still use the
+host's ownership/recovery guards.
+
+## Scope, removals and deletion
+
+`prepare()` is called by the engine, not by the plugin. It validates current token
+authority and installs the guarded filesystem/state ports. A renamed folder
+selector uses the server's current path, not the encoded display hint.
+
+Folder scanning is limited to that selector. `.obsidian` is excluded through a
+partial folder connection. Scope departures are not represented as file deletes:
+
+- If another connection covers the file, `onRemoval` returns true and local bytes
+  remain. The departed connection forgets its baseline and suppresses re-upload.
+- Without another covering connection, unchanged shared bytes are removed locally.
+  Locally edited bytes are preserved rather than silently lost.
+- Content returning to scope clears the departure mark and is pulled normally.
+- A real delete goes through the retained puller and reaches other root/covering
+  connections as an ordinary local deletion.
+- Revocation/unavailable scope fails connection validation and never deletes local
+  files merely because authority ended.
+
+Group scanning uses only bounded `groups` frontmatter, including reverse-reachable
+nested groups and cycles. Unrelated, ambiguous, unresolved and foreign links do
+not grant eligibility or change the note bytes. Stable server group IDs and
+persisted local bindings follow root renames. Removing a group is a scope
+departure, not a global deletion; deleting the root stops the connection.
+
+Attachments are tracked-only through groups until explicit publication. A body
+link, Canvas edit, background index or file received through another connection
+never publishes a private file. After its durable connection/file-bound consent
+is accepted, the host may call:
+
+```ts
+await client.publishGroupAsset(path, actualBytes, originalMtime, durableIdempotencyKey)
+```
+
+The method uploads actual bytes through this token, then calls `/v2/group-assets`.
+Retry with the same key/body after uncertainty. Do not invoke it from background
+indexing, and never supply an external-file placeholder as `actualBytes`. A known
+private server path/SHA/file ID alone grants no publication authority.
+
+Content downloads name an authorized file and version. There is no digest-only
+read endpoint. Uploads establish the current token's entitlement; another token's
+pending upload is not consumed. The existing hash checker validates downloaded
+bytes before placement. Multipart uploads use the v2 upload endpoints and retain
+the server's part/retry contract.
+
+## Management and engine calls
+
+Use `AccessClient` for `connection()`, `issue({scope, label})`, `tokens()` and
+`revoke(tokenId)`. `V2EngineClient` is the file engine transport, not a second
+connection registry. Token paste/QR uses exactly the same encoded token.
+
+Keep existing `SyncEngine` calls: `sync`, `rescan`, `start`, `stop`, `pause`,
+`resume`, `onStatus`, `heldDeletes`, `decideDeletes`, `deferred`, `applyDeferred`
+and `keepLocal`. Their existing review/version and recovery requirements apply.
+
+## History and external verification
+
+`versions`, `trash`, `restore`, `restoreDeleted`, and `restoreDeletedMany` use v2
+routes only. History is filtered by version-time visibility **before pagination**,
+with current authority rechecked. Explicit visible historical bytes can be read
+while a file is in trash; the delete head itself has no content. Departures,
+earlier-private versions, revoked tokens and unavailable selectors cannot grant
+history/restore access. Bulk restore chooses live trash entries under the write
+lock and replays deterministically with its original idempotency identity.
+
+`externalFilesCapabilities`, `head`, and `verifyExternalFile` use the token v2
+extension. Verification requires the exact live file/version/path/SHA/size,
+authenticated decrypted bytes and real plaintext length, a retained blob reference,
+and final authority/head checks under the scope write lock. Cached success or a
+historical version is not eviction authority. The response is `no-store`. The
+host still owns local-generation, pending-forwarding and eviction fences.
+
+## Current host boundaries
+
+- Production core no longer exports `SyncClient`/`VaultClient`, scoped adapters,
+  owner-publication hooks or personal-note publication callbacks. Independent
+  retained-engine tests use a test-only HTTP client under `tests/legacy/`.
+  The CLI connects by encoded token and uses `V2EngineClient`; retained CLI
+  fixtures are ported to the real v2 server. No v1 fallback is served.
+- Full immutable executable review, including scope departures, overlapping
+  connection races, group asset consent and physical Mac/iPhone evidence remain
+  unverified. The example uses the existing host review gate; it is not proof
+  that every incoming executable operation is covered.
+
+## Verified synthetic evidence
+
+`packages/core/tests/acceptance/` uses real HTTP, durable SQLite, two independent
+servers, three devices and separate filesystems with production engines:
+
+- `engineV2.test.ts`: create/edit forwarding, device restart, identical bytes,
+  then extra idle cycles with unchanged versions, pending uploads and divergences.
+- `directoriesV2.test.ts`: empty folders, stable local rename identities,
+  descendant file moves, deletion and further idle cycles.
+- `removalV2.test.ts`: partial-folder placement/departure/re-entry, inaccessible
+  private destination, revocation preserving bytes, lost file/directory commit
+  responses and server/device restart with journal replay.
+- `stopV2.test.ts`: delayed scoped page effects drain before ledger shutdown.
+- `groupsV2.test.ts`: nested local-note eligibility, foreign frontmatter retention,
+  two-server/three-device forwarding, root rename/restart, departure/re-entry,
+  idle quiescence and unavailable-root byte preservation.
+- `serverGroups.ts` and `serverExternal.ts`: numbered group/publication and
+  external-verification server facets. Server integration additionally tests
+  private history, trash restore, indexed paging, inherited boundaries,
+  corrupt/missing bytes, size ceilings and concurrent authority changes.
+
+These are automated core/server observations, not live Obsidian or phone evidence.

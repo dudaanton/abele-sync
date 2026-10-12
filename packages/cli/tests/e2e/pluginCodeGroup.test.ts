@@ -14,8 +14,6 @@ import {
   cleanupFolders,
   cli,
   clientFor,
-  EMAIL,
-  PASSWORD,
   read,
   SETUP_MS,
   syncOnce,
@@ -29,7 +27,6 @@ let a: string, b: string
 const code = (id: string, file = 'main.js') => `.obsidian/plugins/${id}/${file}`
 beforeAll(async () => {
   server = await spawnServer()
-  await server.createAccount(EMAIL, PASSWORD)
   ;({ a, b } = await vaultPair(server, 'Grouped code approval'))
 }, SETUP_MS)
 afterAll(async () => {
@@ -128,7 +125,11 @@ describe('all-or-nothing plugin code approval', () => {
       let injected = false
       const fetching: typeof fetch = async (input, init) => {
         const response = await fetch(input, init)
-        if (!injected && String(input).endsWith(`/v1/blobs/${head.sha}`)) {
+        if (
+          !injected &&
+          new URL(String(input)).pathname === `/v2/files/${head.file_id}/content` &&
+          new URL(String(input)).searchParams.get('version_id') === head.version_id
+        ) {
           injected = true
           if (mutation === 'delete') await rm(join(b, '.obsidian/plugins', id), { recursive: true })
           else await write(b, code(id), 'localEditDuringDownload()')

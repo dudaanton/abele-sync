@@ -96,7 +96,7 @@ describe('commit, changes, manifest', () => {
     ])
     expect(r.results[0]).toMatchObject({ status: 'rejected', code: 'invalid_path' })
     expect(r.results[1].status).toBe('applied')
-    expect(r.results[2].status).toBe('merged') // create-vs-create on a note: merged from an empty base
+    expect(r.results[2].status).toBe('conflict') // competing creates keep complete files apart
     expect(r.results[2].path).toBe('Dup.md')
     expect(r.results[2].sha).not.toBe(shaOf('y'))
   })
@@ -141,7 +141,7 @@ describe('commit, changes, manifest', () => {
     })
   })
 
-  it('reports applied when the merge lands exactly on what the device sent', async () => {
+  it('reports applied without another version when both devices sent identical edits', async () => {
     await putBlob(tok, 'p\nq\n')
     const r0 = await commit(tok, [create('same.md', 'p\nq\n')])
     const f = r0.results[0].file_id,
@@ -157,7 +157,7 @@ describe('commit, changes, manifest', () => {
     const ops = (await api(t.app, tok).get(`/v1/vaults/${v}/changes?since=0`)).body.items
       .filter((i: any) => i.file_id === f)
       .map((i: any) => i.op)
-    expect(ops).toEqual(['create', 'modify', 'merge'])
+    expect(ops).toEqual(['create', 'modify'])
   })
 
   it('makes a conflict copy in conflict-file mode', async () => {
@@ -321,26 +321,32 @@ describe('commit, changes, manifest', () => {
     expect(history.map((x: any) => x.op)).toEqual(['merge', 'modify', 'create'])
   })
 
-  it('merges a note from the same base once: the same bytes sent again write nothing', async () => {
+  it('copies a divergent create once: the same bytes sent again write nothing', async () => {
     await putBlob(tok, 'upper\n')
     await putBlob(tok, 'lower\n')
     const r0 = await commit(tok, [create('Twin.md', 'upper\n')])
     const f = r0.results[0].file_id
     const first = await commit(tok, [create('twin.md', 'lower\n', 5)])
-    expect(first.results[0]).toMatchObject({ status: 'merged', file_id: f })
+    expect(first.results[0]).toMatchObject({ status: 'conflict', file_id: f })
     for (let round = 0; round < 3; round++) {
       const again = await commit(tok, [create('twin.md', 'lower\n', 5)])
       expect(again.results[0]).toMatchObject({
-        status: 'merged',
+        status: 'conflict',
         version_id: first.results[0].version_id,
         sha: first.results[0].sha,
+        conflict_file_id: first.results[0].conflict_file_id,
       })
       expect(again.head_seq).toBe(first.head_seq)
     }
     const history = (await api(t.app, tok).get(`/v1/vaults/${v}/files/${f}/versions`)).body
-    // The merge and the sent text kept under it, once.
-    expect(history.map((x: any) => x.op)).toEqual(['merge', 'modify', 'create'])
-    expect(history[1].sha).toBe(shaOf('lower\n'))
+    // The unchanged original and one complete incoming copy, once.
+    expect(history.map((x: any) => x.op)).toEqual(['create'])
+    const copyHistory = (
+      await api(t.app, tok).get(
+        `/v1/vaults/${v}/files/${first.results[0].conflict_file_id}/versions`
+      )
+    ).body
+    expect(copyHistory.map((x: any) => [x.op, x.sha])).toEqual([['conflict', shaOf('lower\n')]])
     // A real edit from a known base still merges: only the same bytes from the same base are known.
     const edited = await putBlob(tok2, 'upper\nmore\n')
     const r = await commit(tok2, [
@@ -521,24 +527,24 @@ describe('commit, changes, manifest', () => {
 
   it('a modify over a deleted head whose path another live file took lands at the next free name', async () => {
     await putBlob(tok, 'old m')
-    const first = await commit(tok, [create('m.md', 'old m')])
+    const first = await commit(tok, [create('DeletedHead.md', 'old m')])
     const f = first.results[0].file_id
     const v1 = first.results[0].version_id
     await commit(tok, [{ op: 'delete', file_id: f, base_version_id: v1 }])
     await putBlob(tok, 'new m')
-    const taken = await commit(tok, [create('m.md', 'new m')])
+    const taken = await commit(tok, [create('DeletedHead.md', 'new m')])
     expect(taken.results[0].file_id).not.toBe(f)
 
     const s = await putBlob(tok, 'old m, edited')
     const r = await commit(tok, [
       { op: 'modify', file_id: f, base_version_id: v1, sha: s, size: 13, mtime: 5 },
     ])
-    expect(r.results[0]).toMatchObject({ status: 'applied', file_id: f, path: 'm 1.md' })
+    expect(r.results[0]).toMatchObject({ status: 'applied', file_id: f, path: 'DeletedHead 1.md' })
     const man = await api(t.app, tok).get(`/v1/vaults/${v}/manifest`)
-    const atM = man.body.items.filter((i: any) => i.path.toLowerCase().startsWith('m'))
+    const atM = man.body.items.filter((i: any) => i.path.startsWith('DeletedHead'))
     expect(atM.map((i: any) => [i.path, i.file_id, i.sha]).sort()).toEqual([
-      ['m 1.md', f, s],
-      ['m.md', taken.results[0].file_id, shaOf('new m')],
+      ['DeletedHead 1.md', f, s],
+      ['DeletedHead.md', taken.results[0].file_id, shaOf('new m')],
     ])
   })
 

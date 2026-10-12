@@ -66,9 +66,9 @@ export const ConnectionBindingSchema = z
       return normalized
     }),
     vaultId: id,
-    mode: z.enum(['personal', 'scoped']),
+    mode: z.enum(['personal', 'scoped', 'token']),
     principalId: id,
-    principalType: z.enum(['account', 'device', 'key', 'installation']),
+    principalType: z.enum(['account', 'device', 'key', 'installation', 'token']),
     grantId: id.nullable(),
     generation: revision,
     /** Local slot/fingerprint association only, never a credential or bearer token. */
@@ -79,7 +79,7 @@ export const ConnectionBindingSchema = z
     (value) =>
       value.mode === 'scoped'
         ? value.grantId !== null && ['key', 'installation'].includes(value.principalType)
-        : value.grantId === null,
+        : value.grantId === null && (value.mode !== 'token' || value.principalType === 'token'),
     'Invalid mode/grant binding'
   )
 export type ConnectionBinding = z.infer<typeof ConnectionBindingSchema>

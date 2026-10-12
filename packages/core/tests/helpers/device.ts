@@ -11,7 +11,7 @@ import {
   type SelectiveSettings,
   type SyncReport,
   type VaultClient,
-} from '../../src/index.js'
+} from '../legacy/index.js'
 import type { Harness } from './harness.js'
 
 /**

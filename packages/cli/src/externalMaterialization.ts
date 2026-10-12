@@ -11,9 +11,6 @@ import {
   ConnectionBindingSchema,
   LocalBaseSchema,
   ExternalRecordSchema,
-  ScopedKnownFileSchema,
-  ScopedConnectionSchema,
-  ScopedState,
   type ConnectionBinding,
   type ExternalOperation,
   type ExternalDocument,
@@ -74,23 +71,7 @@ export async function validateLifecycleLedger(
     connection?: { binding?: unknown }
     binding?: unknown
   }
-  if (ledgerFile === 'agent.sqlite') {
-    const scoped = ScopedConnectionSchema.parse(config.connection?.binding ?? config.binding)
-    if (
-      !sameConnection(binding, {
-        endpoint: scoped.endpoint_identity,
-        vaultId: scoped.vault_id,
-        mode: 'scoped',
-        principalId: scoped.principal_id,
-        principalType: scoped.principal_kind,
-        grantId: scoped.grant_id,
-        generation: binding.generation,
-        credentialAssociation: scoped.credential_fingerprint,
-      })
-    )
-      refuse('foreign scoped root binding')
-    await ScopedState.open(raw, scoped)
-  }
+  if (ledgerFile !== 'state.db') refuse('unsupported legacy ledger')
   const descriptor =
     config.descriptor === undefined ? null : parseLocalDescriptor(config.descriptor)
   const marker = join(stateFolder(dir), ACTIVATION_FILE)
@@ -318,16 +299,6 @@ export async function materializeForDisconnect(
         refuse(`${record.fileId}: ${record.blockingReason ?? record.availability}`)
       if (record.retained.length) refuse(`${record.fileId}: retained bytes require recovery`)
       const entry = await raw.byFileId(record.fileId)
-      const knownText =
-        binding.mode === 'scoped' ? raw.getMeta(`scoped-v4-file:${record.fileId}`) : null
-      const known = knownText ? ScopedKnownFileSchema.parse(JSON.parse(knownText)) : null
-      if (
-        known &&
-        (known.dirty ||
-          ['held', 'detached'].includes(known.state) ||
-          known.file_id !== record.fileId)
-      )
-        refuse(`${record.fileId}: unresolved scoped placement`)
       const base: Base | null =
         record.availability === 'deleted'
           ? record.lastProvenLocalBase
@@ -340,16 +311,7 @@ export async function materializeForDisconnect(
                 size: entry.size,
                 mtime: entry.mtime,
               }
-            : known
-              ? {
-                  fileId: known.file_id,
-                  versionId: known.version_id,
-                  path: known.path,
-                  sha: known.sha,
-                  size: known.size,
-                  mtime: known.mtime,
-                }
-              : record.lastProvenLocalBase
+            : record.lastProvenLocalBase
       if (!base) refuse(`${record.fileId}: version basis missing`)
       const physicalTarget = entry?.path ?? base.path
       ExternalRecordSchema.shape.projectionPath.parse(physicalTarget)
@@ -527,17 +489,7 @@ export async function materializeForDisconnect(
                 : f
             ),
           },
-          [
-            { key: `external-install:${digest(Buffer.from(opId))}`, value: identity(named) },
-            ...(known && record.availability === 'active'
-              ? [
-                  {
-                    key: `scoped-v4-file:${record.fileId}`,
-                    value: JSON.stringify({ ...known, state: 'materialized' }),
-                  },
-                ]
-              : []),
-          ]
+          [{ key: `external-install:${digest(Buffer.from(opId))}`, value: identity(named) }]
         )
         afterWrite('hydrated')
       }

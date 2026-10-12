@@ -16,6 +16,15 @@ export default function setup(): void {
     [TSC, '-b', '--force', 'packages/protocol', 'packages/server', 'packages/core', 'packages/cli'],
     { cwd: ROOT, encoding: 'utf8' }
   )
+  const retained = spawnSync(
+    process.execPath,
+    [TSC, '-p', 'packages/server/tsconfig.retained-tests.json'],
+    { cwd: ROOT, encoding: 'utf8' }
+  )
+  if (retained.error !== undefined || retained.status !== 0)
+    throw new Error(
+      `retained engine fixture build failed: ${retained.error?.message ?? retained.stderr + retained.stdout}`
+    )
   if (built.error !== undefined || built.status !== 0) {
     throw new Error(
       `child fixture build failed: ${built.error?.message ?? built.stderr + built.stdout}`

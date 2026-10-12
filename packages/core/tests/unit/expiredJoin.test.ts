@@ -7,7 +7,7 @@ import {
   resumeJournal,
   sha256,
   type VaultClient,
-} from '../../src/index.js'
+} from '../legacy/index.js'
 
 it('keeps an expired prefer-mine journal for recovery instead of replaying it on an older server', async () => {
   const state = new MemoryStateStore()

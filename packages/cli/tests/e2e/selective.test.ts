@@ -7,10 +7,8 @@ import {
   bytes,
   cleanupFolders,
   converge,
-  EMAIL,
   listing,
   manifestPaths,
-  PASSWORD,
   read,
   setSelective,
   SETUP_MS,
@@ -32,7 +30,6 @@ let b: string
 
 beforeAll(async () => {
   server = await spawnServer()
-  await server.createAccount(EMAIL, PASSWORD)
   const pair = await vaultPair(server, 'Selective')
   a = pair.a
   b = pair.b

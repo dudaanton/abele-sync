@@ -11,7 +11,7 @@ import { EngineError, HttpError } from './errors.js'
  */
 export async function negotiateExternalFiles(
   load: () => Promise<unknown>,
-  mode: 'personal' | 'scoped'
+  mode: 'personal' | 'scoped' | 'token'
 ) {
   try {
     return requireExternalFilesCapabilities(await load(), mode)

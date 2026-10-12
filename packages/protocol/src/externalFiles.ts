@@ -24,6 +24,13 @@ export const ExternalFilesCapabilitiesSchema = z
   })
   .strict()
 export type ExternalFilesCapabilities = z.infer<typeof ExternalFilesCapabilitiesSchema>
+export const V2ExternalFilesCapabilitiesSchema = ExternalFilesCapabilitiesSchema.omit({
+  personal: true,
+  scoped: true,
+})
+  .extend({ token: z.boolean() })
+  .strict()
+export type V2ExternalFilesCapabilities = z.infer<typeof V2ExternalFilesCapabilitiesSchema>
 export const ExternalVerifyRequestSchema = z
   .object({
     version_id: z.string().min(1),
@@ -45,8 +52,17 @@ export function requireExternalFilesVersion(version: unknown): void {
 /** Unknown/incomplete support never authorizes an eviction. No scoped-to-personal fallback. */
 export function requireExternalFilesCapabilities(
   response: unknown,
-  mode: 'personal' | 'scoped'
-): ExternalFilesCapabilities {
+  mode: 'personal' | 'scoped' | 'token'
+): ExternalFilesCapabilities | V2ExternalFilesCapabilities {
+  if (mode === 'token') {
+    const parsed = V2ExternalFilesCapabilitiesSchema.safeParse(response)
+    if (!parsed.success || !parsed.data.token)
+      throw new AbeleError(
+        'external_files_unavailable',
+        'required external-files verification is unavailable'
+      )
+    return parsed.data
+  }
   const parsed = ExternalFilesCapabilitiesSchema.safeParse(response)
   if (!parsed.success || !parsed.data[mode])
     throw new AbeleError(

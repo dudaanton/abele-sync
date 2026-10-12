@@ -12,8 +12,6 @@ import {
   cli,
   folder,
   clientFor,
-  EMAIL,
-  PASSWORD,
   read,
   SETUP_MS,
   syncOnce,
@@ -32,7 +30,6 @@ let server: SpawnedServer
 
 beforeAll(async () => {
   server = await spawnServer()
-  await server.createAccount(EMAIL, PASSWORD)
 }, SETUP_MS)
 
 afterAll(async () => {

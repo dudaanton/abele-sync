@@ -13,14 +13,14 @@ import {
 } from '../../src/externalSafety.js'
 import { SqliteStateStore } from '../../src/sqliteState.js'
 import { acquireLock } from '../../src/lock.js'
-import { readConfig as oldReadConfig } from '../fixtures/config-v1/config.js'
+import { tokenFor } from '../helpers/token.js'
 
 let dir: string
 const cfg = {
   serverUrl: 'https://synthetic.example.test',
   vaultId: 'vault',
   deviceId: 'device',
-  deviceToken: 'absd_synthetic',
+  deviceToken: tokenFor('https://synthetic.example.test'),
   deviceName: 'test',
   selective: selectiveDefaults(),
 }
@@ -51,7 +51,9 @@ describe('recoverable CLI activation fence in the real ledger', () => {
     try {
       const descriptor = await activateExternalFiles(dir, raw, cfg, lock.held)
       expect(marker().state).toBe('active')
-      expect(() => oldReadConfig(dir)).toThrowError(/no serverUrl/)
+      expect(JSON.parse(readFileSync(join(stateFolder(dir), 'config.json'), 'utf8'))).toMatchObject(
+        { format: 'abele.cli', schema: 2 }
+      )
       expect(readConfig(dir)).toEqual(cfg)
       raw.close()
       raw = SqliteStateStore.open(file())
@@ -78,7 +80,7 @@ describe('recoverable CLI activation fence in the real ledger', () => {
         reason: 'aborted',
       })
       expect(marker().state).toBe('preparing')
-      expect(() => oldReadConfig(dir)).toThrowError(/no serverUrl/)
+      expect(readConfig(dir)).toEqual(cfg)
       const original = marker().descriptor
       raw.close()
       raw = SqliteStateStore.open(file())

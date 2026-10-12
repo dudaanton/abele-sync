@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { sweepIdempotency } from '../../src/api/idempotency.js'
+import { sweepRetainedEngineReceipts as sweepIdempotency } from '../helpers/retainedRetention.js'
 import { api } from '../helpers/client.js'
 import { commit, create, putBlob } from '../helpers/ops.js'
 import { buildTestApp } from '../helpers/testApp.js'

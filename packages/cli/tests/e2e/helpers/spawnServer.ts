@@ -24,8 +24,8 @@ export interface SpawnedServer {
   url: string
   /** Test fixture for a record written by an older server release. */
   databasePath: string
-  /** Makes an account the way an operator would, through the admin CLI. */
-  createAccount(email: string, password: string): Promise<void>
+  /** Provision a named synthetic space, then issue an independent token per connection. */
+  tokenFor(space: string, connection: string): string
   kill(): Promise<void>
 }
 
@@ -77,19 +77,40 @@ export async function spawnServer(): Promise<SpawnedServer> {
     throw error
   }
 
+  const spaces = new Map<string, string>()
+  const tokens = new Map<string, string>()
   return {
     url,
     databasePath: join(dir, 'abele.db'),
     kill,
-    async createAccount(email: string, password: string): Promise<void> {
-      const done = spawnSync(
-        process.execPath,
-        [ADMIN, 'create-account', '--email', email, '--password', password],
-        { env, encoding: 'utf8' }
-      )
-      if (done.status !== 0) {
-        throw new Error(`create-account failed: ${done.stderr || done.stdout}`)
+    tokenFor(space, connection) {
+      const key = JSON.stringify([space, connection])
+      const existing = tokens.get(key)
+      if (existing) return existing
+      let root = spaces.get(space)
+      if (!root) {
+        const done = spawnSync(
+          process.execPath,
+          [ADMIN, 'user', 'create', '--label', space, '--address', url],
+          { env, encoding: 'utf8' }
+        )
+        if (done.status !== 0) throw new Error(`user create failed: ${done.stderr || done.stdout}`)
+        root = done.stdout.trim()
+        spaces.set(space, root)
       }
+      const script = `import { AccessClient } from ${JSON.stringify(join(ROOT, 'packages/core/dist/index.js'))};
+        const client = AccessClient.fromToken(process.env.FIXTURE_TOKEN, { fetch });
+        const info = await client.connection();
+        const issued = await client.issue({scope: {kind: 'folder', id: info.scope.id}, label: process.env.FIXTURE_LABEL});
+        console.log(issued.token);`
+      const done = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+        env: { ...env, FIXTURE_TOKEN: root, FIXTURE_LABEL: connection },
+        encoding: 'utf8',
+      })
+      if (done.status !== 0) throw new Error(`token issue failed: ${done.stderr || done.stdout}`)
+      const token = done.stdout.trim()
+      tokens.set(key, token)
+      return token
     },
   }
 }
@@ -103,13 +124,9 @@ export async function spawnServer(): Promise<SpawnedServer> {
  * build info stayed would otherwise be declared up to date and never written again.
  */
 function build(): void {
+  // The project's globalSetup builds this fixture together with production sources.
   if (existsSync(SERVER) && existsSync(ADMIN)) return
   npmBuild([])
-  if (existsSync(SERVER) && existsSync(ADMIN)) return
-  npmBuild(['--', '--force'])
-  if (!existsSync(SERVER) || !existsSync(ADMIN)) {
-    throw new Error(`the build left no ${SERVER}`)
-  }
 }
 
 function npmBuild(extra: string[]): void {

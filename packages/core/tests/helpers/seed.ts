@@ -1,5 +1,5 @@
 import type { CommitOp, CommitResponse } from '@abele/sync-protocol'
-import { encodeText, sha256, type VaultClient } from '../../src/index.js'
+import { encodeText, sha256, type VaultClient } from '../legacy/index.js'
 import { BASE_URL, type Harness } from './harness.js'
 
 /**

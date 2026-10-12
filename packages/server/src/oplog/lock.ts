@@ -1,4 +1,5 @@
 import { Mutex } from 'async-mutex'
+import { setTimeout as delay } from 'node:timers/promises'
 import { sql, type Kysely, type Transaction } from 'kysely'
 import type { Dialect } from '../db/connect.js'
 import type { Database } from '../db/schema.js'
@@ -45,7 +46,30 @@ export async function withVaultLock<T>(
     mutexes.set(vaultId, mutex)
   }
   try {
-    return await mutex.runExclusive(run)
+    return await mutex.runExclusive(async () => {
+      const started = performance.now()
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await run()
+        } catch (error) {
+          const code = (error as { code?: string } | null)?.code
+          const remaining = 5000 - (performance.now() - started)
+          if (
+            attempt >= 7 ||
+            remaining <= 0 ||
+            !code ||
+            !(code === 'SQLITE_BUSY' || code.startsWith('SQLITE_BUSY_'))
+          )
+            throw error
+          // A snapshot cannot be upgraded by retrying a statement. Rollback already
+          // happened; replay authorization, proof, dedup, rows and receipt as one unit.
+          // Read-to-write upgrades can return BUSY immediately, bypassing busy_timeout.
+          // Give an independent writer time to finish its async work: up to 4.5s
+          // of backoff, within the connection's 5s contention budget, not just 310ms.
+          await delay(Math.min(100 * 2 ** attempt, 1000, remaining))
+        }
+      }
+    })
   } finally {
     if (!mutex.isLocked()) mutexes.delete(vaultId)
   }

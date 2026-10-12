@@ -3,7 +3,9 @@ import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { expect, it } from 'vitest'
 import { selectiveDefaults } from '@abele/sync-core'
-import { buildTestApp } from '@abele/sync-server/tests/helpers/testApp.js'
+import { v2Server } from '@abele/sync-server/tests/helpers/v2Server.js'
+import { createUser } from '@abele/sync-server/src/access/tokens.js'
+import { AccessClient } from '@abele/sync-core'
 import { writeConfig, stateFolder } from '../../src/config.js'
 import { acquireLock } from '../../src/lock.js'
 import { SqliteStateStore } from '../../src/sqliteState.js'
@@ -14,18 +16,21 @@ it('BUG: status and read-only deletes work for the live daemon owner intent, but
   const scratch = resolve(import.meta.dirname, '../../../../.scratch')
   await mkdir(scratch, { recursive: true })
   const dir = await mkdtemp(join(scratch, 'live-pull-')),
-    t = await buildTestApp()
+    t = await v2Server()
   let release: (() => void) | undefined
   try {
-    const account = await t.account(),
-      vault = (await t.vault(account.accountToken)).vaultId,
-      device = await t.device(account.accountToken, vault)
-    const endpoint = await t.app.listen({ host: '127.0.0.1', port: 0 })
+    const root = await createUser(
+      { db: t.db, pepper: t.config.tokenPepper, dialect: 'sqlite' },
+      'Live inspection',
+      t.address
+    )
+    const info = await AccessClient.fromToken(root.token, { fetch }).connection()
+    const endpoint = t.address
     writeConfig(dir, {
       serverUrl: endpoint,
-      vaultId: vault,
-      deviceId: device.deviceId,
-      deviceToken: device.deviceToken,
+      vaultId: info.space_id,
+      deviceId: info.token_id,
+      deviceToken: root.token,
       deviceName: 'test',
       selective: selectiveDefaults(),
     })

@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from 'node:f
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { expect } from 'vitest'
-import { SyncClient, type VaultClient } from '@abele/sync-core'
+import { V2EngineClient } from '@abele/sync-core'
 import { runCli } from '../../../src/cli.js'
 import { readConfig, writeConfig, type DaemonConfig } from '../../../src/config.js'
 import { REVOKE_TIMEOUT_MS, type CliIo, type CommandContext } from '../../../src/context.js'
@@ -18,8 +18,6 @@ import type { SpawnedServer } from './spawnServer.js'
  * versions, the vault's conflict setting.
  */
 
-export const EMAIL = 'pair@example.com'
-export const PASSWORD = 'correct horse battery staple'
 /** The device names, which is what a conflict copy is named after. */
 export const DEVICE_A = 'laptop'
 export const DEVICE_B = 'phone'
@@ -96,9 +94,8 @@ export async function cleanupFolders(): Promise<void> {
 }
 
 /**
- * Two initialised folders on one vault, enrolled as `laptop` and `phone`. The account is the
- * suite's to create (`server.createAccount(EMAIL, PASSWORD)`); the vault is made by the first
- * `init` and found by the second.
+ * Two connected folders in one synthetic space, with independent laptop/phone tokens.
+ * Named spaces are provisioned by the operator fixture, not selected by the CLI.
  */
 export async function vaultPair(server: SpawnedServer, vaultName: string): Promise<Pair> {
   const a = await folder()
@@ -114,23 +111,14 @@ async function init(
   vaultName: string,
   deviceName: string
 ): Promise<void> {
-  const run = await cli(
-    [
-      'init',
-      '--server',
-      server.url,
-      '--dir',
-      dir,
-      '--email',
-      EMAIL,
-      '--vault',
-      vaultName,
-      '--device-name',
-      deviceName,
-    ],
-    { ABELE_PASSWORD: PASSWORD }
-  )
-  if (run.code !== 0) throw new Error(`init of ${dir} exited ${run.code}: ${run.all}`)
+  const run = await cli([
+    'connect',
+    '--dir',
+    dir,
+    '--token',
+    server.tokenFor(vaultName, deviceName),
+  ])
+  if (run.code !== 0) throw new Error(`connect of ${dir} exited ${run.code}: ${run.all}`)
 }
 
 /** One `run --once` in the folder, or an error carrying what it printed. */
@@ -192,7 +180,7 @@ export async function converge(a: string, b: string): Promise<void> {
   for (const path of left) expect(await bytes(b, path)).toEqual(await bytes(a, path))
 }
 
-/** The folder's config, which `init` must have written. */
+/** The folder's config, which `connect` must have written. */
 export function config(dir: string): DaemonConfig {
   const cfg = readConfig(dir)
   if (cfg === null) throw new Error(`${dir} has no config`)
@@ -206,14 +194,11 @@ export function setSelective(dir: string, patch: Partial<DaemonConfig['selective
 }
 
 /** A client on the folder's own device token, for what the folder cannot show. */
-export function clientFor(dir: string): VaultClient {
-  const cfg = config(dir)
-  return new SyncClient({
-    baseUrl: cfg.serverUrl,
+export function clientFor(dir: string): V2EngineClient {
+  return new V2EngineClient(config(dir).deviceToken, {
     fetch: globalThis.fetch,
-    token: cfg.deviceToken,
     userAgent: 'abele-sync-e2e',
-  }).forVault(cfg.vaultId)
+  })
 }
 
 /** The live paths the server holds for the folder's vault, sorted. */
@@ -227,18 +212,4 @@ export async function manifestPaths(dir: string): Promise<string[]> {
     cursor = page.next
   } while (cursor !== null)
   return paths.sort()
-}
-
-/** The vault's conflict policy, set through the settings route on the folder's device token. */
-export async function setConflictMode(
-  dir: string,
-  conflict: 'merge' | 'conflict-file'
-): Promise<void> {
-  const cfg = config(dir)
-  const response = await fetch(`${cfg.serverUrl}/v1/vaults/${cfg.vaultId}/settings`, {
-    method: 'PATCH',
-    headers: { authorization: `Bearer ${cfg.deviceToken}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ conflict }),
-  })
-  if (response.status !== 200) throw new Error(`settings answered ${response.status}`)
 }

@@ -14,7 +14,7 @@ import {
   type PullReport,
   type ScanFilter,
   type VaultClient,
-} from '../../src/index.js'
+} from '../legacy/index.js'
 import { BASE_URL, serverHarness, type Harness } from '../helpers/harness.js'
 
 /**

@@ -7,9 +7,8 @@ import { buildTestApp, TEST_PASSWORD, type TestApp } from '../helpers/testApp.js
  * A merge the server makes is bytes nobody sent, so the limits checked against what was sent
  * say nothing about it: two notes each within the file limit can merge into one over it, or
  * over the vault's quota. Such a merge is not written. Both sides are kept as they came — the
- * head where it is, the incoming text in a conflict copy beside it — and when the copy would
- * not fit the quota (as it usually will not where the merge did not), the incoming text is kept in
- * the file's history instead.
+ * head where it is, the incoming text in a conflict copy beside it. If no copy fits the quota,
+ * the operation is explicitly refused, leaving the client's pending content undelivered.
  */
 
 const BASE = 'shared line\n'
@@ -73,33 +72,32 @@ describe('limits on a merged head', () => {
     expect(copy.raw).toBe(bottom(80))
   })
 
-  it('keeps the incoming text in history when a copy past the file limit would not fit the quota', async () => {
+  it('refuses delivery when an over-limit merge cannot fit a conflict copy', async () => {
     await api(t.app, tok).patch(`/v1/vaults/${vaultId}/settings`, {
       max_file_bytes: 100,
       quota_bytes: 150,
       account_password: TEST_PASSWORD,
     })
     const { second } = await editBothEnds(80)
-    expect(second).toMatchObject({ status: 'merged', sha: shaOf(top(80)) })
+    expect(second).toMatchObject({ status: 'rejected', code: 'quota_exceeded' })
     expect(await largest()).toBeLessThanOrEqual(100)
     expect(await liveBytes()).toBeLessThanOrEqual(150)
   })
 
-  it('writes no merge that would take the vault over its quota, and keeps the incoming text in history', async () => {
-    // A merge holds both edits, so a copy of the incoming text beside the head never fits
-    // where the merge did not: the incoming text goes into the file's history instead.
+  it('writes no over-quota merge and refuses rather than acknowledging history-only delivery', async () => {
+    // Neither a merged head nor a full copy fits: delivery must be refused.
     await api(t.app, tok).patch(`/v1/vaults/${vaultId}/settings`, {
       quota_bytes: 160,
       account_password: TEST_PASSWORD,
     })
     const { fileId, second } = await editBothEnds(80)
     // The head stays what it was, and nothing new is live.
-    expect(second).toMatchObject({ status: 'merged', sha: shaOf(top(80)) })
+    expect(second).toMatchObject({ status: 'rejected', code: 'quota_exceeded' })
     expect(await liveBytes()).toBeLessThanOrEqual(160)
     expect(await liveBytes()).toBe(Buffer.byteLength(top(80)))
     const history = await api(t.app, tok).get(`/v1/vaults/${vaultId}/files/${fileId}/versions`)
     const shas = (history.body as Array<{ sha: string | null }>).map((v) => v.sha)
-    expect(shas).toContain(shaOf(bottom(80)))
+    expect(shas).not.toContain(shaOf(bottom(80)))
   })
 
   /** A note of exactly 90 bytes whose frontmatter says `title: <title>`. */
@@ -136,22 +134,22 @@ describe('limits on a merged head', () => {
     return { fileId: made.file_id as string, second }
   }
 
-  it('keeps the incoming text in history when a merge that breaks the frontmatter leaves no room for a copy', async () => {
+  it('refuses conflicting frontmatter when no conflict copy fits', async () => {
     const { fileId, second } = await retitle()
-    // Both titles in one frontmatter is no YAML; a copy of 90 bytes beside a head of 90 is 180.
-    expect(second).toMatchObject({ status: 'merged', sha: shaOf(titled('b')) })
+    // Same-line titles conflict; a copy of 90 bytes beside a head of 90 is 180.
+    expect(second).toMatchObject({ status: 'rejected', code: 'quota_exceeded' })
     expect(await liveBytes()).toBeLessThanOrEqual(150)
     const history = await api(t.app, tok).get(`/v1/vaults/${vaultId}/files/${fileId}/versions`)
     const shas = (history.body as Array<{ sha: string | null }>).map((v) => v.sha)
-    expect(shas).toContain(shaOf(titled('c')))
+    expect(shas).not.toContain(shaOf(titled('c')))
   })
 
   it('makes no conflict copy the quota has no room for in a vault that copies conflicts aside', async () => {
     const { fileId, second } = await retitle('conflict-file')
-    expect(second).toMatchObject({ status: 'merged', sha: shaOf(titled('b')) })
+    expect(second).toMatchObject({ status: 'rejected', code: 'quota_exceeded' })
     expect(await liveBytes()).toBeLessThanOrEqual(150)
     const history = await api(t.app, tok).get(`/v1/vaults/${vaultId}/files/${fileId}/versions`)
     const shas = (history.body as Array<{ sha: string | null }>).map((v) => v.sha)
-    expect(shas).toContain(shaOf(titled('c')))
+    expect(shas).not.toContain(shaOf(titled('c')))
   })
 })

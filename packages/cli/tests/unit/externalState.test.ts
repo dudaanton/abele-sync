@@ -8,9 +8,9 @@ import { SqliteStateStore } from '../../src/sqliteState.js'
 const binding = {
   endpoint: 'https://sync.example.invalid',
   vaultId: 'vault',
-  mode: 'personal' as const,
+  mode: 'token' as const,
   principalId: 'device',
-  principalType: 'device' as const,
+  principalType: 'token' as const,
   grantId: null,
   generation: 1,
   credentialAssociation: 'credential-slot',
@@ -478,41 +478,18 @@ describe('external phases through the real CLI ledger connection', () => {
       memory.close()
     }
   })
-  it('BUG: updates the existing scoped checkpoint in the same ledger rather than introducing another head table', async () => {
-    const scopedBinding = {
-      version: 4 as const,
-      facet: 'scoped' as const,
-      endpoint_identity: binding.endpoint,
-      vault_id: binding.vaultId,
-      grant_id: 'grant',
-      principal_kind: 'key' as const,
-      principal_id: 'key',
-      credential_fingerprint: 'e'.repeat(64),
-    }
-    await Core.ScopedState.open(store, scopedBinding, { initialize: true })
-    const externalBinding = {
-      ...binding,
-      mode: 'scoped' as const,
-      grantId: 'grant',
-      principalId: 'key',
-      principalType: 'key' as const,
-    }
-    const state = await Core.ExternalState.open(store, 'ledger', externalBinding)
-    const root = JSON.parse(store.getMeta('scoped-v4-state')!)
-    const checkpoint = { kind: 'scoped' as const, token: 'checkpoint' }
+  it('updates the token feed cursor atomically with external work in the existing ledger', async () => {
+    const state = await Core.ExternalState.open(store, 'ledger', binding)
     await state.commit({
       expectedRevision: 0,
       operations: [{ expectedRevision: null, next: operation() }],
-      ledger: {
-        metadata: [{ key: 'scoped-v4-state', value: JSON.stringify({ ...root, checkpoint }) }],
-      },
+      ledger: { cursor: 42 },
     })
     reopen()
-    const scoped = await Core.ScopedState.open(store, scopedBinding)
-    expect(await scoped.getCheckpoint()).toEqual(checkpoint)
+    expect(await store.getCursor()).toBe(42)
     expect(
-      (await (await Core.ExternalState.open(store, 'ledger', externalBinding)).snapshot())
-        .operations[0]!.phase
+      (await (await Core.ExternalState.open(store, 'ledger', binding)).snapshot()).operations[0]!
+        .phase
     ).toBe('prepared')
   })
 })

@@ -1,5 +1,5 @@
 import type { ChangeItem, CommitOpResult, VersionInfo } from '@abele/sync-protocol'
-import type { VaultClient } from './client.js'
+import type { EngineClient } from './engineClient.js'
 import type { Staged } from './defer.js'
 
 /**
@@ -19,7 +19,7 @@ const VERSION_PAGE = 100
  * never permission to write bytes the host has not approved.
  */
 export async function stagedHead(
-  client: VaultClient,
+  client: EngineClient,
   result: Exclude<CommitOpResult, { status: 'rejected' }>,
   sentSha: string | null,
   fallbackBase: string | null,

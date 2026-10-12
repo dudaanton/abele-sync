@@ -1,7 +1,7 @@
 import { caseKey, normalisePath, type CommitOp } from '@abele/sync-protocol'
 import { EngineError } from './errors.js'
 import { touchesDeferred } from './defer.js'
-import type { FileSystem } from './fs.js'
+import { fingerprintFile, type FileSystem } from './fs.js'
 import type { ResumeOptions } from './pusher.js'
 import type { StateEntry, StateStore } from './state.js'
 
@@ -71,8 +71,8 @@ export class PushDisk {
     // A negative holds() read is not replacement authority. Preserved/rounded
     // metadata cannot prove that the bytes still match the submitted operation.
     try {
-      const bytes = await this.fs.read(file)
-      if (bytes.length !== sent.size || (await this.hash(bytes)) !== sent.sha) return false
+      const fingerprint = await fingerprintFile(this.fs, file, this.hash)
+      if (fingerprint.size !== sent.size || fingerprint.sha !== sent.sha) return false
       const after = await this.fs.stat(file)
       return after !== null && after.size === have.size && after.mtime === have.mtime
     } catch {
@@ -132,8 +132,9 @@ export class PushDisk {
     there: { size: number; mtime: number }
   ): Promise<void> {
     if (old.size !== there.size || old.mtime !== there.mtime) return
-    const [a, b] = await Promise.all([this.fs.read(from), this.fs.read(to)])
-    if ((await this.hash(a)) !== (await this.hash(b))) return
+    const a = await fingerprintFile(this.fs, from, this.hash)
+    const b = await fingerprintFile(this.fs, to, this.hash)
+    if (a.size !== b.size || a.sha !== b.sha) return
     try {
       await this.fs.move(from, to)
     } catch (error) {
@@ -203,7 +204,7 @@ export class PushDisk {
   async holds(path: string, sha: string): Promise<boolean> {
     try {
       if ((await this.fs.stat(path)) === null) return false
-      return (await this.hash(await this.fs.read(path))) === sha
+      return (await fingerprintFile(this.fs, path, this.hash)).sha === sha
     } catch {
       // It was there a moment ago and cannot be read now: write it, rather than assume.
       return false

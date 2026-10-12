@@ -8,8 +8,10 @@ const read = (path: string) => readFileSync(resolve(root, path), 'utf8')
 
 it('ships only deployment and current-state reference documents', () => {
   expect(readdirSync(resolve(root, 'docs')).sort()).toEqual([
+    'core-v2-engine.md',
     'deploy.md',
     'external-file-cli-state.md',
+    'protocol-v2.md',
     'protocol.md',
     'schema.md',
     'security.md',
@@ -44,7 +46,6 @@ it('keeps only scripts used by package commands or automated tests', () => {
     'query-cost-analysis.mjs',
     'test-sql-disposable.sh',
     'test-sql.mjs',
-    'upgrade-preflight.mjs',
     'validate-cost-report.d.mts',
     'validate-cost-report.mjs',
   ])

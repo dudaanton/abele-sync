@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { FastifyInstance } from 'fastify'
 import type { Kysely } from 'kysely'
-import { buildApp } from '../../src/api/app.js'
-import { createAccount } from '../../src/auth/accounts.js'
+import { buildRetainedEngineTestApp as buildApp } from './retainedEngineApp.js'
+import { createAccount } from '../legacy/src/auth/accounts.js'
 import { BlobStore } from '../../src/blobs/store.js'
 import { loadConfig, type Config } from '../../src/config.js'
 import type { Dialect } from '../../src/db/connect.js'
@@ -23,7 +23,6 @@ export interface TestAppOptions {
   wsHelloTimeoutMs?: number
   trustProxy?: boolean | string[]
   configurationDirectories?: readonly string[]
-  scopedSharing?: boolean
   /** `pg` runs the server on `ABELE_TEST_PG_URL`, in a schema of its own; SQLite by default. */
   dialect?: Dialect
 }
@@ -69,7 +68,6 @@ export async function buildTestApp(opts: TestAppOptions = {}): Promise<TestApp> 
   })
   const config: Config = {
     ...base,
-    ...(opts.scopedSharing === undefined ? {} : { scopedSharing: opts.scopedSharing }),
     ...(opts.partBytes === undefined ? {} : { partBytes: opts.partBytes }),
     ...(opts.simpleUploadBytes === undefined ? {} : { simpleUploadBytes: opts.simpleUploadBytes }),
     ...(opts.maxFileBytes === undefined ? {} : { maxFileBytes: opts.maxFileBytes }),
@@ -95,7 +93,7 @@ export async function buildTestApp(opts: TestAppOptions = {}): Promise<TestApp> 
   const authDeps = {
     db: handle.db,
     pepper: config.tokenPepper,
-    accountTokenTtlMs: config.accountTokenTtlMs,
+    accountTokenTtlMs: 60 * 60 * 1000,
     ...(opts.now === undefined ? {} : { now: opts.now }),
   }
 

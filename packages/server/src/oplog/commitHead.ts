@@ -19,7 +19,11 @@ import type { BaseKnowledge, Decision } from './resolve.js'
  * looked up across the vault, so that a version of another file is told apart
  * from an id the vault has no row for at all.
  */
-export async function loadHead(ctx: Ctx, op: CommitOp): Promise<LoadedHead | null> {
+export async function loadHead(
+  ctx: Ctx,
+  op: CommitOp,
+  includeIncoming = true
+): Promise<LoadedHead | null> {
   const file = op.op === 'create' ? await fileAtPath(ctx, op.path) : await fileById(ctx, op.file_id)
   if (file === undefined) return null
   if (file.head_version_id === null) {
@@ -65,7 +69,9 @@ export async function loadHead(ctx: Ctx, op: CommitOp): Promise<LoadedHead | nul
     baseSha: own?.blob_sha ?? null,
     basePath: own?.path ?? null,
     ...(own === undefined ? {} : { baseSize: own.size, baseMtime: own.mtime }),
-    ...((op.op === 'create' || op.op === 'modify') && op.sha !== headVersion.blob_sha
+    ...(includeIncoming &&
+    (op.op === 'create' || op.op === 'modify') &&
+    op.sha !== headVersion.blob_sha
       ? await incomingSeen(ctx, file.id, op.sha, mergeBase(op, baseIsKnown))
       : { incoming: null }),
   }
@@ -231,11 +237,24 @@ async function treeCollision(ctx: Ctx, path: string, except: string | null): Pro
       ])
     )
   if (except !== null) query = query.where('id', '!=', except)
-  return (await query.executeTakeFirst()) !== undefined
+  if (await query.executeTakeFirst()) return true
+  const dirs = await ctx.trx
+    .selectFrom('directories')
+    .select('path')
+    .where('space_id', '=', ctx.vaultId)
+    .where('deleted_at', 'is', null)
+    .execute()
+  return dirs.some(
+    (dir) =>
+      dir.path !== '/' &&
+      (caseKey(dir.path) === key ||
+        caseKey(dir.path).startsWith(key + '/') ||
+        (key.startsWith(caseKey(dir.path) + '/') && !path.startsWith(dir.path + '/')))
+  )
 }
 
 /** A `nextFreeName` predicate including implicit folders as well as file paths. */
-export async function takenPredicate(ctx: Ctx, _path: string): Promise<(key: string) => boolean> {
+export async function takenPredicate(ctx: Ctx, path: string): Promise<(key: string) => boolean> {
   const rows = await ctx.trx
     .selectFrom('files')
     .select('path_ci')
@@ -243,8 +262,26 @@ export async function takenPredicate(ctx: Ctx, _path: string): Promise<(key: str
     .where('deleted_at', 'is', null)
     .execute()
   const keys = rows.map((row) => row.path_ci)
+  const dirs = await ctx.trx
+    .selectFrom('directories')
+    .select('path')
+    .where('space_id', '=', ctx.vaultId)
+    .where('deleted_at', 'is', null)
+    .execute()
+  const directoryKeys = dirs.filter((dir) => dir.path !== '/').map((dir) => caseKey(dir.path))
+  // Sibling-name generation cannot repair the spelling of a parent directory.
+  if (
+    dirs.some(
+      (dir) =>
+        dir.path !== '/' &&
+        caseKey(path).startsWith(caseKey(dir.path) + '/') &&
+        !path.startsWith(dir.path + '/')
+    )
+  )
+    throw new AbeleError('path_taken', 'directory ancestry has a different canonical spelling')
   return (key) =>
-    keys.some((live) => live === key || live.startsWith(key + '/') || key.startsWith(live + '/'))
+    keys.some((live) => live === key || live.startsWith(key + '/') || key.startsWith(live + '/')) ||
+    directoryKeys.some((dir) => dir === key || dir.startsWith(key + '/'))
 }
 
 /* ── Small helpers ─────────────────────────────────────────────────────── */

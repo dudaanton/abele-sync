@@ -43,7 +43,8 @@ export class Replay extends Error {
 export async function replayIfAnswered(
   trx: Transaction<Database>,
   keyed: KeyedRun,
-  _at: Date
+  _at: Date,
+  vaultId?: string
 ): Promise<void> {
   const stored = await trx
     .selectFrom('idempotency')
@@ -57,6 +58,41 @@ export async function replayIfAnswered(
       'idempotency_mismatch',
       'that idempotency key was used for a different request'
     )
+  }
+  if (vaultId !== undefined && stored.status === 200) {
+    const response = JSON.parse(stored.response) as {
+      results?: Array<{
+        status: string
+        file_id: string
+        version_id: string
+        conflict_file_id?: string
+        conflict_version_id?: string
+      }>
+    }
+    for (const result of response.results ?? []) {
+      if (result.status !== 'conflict') continue
+      const files = await trx
+        .selectFrom('files')
+        .select(['id', 'head_version_id', 'deleted_at'])
+        .where('vault_id', '=', vaultId)
+        .where('id', 'in', [result.file_id, result.conflict_file_id!])
+        .execute()
+      if (
+        !files.some(
+          (f) =>
+            f.id === result.file_id &&
+            f.head_version_id === result.version_id &&
+            f.deleted_at === null
+        ) ||
+        !files.some(
+          (f) =>
+            f.id === result.conflict_file_id &&
+            f.head_version_id === result.conflict_version_id &&
+            f.deleted_at === null
+        )
+      )
+        throw new AbeleError('not_found', 'recorded conflict outcome unavailable')
+    }
   }
   throw new Replay(stored.status, stored.response)
 }

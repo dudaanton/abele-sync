@@ -45,6 +45,17 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   return { ...actual, default: { ...actual, lstat, utimes }, lstat, utimes }
 })
 
+it('token directory ports refuse a symlink selector and preserve nonempty folders', async () => {
+  const fs = new NodeFileSystem(root, { preserveEmptyDirectories: true })
+  await symlink(outside, join(root, 'Linked'))
+  await expect(fs.mkdir('Linked')).rejects.toMatchObject({ code: 'conflict' })
+  await fs.mkdir('Real')
+  await writeFile(join(root, 'Real', 'keep.md'), 'local work')
+  await expect(fs.removeDirectory('Real')).rejects.toThrow()
+  expect(await readFile(join(root, 'Real', 'keep.md'), 'utf8')).toBe('local work')
+  expect(await readFile(join(outside, 'keep.md'), 'utf8')).toBe('outside')
+})
+
 const bytes = (s: string) => encodeText(s)
 
 let root: string

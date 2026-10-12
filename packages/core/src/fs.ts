@@ -1,5 +1,7 @@
 import { caseKey } from '@abele/sync-protocol'
 import { EngineError } from './errors.js'
+import type { StreamingFileSystem } from './streaming.js'
+import { fingerprintSource } from './streaming.js'
 
 /** A regular file as the host sees it. `path` is on-disk form, `/`-separated and vault-relative. */
 export interface FileInfo {
@@ -12,9 +14,15 @@ export interface FileInfo {
  * The vault as the engine touches it. The plugin implements this over Obsidian's adapter,
  * the daemon over Node's `fs`; the engine and its tests use `MemoryFileSystem`.
  */
-export interface FileSystem {
+export interface FileSystem extends Partial<StreamingFileSystem> {
   /** Every regular file. Symlinks are skipped, directories are never yielded. */
   list(): AsyncIterable<FileInfo>
+  /** Stable local directory identities let a rename preserve its server selector. */
+  listDirectories?(): AsyncIterable<{ path: string; identity: string; mtime: number }>
+  mkdir?(path: string): Promise<void>
+  moveDirectory?(from: string, to: string): Promise<void>
+  /** Removes only an empty directory: untracked/local bytes are never swept recursively. */
+  removeDirectory?(path: string): Promise<void>
   /** Throws `EngineError('io')` if the path is missing. */
   read(path: string): Promise<Uint8Array>
   /** Creates parent directories, writes through a temp file and rename, then sets `mtime`. */
@@ -32,6 +40,18 @@ export interface FileSystem {
   stat(path: string): Promise<FileInfo | null>
   /** Optional. Debounced batches of on-disk paths; the returned function stops watching. */
   watch?(cb: (paths: string[]) => void): () => void
+}
+
+/** Binary identity checks prefer bounded host I/O, including recovery checks. */
+export async function fingerprintFile(
+  fs: FileSystem,
+  path: string,
+  hash: (bytes: Uint8Array) => Promise<string>
+): Promise<{ size: number; sha: string }> {
+  if (fs.fingerprint) return fs.fingerprint(path)
+  if (fs.openRead) return fingerprintSource(await fs.openRead(path))
+  const bytes = await fs.read(path)
+  return { size: bytes.length, sha: await hash(bytes) }
 }
 
 interface Entry {

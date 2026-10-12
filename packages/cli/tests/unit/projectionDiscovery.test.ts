@@ -15,12 +15,14 @@ vi.mock('node:fs', async (load) => ({ ...(await load<typeof import('node:fs')>()
 vi.mock('node:fs/promises', async (load) => ({
   ...(await load<typeof import('node:fs/promises')>()),
 }))
+import { tokenFor } from '../helpers/token.js'
+
 let dir: string
 const cfg = {
   serverUrl: 'https://synthetic.example.test',
   vaultId: 'vault',
   deviceId: 'device',
-  deviceToken: 'absd_synthetic',
+  deviceToken: tokenFor('https://synthetic.example.test'),
   deviceName: 'test',
   selective: selectiveDefaults(),
 }

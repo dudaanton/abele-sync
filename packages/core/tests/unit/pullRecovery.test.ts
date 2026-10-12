@@ -4,6 +4,7 @@ import {
   MemoryStateStore,
   recoverPendingPullWrites,
   sha256,
+  decodePullIntent,
 } from '../../src/index.js'
 
 async function fixture() {
@@ -37,6 +38,14 @@ async function fixture() {
   return { fs, state, intent, base }
 }
 describe('normal-pull recovery before engine activation', () => {
+  it('keeps host stage ids opaque while rejecting empty or unbounded ids', async () => {
+    const { intent } = await fixture()
+    expect(
+      decodePullIntent(JSON.stringify({ ...intent, stageId: 'plugin-stage-123' }), 'file').stageId
+    ).toBe('plugin-stage-123')
+    for (const stageId of ['', 'a'.repeat(129), 12])
+      expect(() => decodePullIntent(JSON.stringify({ ...intent, stageId }), 'file')).toThrow()
+  })
   it('settles only a recorded exact-version installation and its unchanged pre-write ledger base, without filesystem mutation', async () => {
     const f = await fixture(),
       write = vi.spyOn(f.fs, 'writeAtomic'),

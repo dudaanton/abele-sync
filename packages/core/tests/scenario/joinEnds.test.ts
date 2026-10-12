@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import type { CommitOp } from '@abele/sync-protocol'
-import { joinFinished, selectiveDefaults, type VaultClient } from '../../src/index.js'
+import { joinFinished, selectiveDefaults, type VaultClient } from '../legacy/index.js'
 import { BASE_URL, serverHarness, TEST_PASSWORD, type Harness } from '../helpers/harness.js'
 import { Device } from '../helpers/device.js'
 import { create, seed } from '../helpers/seed.js'
@@ -76,10 +76,14 @@ async function lateRace(j: Joining): Promise<void> {
   await j.joiner.write('Late.md', 'local late\n', 200)
   j.sent.length = 0
   await j.joiner.sync()
+  expect(await j.joiner.text('Late.md')).toBe('server late\n')
+  const copies = j.joiner.paths().filter((p) => p.startsWith('Late (Conflicted copy'))
+  expect(copies).toHaveLength(1)
+  expect(await j.joiner.text(copies[0]!)).toBe('local late\n')
 }
 
 describe('a join that leaves something held for good', () => {
-  it('ends anyway: joinFinished says so, and a later race is merged, not preferred', async () => {
+  it('ends anyway: joinFinished says so, and a later race conflicts, not preferred', async () => {
     const j = await joining('join-ends-quota', 'mine')
     await seed(j.seeder, [await create(j.seeder, 'q.png', bytes(10, 's'), 100)])
     await j.settings({ quota_bytes: 60, account_password: TEST_PASSWORD })
@@ -95,7 +99,7 @@ describe('a join that leaves something held for good', () => {
     const late = j.sent.filter((op) => op.op === 'create' && op.path === 'Late.md')
     expect(late).toHaveLength(1)
     expect(late[0]).not.toHaveProperty('prefer')
-    expect(await j.joiner.text('Late.md')).toBe('server late\nlocal late\n')
+    expect(await j.joiner.text('Late.md')).toBe('server late\n')
   })
 })
 
@@ -114,7 +118,7 @@ describe('this device’s cap through a join', () => {
     expect(j.sent.filter((op) => op.op === 'create' && op.path === 'big.png')).toEqual([])
 
     await lateRace(j)
-    expect(await j.joiner.text('Late.md')).toBe('server late\nlocal late\n')
+    expect(await j.joiner.text('Late.md')).toBe('server late\n')
   })
 
   for (const prefer of ['theirs', undefined] as const) {

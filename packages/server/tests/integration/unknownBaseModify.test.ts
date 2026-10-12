@@ -4,7 +4,7 @@ import { commit, create, putBlob, shaOf } from '../helpers/ops.js'
 import { hasPgTestDb } from '../helpers/tempDb.js'
 import { mergeOp } from '../../src/oplog/commitWrite.js'
 import { loadHead } from '../../src/oplog/commitHead.js'
-import { getVaultSettings } from '../../src/vault/vaults.js'
+import { getVaultSettings } from '../legacy/src/vault/vaults.js'
 import type { Ctx } from '../../src/oplog/commitCtx.js'
 
 for (const dialect of ['sqlite', 'pg'] as const) {

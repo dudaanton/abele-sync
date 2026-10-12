@@ -1,5 +1,5 @@
 import { expect } from 'vitest'
-import type { VaultClient } from '../../src/index.js'
+import type { VaultClient } from '../legacy/index.js'
 import type { Harness } from './harness.js'
 import { Device } from './device.js'
 import { create, seed } from './seed.js'

@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { sql, type Kysely } from 'kysely'
 import { createDb, type Db, type Dialect } from '../../src/db/connect.js'
-import { runMigrations } from '../../src/db/migrate.js'
+import { runRetainedEngineMigrations as runMigrations } from './retainedEngineMigrations.js'
 import type { Database } from '../../src/db/schema.js'
 
 /** How a fresh database is brought up; a test of the migrations themselves stops short. */

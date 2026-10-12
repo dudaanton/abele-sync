@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import type { VaultClient } from '../../src/index.js'
+import type { VaultClient } from '../legacy/index.js'
 import { serverHarness, type Harness } from '../helpers/harness.js'
 import { Device } from '../helpers/device.js'
 import { blob, create, seed } from '../helpers/seed.js'

@@ -1,64 +1,53 @@
 import { PostgresAdapter, sql, type Kysely } from 'kysely'
-import { Migrator, type Migration, type MigrationProvider } from 'kysely/migration'
+import { Migrator, type MigrationProvider } from 'kysely/migration'
 import type { Database } from './schema.js'
-import {
-  assertMigrationAncestry,
-  assertScopedSchemaShape,
-  readMigrationJournal,
-} from './upgradePreflight.js'
-import * as init from './migrations/001_init.js'
-import * as versionsVaultSha from './migrations/002_versions_vault_sha.js'
-import * as wideNumbers from './migrations/003_wide_numbers.js'
-import * as devicesEnrolledBy from './migrations/004_devices_enrolled_by.js'
-import * as blobUploads from './migrations/005_blob_uploads.js'
-import * as uploadOwners from './migrations/006_upload_owners.js'
-import * as versionRetentionClass from './migrations/007_version_retention_class.js'
-import * as scopedAuthority from './migrations/008_scoped_authority.js'
-import * as scopedViews from './migrations/009_scoped_views.js'
-import * as versionPaths from './migrations/010_version_path_keys.js'
+import * as engine from './migrations/001_engine.js'
+import * as tokens from './migrations/011_token_access.js'
+import * as sync from './migrations/012_sync_access.js'
+import * as groups from './migrations/013_groups.js'
+import * as conflictDivergences from './migrations/011_conflict_divergences.js'
 
-/** Migrations are listed in code so the build never discovers files from disk. */
-const migrations: Record<string, Migration> = {
-  '001_init': { up: init.up, down: init.down },
-  '002_versions_vault_sha': { up: versionsVaultSha.up, down: versionsVaultSha.down },
-  '003_wide_numbers': { up: wideNumbers.up, down: wideNumbers.down },
-  '004_devices_enrolled_by': { up: devicesEnrolledBy.up, down: devicesEnrolledBy.down },
-  '005_blob_uploads': { up: blobUploads.up, down: blobUploads.down },
-  '006_upload_owners': { up: uploadOwners.up, down: uploadOwners.down },
-  '007_version_retention_class': { up: versionRetentionClass.up, down: versionRetentionClass.down },
-  '008_scoped_authority': { up: scopedAuthority.up, down: scopedAuthority.down },
-  '009_scoped_views': { up: scopedViews.up, down: scopedViews.down },
-  '010_version_path_keys': { up: versionPaths.up, down: versionPaths.down },
-}
-
-export const migrationChain: readonly string[] = Object.freeze(Object.keys(migrations).sort())
-
+/** Fresh-only schema. Nobody has sync data: no conversion or old-client compatibility. */
+export const migrationChain = Object.freeze([
+  '001_engine',
+  '002_token_access',
+  '003_sync_access',
+  '004_conflict_divergences',
+  '005_groups',
+])
 const provider: MigrationProvider = {
-  getMigrations: () => Promise.resolve(migrations),
+  getMigrations: async () => ({
+    '001_engine': { up: engine.up },
+    '002_token_access': { up: tokens.up },
+    '003_sync_access': { up: sync.up },
+    '004_conflict_divergences': { up: conflictDivergences.up, down: conflictDivergences.down },
+    '005_groups': { up: groups.up },
+  }),
 }
-
-/**
- * Bring the database up to the latest migration. Safe to call on an already-migrated database.
- *
- * On Postgres, Kysely's own bookkeeping tables are pinned to the schema the connection works
- * in, `current_schema()` unless `schema` names one. Left to itself Kysely asks whether they
- * exist in *any* schema, so a database that holds another Kysely-migrated schema — a second
- * app, an old test run — would have it find that one's tables and never create its own.
- */
 export async function runMigrations(
   db: Kysely<Database>,
   schema?: string,
   target?: string
 ): Promise<void> {
   const own = schema ?? (await currentSchema(db))
-  const journal = await readMigrationJournal(db, own)
-  assertMigrationAncestry(journal, migrationChain)
-  await assertScopedSchemaShape(db, own, journal)
-  if (target !== undefined) {
-    const position = migrationChain.indexOf(target)
-    if (position < 0) throw new Error('unknown migration target')
-    if (position + 1 < journal.length) throw new Error('destructive migration downgrade is refused')
-  }
+  const pg = own !== null
+  const old = pg
+    ? (
+        await sql`select 1 from information_schema.tables where table_schema = ${own} and table_name in ('accounts', 'devices', 'scope_grants')`.execute(
+          db
+        )
+      ).rows
+    : (
+        await sql`select 1 from sqlite_master where type = 'table' and name in ('accounts', 'devices', 'scope_grants')`.execute(
+          db
+        )
+      ).rows
+  if (old.length > 0)
+    throw new Error(
+      'token sync requires a fresh database; wipe the unused test stand, no data conversion is supported'
+    )
+  if (target !== undefined && !migrationChain.includes(target))
+    throw new Error('unknown fresh-schema target')
   const migrator = new Migrator({
     db,
     provider,
@@ -66,19 +55,40 @@ export async function runMigrations(
   })
   const { error, results } =
     target === undefined ? await migrator.migrateToLatest() : await migrator.migrateTo(target)
-  const failed = results?.find((r) => r.status === 'Error')
-  if (failed) throw new Error(`migration ${failed.migrationName} failed`, { cause: error })
-  if (error) throw error instanceof Error ? error : new Error(String(error))
+  const failed = results?.find((result) => result.status === 'Error')
+  if (failed !== undefined)
+    throw new Error(`fresh schema ${failed.migrationName} failed`, { cause: error })
+  if (error) throw error
+  if (target === undefined || target === '004_conflict_divergences') {
+    const tables = await db.introspection.getTables()
+    const identity = tables.find(
+      (table) => table.name === 'conflict_divergences' && (!pg || table.schema === own)
+    )
+    if (
+      !identity ||
+      ![
+        'divergence_key',
+        'vault_id',
+        'original_file_id',
+        'base_identity',
+        'incoming_sha',
+        'create_path_ci',
+        'conflict_file_id',
+        'conflict_version_id',
+        'first_head_version_id',
+        'chosen_path',
+        'created_at',
+        'disposition',
+      ].every((name) => identity.columns.some((column) => column.name === name))
+    )
+      throw new Error('missing or incomplete conflict identity schema')
+  }
 }
-
-/** The schema a Postgres connection creates tables in; null on SQLite, which has none. */
 export async function currentSchema(db: Kysely<Database>): Promise<string | null> {
   if (!(db.getExecutor().adapter instanceof PostgresAdapter)) return null
-  const { rows } = await sql<{ schema: string | null }>`select current_schema() as schema`.execute(
-    db
-  )
-  const found = rows[0]?.schema ?? null
-  // No schema on the search path that exists: nothing Kysely could create its tables in either.
+  const found =
+    (await sql<{ schema: string | null }>`select current_schema() as schema`.execute(db)).rows[0]
+      ?.schema ?? null
   if (found === null) throw new Error('the Postgres search_path names no schema that exists')
   return found
 }

@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { createUploadManager } from '../../src/blobs/uploads.js'
 import { loadConfig } from '../../src/config.js'
-import { runRetention } from '../../src/history/retention.js'
+import { runRetainedEngineRetention as runRetention } from '../helpers/retainedRetention.js'
 import { buildTestApp, TEST_TOKEN_PEPPER, type TestApp } from '../helpers/testApp.js'
 import { SimDevice, converge } from './sim.js'
 

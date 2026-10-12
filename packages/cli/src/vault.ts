@@ -13,7 +13,7 @@ import {
   IgnoreRules,
   isExcluded,
   isHidden,
-  SyncClient,
+  V2EngineClient,
   SyncEngine,
   type FileSystem,
   type HeldDelete,
@@ -22,7 +22,6 @@ import {
   type SelectiveSettings,
   type SyncFailure,
   type SyncReport,
-  type VaultClient,
   type RecoveryBarrier,
 } from '@abele/sync-core'
 import {
@@ -30,6 +29,7 @@ import {
   normalizeServerUrl,
   serverUrlProblem,
   validatePath,
+  decodeAccessToken,
 } from '@abele/sync-protocol'
 import { readConfig, stateFolder, type DaemonConfig } from './config.js'
 import { acquireLock, type Lock } from './lock.js'
@@ -78,7 +78,7 @@ export interface OpenVault {
   /** The disk as the engine sees it: a file still being written is left for the next round. */
   fs: SettlingFileSystem
   state: SqliteStateStore
-  client: VaultClient
+  client: V2EngineClient
   /** Hidden paths, the ignore file and the files still being written, as one. */
   ignore: PathMatcher
   /** `.abele-sync-ignore` as it reads, or null when the vault has none: part of the scope key. */
@@ -98,13 +98,14 @@ export function requireConfig(dir: string): DaemonConfig {
   const cfg = readConfig(dir)
   if (cfg === null) {
     assertLocalSafety(dir)
-    throw new UsageError(`${dir} is not set up: run \`abele-sync init --dir ${dir} …\` first`)
+    throw new UsageError(`${dir} is not set up: run \`abele-sync connect --dir ${dir} …\` first`)
   }
   return cfg
 }
 
 /** Opens everything a command works through. The caller closes it, failure or not. */
 const publicationRecovery = new WeakMap<OpenVault, (disk: FileSystem) => Promise<void>>()
+const pullRecoveryClients = new WeakMap<OpenVault, ReturnType<typeof vaultClient>>()
 const inspectedVaults = new WeakSet<OpenVault>()
 
 /** Async command composition: one bounded discovery pass before any ledger bootstrap. */
@@ -139,6 +140,7 @@ export function openVault(dir: string, ctx: CommandContext, held?: () => boolean
   // Hidden folders are not walked or watched: the filter below would pass over all of it.
   const disk = new NodeFileSystem(dir, {
     skipHidden: true,
+    preserveEmptyDirectories: true,
     effectGuard: () => {
       if (!held) throw new EngineError('lost', 'filesystem mutation requires an owned vault lock')
       fence.assertReady()
@@ -166,10 +168,13 @@ export function openVault(dir: string, ctx: CommandContext, held?: () => boolean
   try {
     fence.attach(state, stateDbFile(dir))
     attached = true
+    const bound = state.getMeta('token-connection')
+    if (bound !== null && bound !== createHash('sha256').update(cfg.deviceToken).digest('hex'))
+      throw new UsageError('connection ledger binding mismatch')
     const owner = statedVault(state)
     if (owner !== null && owner !== cfg.vaultId) {
       throw new UsageError(
-        'state.db describes another vault; run init --force to reconcile the configuration before syncing'
+        'state.db describes another space; preserve this ledger and connect in a fresh directory'
       )
     }
     const vault: OpenVault = {
@@ -199,6 +204,7 @@ export function openVault(dir: string, ctx: CommandContext, held?: () => boolean
         return fence.track(() => ctx.fetch(input, init))
       },
     })
+    pullRecoveryClients.set(vault, replay)
     publicationRecovery.set(vault, async (disk) => {
       if (await state.getJournal()) {
         const holds = new DeleteHolds(state),
@@ -253,7 +259,8 @@ export async function recoverVault(vault: OpenVault, held: () => boolean): Promi
   const pullIds = vault.state
     .metadataKeys('pull-write:')
     .map((key) => key.slice('pull-write:'.length))
-  await recoverPendingPullWrites(recoveryDisk, vault.state, pullIds)
+  await recoverPendingPullWrites(recoveryDisk, vault.state, pullIds, pullRecoveryClients.get(vault))
+  pullRecoveryClients.delete(vault)
   await publicationRecovery.get(vault)?.(recoveryDisk)
   publicationRecovery.delete(vault)
   assertLocalSafety(vault.dir)
@@ -272,33 +279,6 @@ export function requireServerUrl(url: string): string {
   const normal = normalizeServerUrl(url)
   if (normal === null) throw new UsageError(`${url}: the address cannot be read`)
   return normal
-}
-
-/** A client on this device's token, for what it asks about itself. Nothing here ever prints it. */
-export function deviceClient(cfg: DaemonConfig, ctx: CommandContext): SyncClient {
-  return new SyncClient({
-    baseUrl: requireServerUrl(cfg.serverUrl),
-    fetch: ctx.fetch,
-    WebSocket: ctx.WebSocket,
-    token: cfg.deviceToken,
-    userAgent: 'abele-sync-daemon',
-  })
-}
-
-/**
- * A client for telling the server this device is leaving, which gives up after
- * `ctx.revokeTimeoutMs`. A give-up is a fetch that rejects, so it reads as `offline`.
- */
-export function leavingClient(cfg: DaemonConfig, ctx: CommandContext): SyncClient {
-  return deviceClient(cfg, { ...ctx, fetch: withTimeout(ctx.fetch, ctx.revokeTimeoutMs) })
-}
-
-function withTimeout(fetchImpl: typeof fetch, ms: number): typeof fetch {
-  return (input, init) => {
-    const timeout = AbortSignal.timeout(ms)
-    const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
-    return fetchImpl(input, { ...init, signal })
-  }
 }
 
 /**
@@ -323,8 +303,15 @@ export async function lockVault(
 }
 
 /** A client on this vault's device token. */
-export function vaultClient(cfg: DaemonConfig, ctx: CommandContext): VaultClient {
-  return deviceClient(cfg, ctx).forVault(cfg.vaultId)
+export function vaultClient(cfg: DaemonConfig, ctx: CommandContext): V2EngineClient {
+  requireServerUrl(cfg.serverUrl)
+  const encoded = decodeAccessToken(cfg.deviceToken)
+  if (encoded.address !== cfg.serverUrl) throw new UsageError('stored token address mismatch')
+  return new V2EngineClient(cfg.deviceToken, {
+    fetch: ctx.fetch,
+    WebSocket: ctx.WebSocket,
+    userAgent: 'abele-sync-daemon',
+  })
 }
 
 /** What a command hands the engine besides the vault: its clock, its log, and its hooks. */
@@ -363,8 +350,7 @@ export function buildEngine(
 
 /** What to do about a token the server no longer takes, in the words every command uses. */
 export const REVOKED_HINT =
-  'the device was revoked or the token is invalid; remove `.abele-sync/config.json` ' +
-  '(or run `abele-sync init --force`) and enrol again'
+  'the token was revoked or is invalid; disconnect locally and connect with a new token'
 
 /** Whether a failure is the server refusing this device's token. */
 export const isUnauthorized = (error: unknown): boolean => classifyFailure(error) === 'unauthorized'
@@ -385,6 +371,11 @@ export const lastSummary = (vault: OpenVault): string | null =>
 
 /** Files which vault this state describes, so a later `init --force` knows whether to keep it. */
 export function rememberVault(vault: OpenVault): void {
+  const binding = createHash('sha256').update(vault.cfg.deviceToken).digest('hex')
+  const previous = vault.state.getMeta('token-connection')
+  if (previous !== null && previous !== binding)
+    throw new UsageError('connection ledger binding mismatch')
+  vault.state.setMeta('token-connection', binding)
   vault.state.setMeta(VAULT_KEY, vault.cfg.vaultId)
 }
 
@@ -454,7 +445,7 @@ export function wirePath(raw: string): string {
  * deleted can still be read.
  */
 export async function fileIdFor(
-  client: VaultClient,
+  client: V2EngineClient,
   state: SqliteStateStore,
   path: string
 ): Promise<string> {

@@ -1,6 +1,9 @@
 export const CORE_VERSION = 1
 
-export * from './client.js'
+export * from './accessClient.js'
+export * from './engineClient.js'
+export * from './v2Client.js'
+export { DEFAULT_SIMPLE_UPLOAD_BYTES, type ClientOptions } from './http.js'
 export * from './defer.js'
 export * from './deletes.js'
 export * from './echo.js'
@@ -9,6 +12,7 @@ export * from './exclusiveOperations.js'
 export * from './errors.js'
 export * from './fs.js'
 export * from './hash.js'
+export * from './streaming.js'
 export * from './ignore.js'
 export * from './puller.js'
 export * from './pullRecovery.js'
@@ -21,13 +25,3 @@ export * from './external/records.js'
 export * from './external/state.js'
 export * from './external/recovery.js'
 export * from './external/sqliteState.js'
-export * from './ownerHooks.js'
-export {
-  PersonalNoteEvents,
-  type PersonalNoteDelivery,
-  type PersonalNoteHook,
-} from './personalNoteEvents.js'
-export * from './scopedConnection.js'
-export * from './scopedPull.js'
-export * from './scopedPush.js'
-export * from './scopedScan.js'

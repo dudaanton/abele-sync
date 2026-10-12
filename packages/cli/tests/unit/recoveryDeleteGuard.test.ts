@@ -1,10 +1,11 @@
 import { mkdir, mkdtemp, rm, unlink } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { expect, it, vi } from 'vitest'
-import { readHeldDeletes, selectiveDefaults, SyncClient } from '@abele/sync-core'
+import { readHeldDeletes, selectiveDefaults, V2EngineClient } from '@abele/sync-core'
+import { createHash } from 'node:crypto'
 import type { CommitOpResult } from '@abele/sync-protocol'
-import { buildTestApp } from '@abele/sync-server/tests/helpers/testApp.js'
-import { commit, create, putBlob } from '@abele/sync-server/tests/helpers/ops.js'
+import { v2Server } from '@abele/sync-server/tests/helpers/v2Server.js'
+import { createUser } from '@abele/sync-server/src/access/tokens.js'
 import { writeConfig, stateFolder } from '../../src/config.js'
 import { NodeFileSystem } from '../../src/nodeFs.js'
 import { SqliteStateStore } from '../../src/sqliteState.js'
@@ -14,32 +15,39 @@ it('BUG: nine recovered deletes plus one new delete in a 40-file vault trip the 
   const scratch = resolve(import.meta.dirname, '../../../../.scratch')
   await mkdir(scratch, { recursive: true })
   const dir = await mkdtemp(join(scratch, 'replay-delete-')),
-    t = await buildTestApp()
+    t = await v2Server()
   vi.spyOn(NodeFileSystem.prototype, 'sizeStable').mockResolvedValue(true)
   let raw: SqliteStateStore | undefined
   try {
-    const owner = await t.account(),
-      vault = (await t.vault(owner.accountToken)).vaultId,
-      device = await t.device(owner.accountToken, vault)
-    await putBlob(t.app, device.deviceToken, 'original')
-    const seeded = await commit(
-      t.app,
-      device.deviceToken,
-      vault,
-      Array.from({ length: 40 }, (_, n) => create(`file-${n}.txt`, 'original'))
+    const root = await createUser(
+      { db: t.db, pepper: t.config.tokenPepper, dialect: 'sqlite' },
+      'Delete recovery',
+      t.address
     )
-    const endpoint = await t.app.listen({ host: '127.0.0.1', port: 0 })
+    const client = new V2EngineClient(root.token, { fetch })
+    const sha = createHash('sha256').update('original').digest('hex')
+    await client.putBlob(sha, new TextEncoder().encode('original'))
+    const seeded = await client.commit(
+      Array.from({ length: 40 }, (_, n) => ({
+        op: 'create' as const,
+        path: `file-${n}.txt`,
+        kind: 'attachment' as const,
+        sha,
+        size: 8,
+        mtime: 1,
+      })),
+      'seed'
+    )
+    const info = await client.connection()
+    const endpoint = t.address
     writeConfig(dir, {
       serverUrl: endpoint,
-      vaultId: vault,
-      deviceId: device.deviceId,
-      deviceToken: device.deviceToken,
+      vaultId: info.space_id,
+      deviceId: info.token_id,
+      deviceToken: root.token,
       deviceName: 'test',
       selective: selectiveDefaults(),
     })
-    const client = new SyncClient({ baseUrl: endpoint, token: device.deviceToken, fetch }).forVault(
-      vault
-    )
     const context = { fetch, env: {}, revokeTimeoutMs: 20, io: { out: () => {}, err: () => {} } }
     expect(await runRun({ dir, once: true }, context)).toBe(0)
     raw = SqliteStateStore.open(join(stateFolder(dir), 'state.db'))

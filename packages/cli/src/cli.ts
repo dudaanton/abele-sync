@@ -1,24 +1,9 @@
 import { Command, CommanderError } from 'commander'
-import {
-  runAgentSetup,
-  runAgentRun,
-  type AgentSetupOptions,
-  type AgentRunOptions,
-} from './commands/agent.js'
 import { runDisconnect, type DisconnectOptions } from './commands/disconnect.js'
-import {
-  runAgentStatus,
-  runAgentHistory,
-  runAgentTrash,
-  runAgentRestore,
-  runAgentDeletes,
-  runAgentDisconnect,
-  type AgentMaintenanceOptions,
-} from './commands/agentMaintenance.js'
 import { runCode, type CodeOptions } from './commands/code.js'
 import { runDeletes, type DeletesOptions } from './commands/deletes.js'
 import { runHistory, type HistoryOptions } from './commands/history.js'
-import { runInit, type InitOptions } from './commands/init.js'
+import { runConnect, type ConnectOptions } from './commands/connect.js'
 import { runRestore, type RestoreOptions } from './commands/restore.js'
 import { runRun, type RunOptions } from './commands/run.js'
 import { runStatus, type StatusOptions } from './commands/status.js'
@@ -100,27 +85,15 @@ function buildProgram(
     })
 
   program
-    .command('init')
-    .description('set this directory up as a vault on a server')
-    .requiredOption('--server <url>', 'where the server lives')
+    .command('connect')
+    .description('connect this directory using one encoded token (QR carries the same token)')
     .requiredOption('--dir <dir>', 'the vault directory')
-    .requiredOption('--email <email>', 'the account to log in as')
     .option(
-      '--password <password>',
-      'its password — other users can read it from ps; prefer ABELE_PASSWORD in the environment'
+      '--token <encoded>',
+      'bearer token; prefer ABELE_TOKEN to keep it out of process arguments'
     )
-    .option('--vault <name>', 'which vault to sync with, or the name of the one to create')
-    .option('--device-name <name>', 'what to call this device; the hostname by default')
-    .option(
-      '--force',
-      'set up again over an existing config, revoking the device it replaces and keeping the state only if the vault is the same'
-    )
-    .option(
-      '--prefer <side>',
-      'where this folder and the vault both hold a file, which one is kept: merge (both, the default), local or server; asked at a terminal when it matters'
-    )
-    .action((opts: InitOptions) => {
-      chosen.run = () => runInit(opts, ctx)
+    .action((opts: ConnectOptions) => {
+      chosen.run = () => runConnect(opts, ctx)
     })
 
   program
@@ -139,12 +112,8 @@ function buildProgram(
 
   program
     .command('disconnect')
-    .description('revoke this device on the server and remove its config; the state stays')
+    .description('disconnect locally, keeping files and state; this does not revoke a shared token')
     .requiredOption('--dir <dir>', 'the vault directory')
-    .option(
-      '--force',
-      'forget the device here even when the server cannot be told; it stays enrolled there'
-    )
     .action((opts: DisconnectOptions) => {
       chosen.run = () => runDisconnect(opts, ctx)
     })
@@ -212,72 +181,6 @@ function buildProgram(
       chosen.run = () => runCode(opts, ctx)
     })
 
-  const agent = program
-    .command('agent')
-    .description('single Agents/ folder-scoped daemon; no personal token or publisher')
-  agent
-    .command('setup')
-    .requiredOption('--server <url>', 'scoped issuer')
-    .requiredOption('--dir <dir>', 'fresh dedicated vault root')
-    .requiredOption('--vault <id>', 'remote vault identity')
-    .requiredOption('--grant <id>', 'folder grant identity')
-    .requiredOption('--principal <id>', 'machine key identity')
-    .action((opts: AgentSetupOptions) => {
-      chosen.run = () => runAgentSetup(opts, ctx)
-    })
-  agent
-    .command('run')
-    .requiredOption('--dir <dir>', 'dedicated vault root')
-    .option('--once', 'one polling cycle')
-    .option('--interval <seconds>', 'polling interval, at least 5 seconds', '30')
-    .action((opts: AgentRunOptions) => {
-      chosen.run = () => runAgentRun(opts, ctx)
-    })
-  agent
-    .command('status')
-    .description('read a local committed ledger snapshot, including beside a running agent')
-    .requiredOption('--dir <dir>', 'agent vault root')
-    .action((opts: AgentMaintenanceOptions) => {
-      chosen.run = () => runAgentStatus(opts, ctx)
-    })
-  agent
-    .command('history')
-    .argument('<path>', 'received scoped path')
-    .requiredOption('--dir <dir>', 'agent vault root')
-    .option('--cursor <opaque>', 'continue the displayed scoped history page')
-    .action((path: string, opts: AgentMaintenanceOptions) => {
-      chosen.run = () => runAgentHistory(path, opts, ctx)
-    })
-  agent
-    .command('trash')
-    .requiredOption('--dir <dir>', 'agent vault root')
-    .option('--cursor <opaque>', 'continue the displayed scoped trash page')
-    .action((opts: AgentMaintenanceOptions) => {
-      chosen.run = () => runAgentTrash(opts, ctx)
-    })
-  agent
-    .command('restore')
-    .argument('<path>', 'received or scoped-trash path')
-    .requiredOption('--dir <dir>', 'agent vault root')
-    .requiredOption('--version <id>', 'exact authorized displayed version')
-    .action((path: string, opts: AgentMaintenanceOptions) => {
-      chosen.run = () => runAgentRestore(path, opts, ctx)
-    })
-  agent
-    .command('deletes')
-    .requiredOption('--dir <dir>', 'agent vault root')
-    .option('--confirm', 'send the exact displayed missing-file set')
-    .option('--expect <fingerprint>', 'displayed delete-set fingerprint')
-    .action((opts: AgentMaintenanceOptions) => {
-      chosen.run = () => runAgentDeletes(opts, ctx)
-    })
-  agent
-    .command('disconnect')
-    .requiredOption('--dir <dir>', 'agent vault root')
-    .option('--force', 'forget locally if self-revoke is unreachable; retain data/state')
-    .action((opts: AgentMaintenanceOptions) => {
-      chosen.run = () => runAgentDisconnect(opts, ctx)
-    })
   return program
 }
 

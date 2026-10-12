@@ -8,9 +8,7 @@ import { SqliteStateStore } from '../../src/sqliteState.js'
 import { stateDbFile } from '../../src/vault.js'
 import {
   cleanupFolders,
-  EMAIL,
   manifestPaths,
-  PASSWORD,
   SETUP_MS,
   syncOnce,
   vaultPair,
@@ -28,7 +26,6 @@ let server: SpawnedServer
 
 beforeAll(async () => {
   server = await spawnServer()
-  await server.createAccount(EMAIL, PASSWORD)
 }, SETUP_MS)
 
 afterAll(async () => {
@@ -90,7 +87,7 @@ describe('a daemon whose lock is taken over mid-sync', () => {
 
     const run = await daemonLosing(
       a,
-      (method, url) => method === 'GET' && url.includes('/v1/blobs/')
+      (method, url) => method === 'GET' && url.includes('/v2/files/') && url.includes('/content')
     )
     expect(run.tookOver).toBe(true)
     expect(run.code).toBe(3)
@@ -107,7 +104,7 @@ describe('a daemon whose lock is taken over mid-sync', () => {
 
     const run = await daemonLosing(
       a,
-      (method, url) => method === 'PUT' && url.includes('/v1/blobs/')
+      (method, url) => method === 'PUT' && url.includes('/v2/uploads/')
     )
     expect(run.tookOver).toBe(true)
     expect(run.code).toBe(3)
@@ -122,7 +119,7 @@ describe('a daemon whose lock is taken over mid-sync', () => {
 
     const run = await daemonLosing(
       a,
-      (method, url) => method === 'GET' && url.includes('/v1/blobs/'),
+      (method, url) => method === 'GET' && url.includes('/v2/files/') && url.includes('/content'),
       ['--once']
     )
     expect(run.tookOver).toBe(true)

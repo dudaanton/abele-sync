@@ -1,11 +1,4 @@
-import type {
-  Actor,
-  CommitOp,
-  MergeInfo,
-  Principal,
-  VaultSettings,
-  VersionOp,
-} from '@abele/sync-protocol'
+import type { Actor, CommitOp, MergeInfo, VaultSettings, VersionOp } from '@abele/sync-protocol'
 import type { Transaction } from 'kysely'
 import type { BlobStore } from '../blobs/store.js'
 import type { Database } from '../db/schema.js'
@@ -28,19 +21,16 @@ export interface Ctx {
   actor: Actor
   settings: VaultSettings
   at: Date
-  writer?: Principal
   configurationDirectories?: readonly string[]
-  /** Scoped output/security check before any admission or payload publication. */
+  /** Token output boundary, applied before versions can become visible. */
   authorizeOutput?: (version: NewVersion, versionId: string) => Promise<void>
-  /** Null means preserve incoming authorized history rather than create a new identity. */
+  /** Null means this candidate cannot be committed as an authorized conflict copy. */
   conflictDestination?: (wanted: string) => Promise<string | null>
+  /** Resolve current scoped visibility, never another principal's historical response. */
+  conflictVisible?: (fileId: string, versionId: string) => Promise<boolean>
   restoreDestination?: (wanted: string) => Promise<string>
-  /** Scoped uploads are consumed by their principal, never by personal vault-wide GC. */
-  scopedWriter?: boolean
-  nativeSponsorId?: string
-  allowGroupConflictCopy?: boolean
-  /** Exact destinations certified before this fenced context starts writing. */
-  authorizedDestinations?: Set<string>
+  /** Consume only the committing token's entitlement, never another token's upload. */
+  consumeUpload?: (sha: string) => Promise<void>
 }
 
 /** `HeadState` plus the head version's seq, which the results that write nothing report. */

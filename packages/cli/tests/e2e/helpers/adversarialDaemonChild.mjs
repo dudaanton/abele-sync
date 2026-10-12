@@ -2,35 +2,6 @@
 import { prepareVault, recoverVault, buildEngine, rememberVault } from '../../../dist/vault.js'
 import { acquireLock } from '../../../dist/lock.js'
 const [dir, cut] = process.argv.slice(2)
-if (cut === 'init-config') {
-  const { runInit } = await import('../../../dist/commands/init.js')
-  await runInit(
-    {
-      dir,
-      server: process.env.ABELE_TEST_SERVER,
-      email: 'pair@example.com',
-      vault: process.env.ABELE_TEST_NEXT_VAULT,
-      force: true,
-      prefer: 'merge',
-    },
-    {
-      env: { ABELE_PASSWORD: 'correct horse battery staple' },
-      fetch: globalThis.fetch,
-      io: {
-        err() {},
-        out(line) {
-          if (line.startsWith('wrote ')) {
-            process.send({ barrier: cut })
-            // Synchronous cut: runInit must not reach settleState after config rename.
-            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)
-          }
-        },
-      },
-      revokeTimeoutMs: 1000,
-    }
-  )
-  throw new Error('init cut was not reached')
-}
 const ctx = {
   io: { out() {}, err() {} },
   env: {},
@@ -58,14 +29,41 @@ function wrap(object, method, where) {
     return result
   }
 }
-if (cut === 'scan') wrap(vault.fs, 'read', 'after')
-if (cut === 'upload') wrap(vault.client, 'putBlob', 'after')
+if (cut === 'scan') wrap(vault.fs, 'fingerprint', 'after')
+if (cut === 'upload') wrap(vault.client, 'putBlobSource', 'after')
+if (cut === 'upload-read' || cut === 'upload-second-pass') {
+  const original = vault.client.putBlobSource.bind(vault.client)
+  vault.client.putBlobSource = async (expected, source, ...rest) => {
+    const read = source.read.bind(source)
+    let passes = 0
+    source.read = async (offset, ...args) => {
+      const bytes = await read(offset, ...args)
+      if (offset === 0) passes++
+      if (passes === (cut === 'upload-read' ? 1 : 2)) await barrier()
+      return bytes
+    }
+    return original(expected, source, ...rest)
+  }
+}
 if (cut === 'commit-before') wrap(vault.client, 'commitRaw', 'before')
 if (cut === 'commit-after') wrap(vault.client, 'commitRaw', 'after')
 if (cut === 'record' || cut === 'pull-ledger') wrap(vault.state, 'put', 'after')
-if (cut === 'pull-write') wrap(vault.fs, 'writeAtomic', 'after')
+// Stop on durable streaming checkpoints, not the bypassed whole-buffer writer.
+if (['pull-append', 'pull-seal', 'pull-write', 'merge-download'].includes(cut)) {
+  for (const method of ['beginAtomicWrite', 'reopenStage']) {
+    const original = vault.fs[method].bind(vault.fs)
+    vault.fs[method] = async (...args) => {
+      const stage = await original(...args)
+      wrap(
+        stage,
+        cut === 'pull-write' ? 'commit' : cut === 'pull-append' ? 'append' : 'seal',
+        'after'
+      )
+      return stage
+    }
+  }
+}
 if (cut === 'pull-cursor') wrap(vault.state, 'setCursor', 'after')
-if (cut === 'merge-download') wrap(vault.client, 'getBlob', 'after')
 if (cut === 'delete-tally') {
   const transaction = vault.state.transaction.bind(vault.state)
   vault.state.transaction = async (fn) => {

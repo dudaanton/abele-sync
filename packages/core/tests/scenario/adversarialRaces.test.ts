@@ -46,9 +46,41 @@ describe('Adversarial: late edits and recovery', () => {
       expect(injected).toBe(true)
       expect(await b.text(target)).toContain('LATE UNSENT EDIT')
       await converge(a, b)
-      expect(await a.text(target)).toContain('LATE UNSENT EDIT')
+      if (kind === 'note' || kind === 'move') {
+        const stem = target.slice(0, -3)
+        const copies = a.paths().filter((p) => p.startsWith(`${stem} (Conflicted copy`))
+        expect(copies).toHaveLength(1)
+        expect(await a.text(copies[0]!)).toBe('LATE UNSENT EDIT\n')
+        expect(await a.text(target)).not.toContain('LATE UNSENT EDIT')
+      } else expect(await a.text(target)).toContain('LATE UNSENT EDIT')
     })
   }
+
+  it('keeps pending Markdown bytes on copy-quota refusal and delivers them after quota is raised', async () => {
+    const a = await t.device('a'),
+      b = await t.device('b')
+    await a.write('note.md', 'base\n')
+    await converge(a, b)
+    const head = 'owner content\n',
+      incoming = 'guest content\n'
+    await a.write('note.md', head)
+    await a.sync()
+    await t.settings(a.deviceToken, { quota_bytes: 20, account_password: TEST_PASSWORD })
+    await b.write('note.md', incoming)
+    const refused = await b.sync()
+    expect(refused.push.rejected.map((r) => r.code)).toEqual(['quota_exceeded'])
+    expect(await b.text('note.md')).toBe(incoming)
+    expect((await b.client.manifest(null)).items).toHaveLength(1)
+    await t.settings(a.deviceToken, { quota_bytes: 100, account_password: TEST_PASSWORD })
+    await b.sync()
+    await converge(a, b)
+    for (const d of [a, b]) {
+      expect(await d.text('note.md')).toBe(head)
+      const copies = d.paths().filter((p) => p.startsWith('note (Conflicted copy'))
+      expect(copies).toHaveLength(1)
+      expect(await d.text(copies[0]!)).toBe(incoming)
+    }
+  })
 
   // Regression B8: a quota refusal must be retried when other files free space.
   it('B8 retries unchanged bytes after another device frees quota', async () => {

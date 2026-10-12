@@ -1,6 +1,7 @@
 import { normalisePath } from '@abele/sync-protocol'
 import type { ExpectedWrites } from './echo.js'
 import type { FileSystem } from './fs.js'
+import { fingerprintFile } from './fs.js'
 import { sha256 } from './hash.js'
 import { after, type Timer } from './wake.js'
 
@@ -72,7 +73,7 @@ export class WatchReports {
   private async shaOf(path: string): Promise<string | null> {
     try {
       if ((await this.ctx.fs.stat(path)) === null) return null
-      return await sha256(await this.ctx.fs.read(path))
+      return (await fingerprintFile(this.ctx.fs, path, sha256)).sha
     } catch {
       return null
     }

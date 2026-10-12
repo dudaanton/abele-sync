@@ -1,6 +1,6 @@
-import type { VaultSettings } from '@abele/sync-protocol'
+import { VaultSettingsSchema, type VaultSettings } from '@abele/sync-protocol'
 import type { Kysely, Transaction } from 'kysely'
-import { sweepIdempotency } from '../api/idempotency.js'
+import { sweepIdempotency } from './receipts.js'
 import { collectUnreferenced, hasWaitingEntitlement } from '../blobs/pending.js'
 import { releaseRef, TOMBSTONE } from '../blobs/refs.js'
 import type { BlobStore } from '../blobs/store.js'
@@ -9,9 +9,6 @@ import type { Dialect } from '../db/connect.js'
 import { readJson } from '../db/json.js'
 import type { Database, RetentionClass } from '../db/schema.js'
 import { withVaultLock } from '../oplog/lock.js'
-import { getVaultSettings } from '../vault/vaults.js'
-import { activeScopedPins } from './scopedPins.js'
-import { cleanupScopedVault, cleanupScopedPartOrphans } from '../scoped/cleanup.js'
 
 /**
  * The nightly sweep: history older than its vault's window goes, the blobs
@@ -39,7 +36,27 @@ export interface RetentionReport {
   idempotency_swept: number
 }
 
+export interface RetentionCatalog {
+  list(db: Kysely<Database>): Promise<Array<{ id: string }>>
+  settings(db: Kysely<Database>, spaceId: string): Promise<VaultSettings>
+}
+const spaceCatalog: RetentionCatalog = {
+  list: (db) => db.selectFrom('spaces').select('id').orderBy('created_at').execute(),
+  async settings(db, spaceId) {
+    const row = await db
+      .selectFrom('spaces')
+      .select('settings')
+      .where('id', '=', spaceId)
+      .executeTakeFirstOrThrow()
+    return VaultSettingsSchema.parse(JSON.parse(row.settings))
+  },
+}
+
 export interface RetentionDeps {
+  /** Portable engine catalog. Production defaults to token spaces; retained regressions inject their fixture catalog. */
+  catalog?: RetentionCatalog
+  /** Test/host-owned actors to retain; undefined uses live access_tokens in the database. */
+  liveReceiptActors?: readonly string[]
   db: Kysely<Database>
   dialect: Dialect
   store: BlobStore
@@ -64,36 +81,20 @@ const DELETE_BATCH = 500
  */
 export async function runRetention(deps: RetentionDeps): Promise<RetentionReport> {
   const now = deps.now()
-  const vaults = await deps.db.selectFrom('vaults').select('id').orderBy('created_at').execute()
+  const catalog = deps.catalog ?? spaceCatalog
+  const vaults = await catalog.list(deps.db)
 
   let removed = 0
   for (const { id } of vaults) {
     try {
-      removed += await withVaultLock(deps.db, deps.dialect, id, (trx) => sweepVault(trx, id, now))
-      if (
-        await deps.db
-          .selectFrom('scope_grants')
-          .select('id')
-          .where('vault_id', '=', id)
-          .limit(1)
-          .executeTakeFirst()
-      ) {
-        let afterGrant: string | undefined
-        do {
-          const cleaned = await cleanupScopedVault(deps, id, { afterGrant })
-          afterGrant = cleaned.nextGrant ?? undefined
-        } while (afterGrant)
-      }
+      removed += await withVaultLock(deps.db, deps.dialect, id, (trx) =>
+        sweepVault(trx, id, now, catalog)
+      )
     } catch (error) {
       console.error(`retention could not sweep vault ${id}:`, error)
     }
   }
 
-  let afterPart = ''
-  do {
-    const cleaned = await cleanupScopedPartOrphans(deps, 1000, afterPart)
-    afterPart = cleaned.next ?? ''
-  } while (afterPart)
   return {
     versions_removed: removed,
     blobs_removed: await collectBlobs(deps, new Date(now.getTime() - BLOB_GRACE_MS)),
@@ -104,15 +105,22 @@ export async function runRetention(deps: RetentionDeps): Promise<RetentionReport
     uploads_swept: await deps.uploads.sweep(new Date(now.getTime() - UPLOAD_GRACE_MS)),
     idempotency_swept: await sweepIdempotency(
       deps.db,
-      new Date(now.getTime() - deps.idempotencyTtlMs)
+      new Date(now.getTime() - deps.idempotencyTtlMs),
+      deps.liveReceiptActors
     ),
   }
 }
 
 /** One vault's history, inside its lock: what may go, goes, and its references are let go. */
-async function sweepVault(trx: Transaction<Database>, vaultId: string, now: Date): Promise<number> {
-  const settings = await getVaultSettings({ db: trx }, vaultId)
-  const pins = await activeScopedPins(trx, vaultId, now)
+async function sweepVault(
+  trx: Transaction<Database>,
+  vaultId: string,
+  now: Date,
+  catalog: RetentionCatalog
+): Promise<number> {
+  const settings = await catalog.settings(trx, vaultId)
+  // No legacy admission/snapshot pins. Unified authorized retention references land with history in stage 4.
+  const pins = new Set<string>()
   const files = await trx
     .selectFrom('files')
     .select(['id', 'head_version_id', 'deleted_at'])

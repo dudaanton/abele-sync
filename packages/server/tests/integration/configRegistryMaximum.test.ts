@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { loadConfig } from '../../src/config.js'
 import {
-  configurationPath,
+  isConfigurationPath,
   registeredConfigurationDirectories,
-} from '../../src/scoped/folderSecurity.js'
-import { buildTestApp } from '../helpers/testApp.js'
-import { commit, create, putBlob } from '../helpers/ops.js'
+} from '../../src/configurationDirectories.js'
+import { createUser } from '../../src/access/tokens.js'
+import { v2Server } from '../helpers/v2Server.js'
+import { V2SyncClient } from '../helpers/v2SyncClient.js'
 import { hasPgTestDb } from '../helpers/tempDb.js'
 
 const extra = Array.from({ length: 16 }, (_, i) => `Config-${i}`)
@@ -14,38 +15,38 @@ const env = {
   ABELE_TOKEN_PEPPER: 'test',
   ABELE_CONFIGURATION_DIRS: JSON.stringify(extra),
 }
-for (const dialect of ['sqlite', 'pg'] as const) {
+for (const dialect of ['sqlite', 'pg'] as const)
   describe.skipIf(dialect === 'pg' && !hasPgTestDb)(
     `maximum configuration registry (${dialect})`,
     () => {
-      it('keeps personal commits working with sixteen extra directories and the built-in .obsidian', async () => {
+      it('keeps root commits working with all registered directories; partial tokens cannot see or write configuration content', async () => {
         const config = loadConfig(env)
         expect(config.configurationDirectories).toHaveLength(17)
-        const t = await buildTestApp({
-          dialect,
+        const server = await v2Server(dialect, {
           configurationDirectories: config.configurationDirectories,
         })
         try {
-          const owner = await t.account(),
-            vault = (await t.vault(owner.accountToken)).vaultId,
-            device = await t.device(owner.accountToken, vault)
-          await putBlob(t.app, device.deviceToken, 'note')
-          const result = (
-            await commit(t.app, device.deviceToken, vault, [create('Agents/note.md', 'note')])
-          ).results[0]
+          const token = await createUser(
+            { db: server.db, pepper: server.config.tokenPepper, dialect },
+            'Owner',
+            server.address
+          )
+          const owner = new V2SyncClient(token.token)
+          const result = await owner.create('Agents/note.md', 'note')
           expect(result.status).toBe('applied')
-          const facts = await t.db
-            .selectFrom('version_security_sources')
-            .selectAll()
-            .where('version_id', '=', result.version_id)
-            .executeTakeFirstOrThrow()
-          expect(facts).toMatchObject({ executable: 0, settings: 0 })
-          for (const root of ['.obsidian', ...extra])
-            expect(
-              configurationPath(`${root}/app.json`, {
-                configurationDirectories: config.configurationDirectories,
-              })
-            ).toBe(true)
+          for (const root of ['.obsidian', ...extra]) {
+            expect(isConfigurationPath(`${root}/app.json`, config.configurationDirectories)).toBe(
+              true
+            )
+            const file = await owner.create(`${root}/app.json`, '{}')
+            expect(file.status).toBe('applied')
+            const dir = (await owner.manifest()).items.find((i) => i.path === root)!
+            const guest = new V2SyncClient((await owner.share(dir.file_id)).token)
+            expect((await guest.manifest()).items).toEqual([])
+            expect((await guest.create(`${root}/private.json`, 'no')).status).toBe('rejected')
+            if (file.status !== 'rejected')
+              await expect(guest.content(file.file_id)).rejects.toMatchObject({ status: 404 })
+          }
           expect(registeredConfigurationDirectories(config.configurationDirectories)).toEqual(
             config.configurationDirectories
           )
@@ -56,9 +57,8 @@ for (const dialect of ['sqlite', 'pg'] as const) {
             })
           ).toThrow(/ABELE_CONFIGURATION_DIRS/)
         } finally {
-          await t.close()
+          await server.close()
         }
       })
     }
   )
-}

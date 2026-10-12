@@ -103,15 +103,15 @@ describe('create.prefer', () => {
     })
   }
 
-  it('theirs finds the joiner’s bytes already kept by an earlier merge, and writes nothing again', async () => {
-    // One device merged these bytes in, the note was cleaned back,
-    // and a copy of that device's folder joins with theirs. Its text must be restorable as itself;
-    // the merge kept it as a version of its own (engine fix 4), so theirs has nothing to add.
+  it('theirs finds the joiner’s bytes already kept by an earlier conflict, and writes nothing again', async () => {
+    // A competing create was delivered in its own identity. Re-submitting that branch with
+    // another preference cannot create another copy or put the same bytes in source history.
     const mine = 'a\nc\nlocal only para\n'
     const { fileId, op } = await race('Merged once.md', 'a\nb\n', mine, [10, 20])
     const merged = await commit(joiner, [op])
-    expect(merged.results[0]).toMatchObject({ status: 'merged' })
-    expect((await history(fileId)).map(([, sha]) => sha)).toContain(shaOf(mine))
+    expect(merged.results[0]).toMatchObject({ status: 'conflict' })
+    const copyId = merged.results[0].conflict_file_id
+    expect((await history(copyId)).map(([, sha]) => sha)).toEqual([shaOf(mine)])
     await putBlob(laptop, 'a\nb\n')
     const cleaned = await commit(laptop, [
       {
@@ -123,9 +123,14 @@ describe('create.prefer', () => {
     ])
 
     const r = await commit(joiner, [{ ...op, prefer: 'theirs' }])
-    expect(r.results[0]).toMatchObject({ status: 'merged', sha: shaOf('a\nb\n') })
+    expect(r.results[0]).toMatchObject({
+      status: 'conflict',
+      sha: shaOf('a\nb\n'),
+      conflict_file_id: copyId,
+    })
     expect(r.head_seq).toBe(cleaned.head_seq)
-    expect((await history(fileId)).filter(([, sha]) => sha === shaOf(mine))).toHaveLength(1)
+    expect((await history(copyId)).filter(([, sha]) => sha === shaOf(mine))).toHaveLength(1)
+    expect((await history(fileId)).filter(([, sha]) => sha === shaOf(mine))).toHaveLength(0)
   })
 
   it('names who did what under theirs: the joiner sent its bytes and caused the pick, the head is still the laptop’s', async () => {

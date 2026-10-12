@@ -7,9 +7,10 @@ import {
   runsWithin,
   shaIndex,
 } from './apply.js'
-import type { VaultClient } from './client.js'
+import type { EngineClient } from './engineClient.js'
 import { deferredSource, stageFrom, touchesDeferred, type Staged } from './defer.js'
 import type { FileSystem } from './fs.js'
+import { fingerprintFile } from './fs.js'
 import { sha256 } from './hash.js'
 import { PullPlacer } from './pullPlace.js'
 import type { PullOptions, PullReport } from './puller.js'
@@ -69,8 +70,10 @@ function asCreate(item: ManifestItem): ChangeItem {
     version_id: item.version_id,
     kind: item.kind,
     // The manifest says what a file is, not who last touched it or when.
+    // Preserve the observation time for review of a newly received staged file;
+    // this is not its authored mtime or an inferred server commit timestamp.
     actor: { kind: 'system', id: 'manifest', name: 'manifest' },
-    at: '',
+    at: new Date().toISOString(),
   }
 }
 
@@ -102,7 +105,7 @@ export class Puller {
   private walking = false
 
   constructor(
-    private readonly client: VaultClient,
+    private readonly client: EngineClient,
     private readonly fs: FileSystem,
     private readonly state: StateStore,
     private readonly opts: PullOptions,
@@ -209,11 +212,16 @@ export class Puller {
   /** The feed, page after page, until the last one handed out reaches the head. */
   private async follow(): Promise<void> {
     for (;;) {
+      const previous = this.reached
       const page = await this.client.changes(this.reached, CHANGES_PAGE)
       await this.page(page.items)
       this.reached = page.next_since
       await this.save()
-      if (page.items.length === 0 || page.next_since >= page.head_seq) return
+      if (
+        page.next_since >= page.head_seq ||
+        (page.items.length === 0 && page.next_since <= previous)
+      )
+        return
     }
   }
 
@@ -280,7 +288,7 @@ export class Puller {
     const there = await this.fs.stat(change.path)
     if (there === null) return false
     try {
-      return (await this.hash(await this.fs.read(change.path))) === change.sha
+      return (await fingerprintFile(this.fs, change.path, this.hash)).sha === change.sha
     } catch {
       return false
     }
@@ -468,6 +476,7 @@ export class Puller {
     for (const change of changes) {
       const sha = change.sha
       if (sha === null || change.op === 'delete') continue
+      if (this.fs.beginAtomicWrite && this.fs.reopenStage && this.client.openVersion) continue
       if (seen.has(sha) || local.has(sha)) continue
       if (this.passedOver(change)) continue
       const entry = await this.state.byFileId(change.file_id)

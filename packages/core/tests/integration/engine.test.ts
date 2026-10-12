@@ -12,7 +12,7 @@ import {
   type EngineOptions,
   type EngineStatus,
   type VaultClient,
-} from '../../src/index.js'
+} from '../legacy/index.js'
 import { serverHarness, type Harness } from '../helpers/harness.js'
 
 /** A `WebSocket` that never opens: every attempt is recorded and fails on the next turn. */
@@ -263,43 +263,52 @@ describe('the engine over the device facet', () => {
     ])
   })
 
-  it('goes offline when the server cannot be reached, and comes back on the backoff', async () => {
-    const vault = await ownVault('offline')
-    let down = false
-    let asked = 0
-    const fetchOrNot: typeof fetch = async (input, init) => {
-      asked += 1
-      if (down) throw new TypeError('fetch failed')
-      return h.fetch(input, init)
+  it.each(['raw', 'classified'] as const)(
+    'goes offline for a %s transport failure, and comes back on the backoff',
+    async (kind) => {
+      const vault = await ownVault('offline')
+      let down = false
+      let asked = 0
+      const fetchOrNot: typeof fetch = async (input, init) => {
+        asked += 1
+        if (down) {
+          if (kind === 'classified')
+            throw new EngineError('offline', 'native transport timed out', new Error('timeout'))
+          throw new TypeError('fetch failed')
+        }
+        return h.fetch(input, init)
+      }
+      const d = deviceOn(h.clientFor(vault.deviceToken, vault.vaultId, { fetch: fetchOrNot }))
+      await d.write('note.md', 'written while up')
+      d.engine.start()
+      await settled(d, 'the first sync')
+      expect(d.commits).toHaveLength(1)
+
+      down = true
+      await d.write('later.md', 'written while down', 2000)
+      d.fs.emitChange(['later.md'])
+      await until(() => d.engine.status.state === 'offline', 'the engine to notice')
+      if (kind === 'classified')
+        expect(d.engine.status.lastError).toBe('native transport timed out')
+      else expect(d.engine.status.lastError).toMatch(/never reached the server/)
+      expect(d.commits).toHaveLength(1)
+
+      // Retried on the backoff while it stays down; nothing else is touched.
+      const before = asked
+      await wait(120)
+      expect(asked).toBeGreaterThan(before)
+      expect(d.engine.status.state).toBe('offline')
+
+      down = false
+      await until(() => d.engine.status.state === 'idle', 'the engine to recover')
+      expect(d.engine.status.lastError).toBeNull()
+      expect(d.commits).toHaveLength(2)
+      expect((await vault.client.manifest(null)).items.map((item) => item.path)).toEqual([
+        'later.md',
+        'note.md',
+      ])
     }
-    const d = deviceOn(h.clientFor(vault.deviceToken, vault.vaultId, { fetch: fetchOrNot }))
-    await d.write('note.md', 'written while up')
-    d.engine.start()
-    await settled(d, 'the first sync')
-    expect(d.commits).toHaveLength(1)
-
-    down = true
-    await d.write('later.md', 'written while down', 2000)
-    d.fs.emitChange(['later.md'])
-    await until(() => d.engine.status.state === 'offline', 'the engine to notice')
-    expect(d.engine.status.lastError).toMatch(/never reached the server/)
-    expect(d.commits).toHaveLength(1)
-
-    // Retried on the backoff while it stays down; nothing else is touched.
-    const before = asked
-    await wait(120)
-    expect(asked).toBeGreaterThan(before)
-    expect(d.engine.status.state).toBe('offline')
-
-    down = false
-    await until(() => d.engine.status.state === 'idle', 'the engine to recover')
-    expect(d.engine.status.lastError).toBeNull()
-    expect(d.commits).toHaveLength(2)
-    expect((await vault.client.manifest(null)).items.map((item) => item.path)).toEqual([
-      'later.md',
-      'note.md',
-    ])
-  })
+  )
 
   it('stops on a refused token until it is resumed with a good one', async () => {
     const vault = await ownVault('unauthorized')
@@ -560,7 +569,7 @@ describe('the engine over the device facet', () => {
   it('keeps a stale verdict clear of the next pull, so late typing is merged rather than overwritten', async () => {
     const vault = await ownVault('kept')
     const d = device(vault)
-    await d.write('race.md', 'alfa\nbravo\ncharlie\n', 1000)
+    await d.write('race.md', 'alfa\nbravo\ncharlie\nanchor\n', 1000)
     // Started, so the watcher is on and the engine trusts it about what changed on disk;
     // then paused, so nothing runs but the syncs this test asks for.
     d.engine.start()
@@ -569,13 +578,14 @@ describe('the engine over the device facet', () => {
     expect(d.engine.status.state).toBe('paused')
     const base = must(await d.state.get('race.md'), 'race.md was never synced')
 
-    // Another device rewrites the first line while this one is away.
-    const head = await blob(vault.client, 'ALFA-from-yonder\nbravo\ncharlie\n')
+    // The unchanged anchor separates late insertion from the last replacement.
+    // This keeps the settlement regression on a proven clean-merge path.
+    const head = await blob(vault.client, 'ALFA-from-yonder\nbravo\ncharlie\nanchor\n')
     await seed(vault.client, [
       { op: 'modify', file_id: base.fileId, base_version_id: base.versionId, ...head, mtime: 2000 },
     ])
-    const sent = 'alfa\nbravo\nCHARLIE-from-here\n'
-    const late = 'alfa\nbravo\nCHARLIE-from-here\ndelta-typed-late\n'
+    const sent = 'alfa\nbravo\nCHARLIE-from-here\nanchor\n'
+    const late = 'alfa\nbravo\nCHARLIE-from-here\nanchor\ndelta-typed-late\n'
     // Reported to the engine, as the host's watcher would, so the pull keeps clear of it.
     await d.write('race.md', sent, 3000)
     d.fs.emitChange(['race.md'])

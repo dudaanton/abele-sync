@@ -7,10 +7,12 @@ import {
   runsWithin,
   shaIndex,
 } from './apply.js'
-import type { VaultClient } from './client.js'
+import type { EngineClient } from './engineClient.js'
 import { touchesDeferred, type Staged } from './defer.js'
 import { EngineError } from './errors.js'
 import type { FileSystem } from './fs.js'
+import { fingerprintFile } from './fs.js'
+import { receiveToStage, TransferBudget, type AtomicStage } from './streaming.js'
 import { sentBy, type Content, type PushDisk } from './pushDisk.js'
 import type { ResumeOptions } from './pusher.js'
 import { stagedHead } from './pushStage.js'
@@ -23,6 +25,7 @@ import type { StateEntry, StateStore } from './state.js'
 
 /** What one commit's results need before the state is touched: bytes, and what to do with them. */
 export interface Verdicts {
+  stages: Map<number, AtomicStage>
   /**
    * sha → bytes, for the writes of the run being recorded that need some this disk does not
    * already have. Filled a run at a time (`fetchRun`) and emptied before the next, so what it
@@ -70,8 +73,10 @@ const VERSION_PAGE = 100
 
 /** The planning half of one push: the adapters and the options it runs over. */
 export class VerdictPlanner {
+  private results: CommitOpResult[] = []
+  private readonly budget = new TransferBudget()
   constructor(
-    private readonly client: VaultClient,
+    private readonly client: EngineClient,
     private readonly fs: FileSystem,
     private readonly state: StateStore,
     private readonly opts: ResumeOptions,
@@ -103,6 +108,7 @@ export class VerdictPlanner {
    * batch's bytes at once, and a batch of notes never pays it.
    */
   async plan(ops: CommitOp[], results: CommitOpResult[]): Promise<Verdicts> {
+    this.results = results
     const stale = new Set<number>()
     const writes = new Map<number, string>()
     const bad = new Map<number, string>()
@@ -219,6 +225,7 @@ export class VerdictPlanner {
     }
     const runs = runsWithin([...results.keys()], downloads, budget)
     const verdicts: Verdicts = {
+      stages: new Map(),
       fetched: new Map(),
       runs,
       wanted,
@@ -241,6 +248,39 @@ export class VerdictPlanner {
   async fetchRun(run: number[], verdicts: Verdicts): Promise<void> {
     const { fetched, writes, wanted, stale, local } = verdicts
     fetched.clear()
+    if (this.fs.beginAtomicWrite && this.fs.reopenStage && this.client.openVersion) {
+      for (const at of run) {
+        const sha = writes.get(at)
+        if (sha === undefined || !wanted.has(sha) || stale.has(at)) continue
+        const result = this.results[at]
+        if (!result || result.status === 'rejected') continue
+        const target = await this.disk.targetOf(result.path, result.file_id)
+        const previous = await this.state.byFileId(result.file_id)
+        const sourcePath = await this.disk.whereIs(previous, target)
+        const base =
+          (await this.fs.stat(sourcePath)) === null
+            ? null
+            : await fingerprintFile(this.fs, sourcePath, this.hash)
+        const stage = await this.fs.beginAtomicWrite(target, result.mtime, base)
+        try {
+          const source = await this.client.openVersion(result.file_id, result.version_id, {
+            sha,
+            size: result.size,
+          })
+          await receiveToStage(
+            source,
+            stage,
+            { sha, size: result.size },
+            this.opts.transferBudget ?? this.budget
+          )
+          verdicts.stages.set(at, stage)
+        } catch (error) {
+          await stage.discard()
+          throw error
+        }
+      }
+      return
+    }
     const shas = new Set<string>()
     for (const at of run) {
       const sha = writes.get(at)

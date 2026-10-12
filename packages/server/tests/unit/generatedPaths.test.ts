@@ -9,6 +9,15 @@ it.each(['a'.repeat(252) + '.md', 'é'.repeat(126) + '.md'])(
     const conflict = conflictCopyName(path, 'Cafe\u0301', new Date('2026-01-01T00:00:00Z'))
     expect(() => validatePath(conflict)).not.toThrow()
     expect(conflict).toBe(conflict.normalize('NFC'))
+    const opaque = conflictCopyName(
+      path,
+      'Cafe\u0301',
+      new Date('2026-01-01T00:00:00Z'),
+      'a1b2c3d4e5f6'
+    )
+    expect(() => validatePath(opaque)).not.toThrow()
+    expect(opaque).not.toBe(conflict)
+    expect(opaque.endsWith('.md')).toBe(true)
     const taken = new Set([caseKey(path)])
     const first = nextFreeName(path, (key) => taken.has(key))
     expect(() => validatePath(first)).not.toThrow()

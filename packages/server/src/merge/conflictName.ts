@@ -23,7 +23,7 @@ const stamp = (at: Date): string => at.toISOString().replace(/[-T:]/g, '').slice
  * The name Obsidian Sync gives a conflicted copy:
  * `Folder/Note.md` → `Folder/Note (Conflicted copy laptop 202609041530).md`.
  */
-export function conflictCopyName(path: string, deviceName: string, at: Date): string {
+export function conflictCopyName(path: string, deviceName: string, at: Date, opaque = ''): string {
   const slash = path.lastIndexOf('/')
   const folder = path.slice(0, slash + 1)
   const file = path.slice(slash + 1)
@@ -35,6 +35,6 @@ export function conflictCopyName(path: string, deviceName: string, at: Date): st
     folder,
     stem,
     ext,
-    ` (Conflicted copy ${deviceForName(deviceName).normalize('NFC')} ${stamp(at)})`
+    ` (Conflicted copy ${deviceForName(deviceName).normalize('NFC')} ${stamp(at)}${opaque ? ` ${opaque}` : ''})`
   )
 }

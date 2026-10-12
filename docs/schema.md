@@ -1,176 +1,62 @@
-# Storage schema and upgrades
+# Storage schema
 
-Both SQLite and PostgreSQL are supported. The SQL database holds authority,
-file/version metadata, history, feed progress and durable retry records. Encrypted
-content and unfinished upload parts live in the configured blob directory.
-Neither store alone is a complete backup. See [deployment](deploy.md#backups-and-restore)
-for coordinated backup/restore commands.
+The public [schema registry](../packages/server/src/db/migrate.ts) creates a fresh
+SQLite or PostgreSQL database: `001_engine`, `002_token_access`, then
+`003_sync_access`, then `004_conflict_divergences`. SQLite DDL
+and its journal are transactional; PostgreSQL uses transactional DDL and a
+schema-local journal. Startup is idempotent. An old account/device/grant database
+is refused with a fresh-database/wipe diagnostic; no conversion, upgrade window
+or old credential support exists. The unused test stand is to be recreated.
 
-The typed table definitions are in
-[`schema.ts`](../packages/server/src/db/schema.ts),
-[`schemaAuthority.ts`](../packages/server/src/db/schemaAuthority.ts) and
-[`schemaViews.ts`](../packages/server/src/db/schemaViews.ts). The compiled
-[migration registry](../packages/server/src/db/migrate.ts) is authoritative;
-startup does not discover migration files dynamically.
+## Access
 
-## Migration chain
+- `users`: display label, creation time and optional disabled time; no password.
+- `spaces`: exactly one per user (unique `user_id`), canonical server address and
+  settings. Its ID is the retained engine's space/vault ID.
+- `directories`: stable identities, parent identities, paths, version identities,
+  mtimes and deletion timestamps; provisioning creates `/`.
+- `access_scopes`: immutable folder/group selector and optional inherited scope
+  boundary. A unique effective key reuses identical selectors/boundaries.
+- `access_tokens`: unique HMAC-SHA256 secret digest, space/scope, direct issuer,
+  display label and created/revoked times. No reusable secret is stored.
+- `scope_members`: current file/directory item, cached once per effective selector.
+- `scope_versions`: recorded visibility at each version, not permission inferred
+  from a present-day path or digest.
+- `scope_changes`: ordered content/removal/delete events at engine/directory
+  sequences, recorded with the commit.
+- `scope_snapshots` / `scope_snapshot_items`: scope-bound fixed-cursor pages,
+  durable across restart; snapshots expire after one hour.
 
-An installed migration journal must be an exact prefix of:
+Issuance follows stable directory ancestry. Group equality and root-to-existing
+note issuance are available; nested group membership is a later-stage graph
+operation and currently fails closed.
 
-1. `001_init`: accounts, personal vault/device/file/version and supporting state.
-2. `002_versions_vault_sha`: version/blob lookup indexing.
-3. `003_wide_numbers`: safe wide counters and sizes across database dialects.
-4. `004_devices_enrolled_by`: sibling enrolment provenance.
-5. `005_blob_uploads`: resumable upload state.
-6. `006_upload_owners`: explicit upload ownership.
-7. `007_version_retention_class`: immutable per-version retention classification.
-8. `008_scoped_authority`: grant/principal authority and source security facts.
-9. `009_scoped_views`: admissions, grant-local feeds, snapshots and group/publication state.
-10. `010_version_path_keys`: normalized historical path keys and bounded lookup indexes.
+## Retained engine
 
-Unknown names, holes and incompatible ordering are refused before migration
-bookkeeping changes. A matching name alone is not proof that an old deployment
-installed the matching DDL. Startup also checks required scoped columns/tables,
-historical-path indexes and incompatible cached group facts. Do not edit a
-journal, remove facts or manufacture schema columns to bypass a refusal.
+Files, versions, blobs, uploads, pending blob uploads, idempotency, audit,
+usage and sequence tables retain their current storage shape and identities.
+`files.vault_id`, `versions.vault_id`, `vault_seq.vault_id`, and upload
+`device_id` column spellings are engine storage names; new spaces and token
+principals are the new ownership model, not account membership or enrolled
+credentials. New provisioning initializes a zero sequence for the space.
 
-## Personal data and content
+Versions retain SHA, actual size, authored mtime, receipt time, merge provenance,
+canonical paths and immutable retention class. Wide byte/time/sequence columns
+are bigint on PostgreSQL. Live file paths remain unique case-insensitively.
 
-Files have stable IDs and unique normalized paths within a vault. Versions refer
-to content-addressed blobs and preserve historical paths and provenance. A
-version's `retention_class` is independent of its current filename; renaming a
-note into another category cannot shorten the retention of an older version.
-Unknown classification is retained conservatively rather than guessed.
+Storage cleanup uses spaces/settings and live token receipts. Live heads,
+restore dependencies and merge bases remain retained. Partial content reads use
+both current membership and recorded version-time visibility. Authorized history
+retention references and the history listing API remain stage-4 work.
 
-Uploads and multipart uploads carry their actual device/principal owner. Two
-principals can independently hold pending entitlements for the same SHA; one
-principal's revocation must not discard another's bytes. Temporary uploaded bytes
-count against quota while waiting to be committed. Durable operation outcomes
-and response payload retention are distinct so retry identity can outlive a
-large response.
+`conflict_divergences` retains canonical divergent-branch keys and copy identities
+without file/version foreign keys or payload pins. Its source tuple is unique;
+create-path locators survive original renames without deriving lineage from names.
+Space deletion cascades; ordinary payload GC does not erase retry identity.
+Startup and backup validation refuse missing conflict identity schema. Downgrade
+is refused. No old-account upgrade or filename-based backfill is supported.
 
-## Scoped authority
-
-Grants bind the actual vault owner, folder prefix or group root identity, role
-ceiling, lifecycle and authority/scope/publication revisions. Memberships, keys
-and installations carry separate grant/account/vault identities and lifecycle.
-Scoped membership does not create unrestricted personal vault membership.
-Invitation/enrolment/key-issuance recovery records use hashes and protected token
-slots, not plaintext bearer tokens.
-
-`version_security_sources` preserves authenticated source lineage, executable/
-configuration restrictions and source namespaces. Facts may be unknown; absence
-never creates a negative security fact. Compact lineage does not require a
-foreign key that keeps every historical payload alive forever.
-
-## Scoped views
-
-Admissions bind grant, file, generation and visibility interval. Current heads,
-scoped trash and version admissions are distinct from personal current-file
-state. Grant-local feed state/events do not reuse a personal vault-global cursor.
-Snapshots materialize exact heads and bind principal and authority/publication
-revisions rather than reading whatever head happens to exist on a later page.
-
-Snapshot/group-preparation pins name exact versions with finite leases. Their
-maximum lifetime is five minutes from the server-issued timestamp. Retention
-honors live pins under the vault lock and releases expired/invalidated pins;
-compact admissions, origins and outcomes can survive payload collection.
-
-Group anchors, introducer origins, stable bindings/tombstones, bounded source
-parse facts and dirty work record identities, not arbitrary body links. Missing
-or ambiguous evidence cannot silently rebind a group. Sponsored extras bind
-independent admitted sponsors and generations; dormant/revoked sponsors cannot
-resurrect an old publication interval.
-
-Schema constraints protect tuple identity, enum/lifecycle shape, nonnegative
-revisions and finite expiry. Runtime authorization, aggregate budgets, role and
-sponsor liveness, fresh-password checks and safe projection remain necessary.
-Installing the tables does not enable scoped sharing.
-
-## CLI external-file state
-
-The CLI's normal `SqliteStateStore` implements core's `ExternalStatePort` on its
-**own existing SQLite connection**. Its private connection remains private; no
-second production connection, external head table or separate recovery database
-is opened. Core exports the shared `ExternalState` facade, record schemas,
-phase validation and `SqliteExternalStateStore` adapter from `external/`. Hosts
-should consume these exports together rather than mix a prototype facade/error
-class with the shared adapter.
-
-Opening `ExternalState` on a legacy ledger lazily initializes a schema-1 document
-at `meta['daemon:external-files']`, using an expected-absent revision check.
-Existing entries, cursor, publication journal and daemon/scoped metadata are
-preserved. This is a versioned document migration within the existing metadata
-schema, not a server SQL migration or a CLI downgrade fence. Missing state must
-still be handled by the activation/recovery barrier before production eviction.
-Malformed or unsupported persisted documents are held for recovery, not replaced.
-
-Each phase commits the document, relevant entry puts/deletes, personal cursor
-and scoped metadata changes in one `BEGIN IMMEDIATE` transaction. Revision and
-connection-binding checks run against the committed document read **inside**
-that transaction. File and operation revisions, immutable operation parameters,
-artifact ownership and pending dependencies' earlier proven local base are
-validated by the shared facade. The existing scoped ledger remains the only
-server-head/checkpoint authority.
-
-Only a confirmed SQL `COMMIT` yields `{ status: 'committed', revision }`. There
-are no filesystem/network callbacks inside a phase transaction. External calls
-reject an active outer transaction instead of inheriting the ordinary ledger's
-legacy nesting behavior. A statement abort rolls back the document and ledger
-changes together. An uncertain COMMIT yields `commit-unknown` and blocks further
-phase writes on both the facade and that connection's adapter, even through a
-new facade. Close/reopen the ledger and inspect its durable phase before recovery;
-never turn uncertainty into a destructive retry. Memory stores, including a real
-SQLite `:memory:` ledger, cannot serve as production external persistence.
-
-This persistence port does not itself enable eviction or implement projection
-filesystem effects. The CLI's composition, initial recovery/lifecycle holds and
-versioned config fence are described in
-[CLI external-file recovery](external-file-cli-state.md).
-
-## Upgrade procedure
-
-Stop all old server, collector and admin writers before an upgrade; also stop
-daemons during an incompatible client transition. Preserve and test a matching
-database/blob/key recovery set and pin the old image. Do not use a rolling mix
-of old/new writers against a changed schema.
-
-The read-only preflight command inspects an existing target after building:
-
-```sh
-ABELE_DATABASE_URL='<target database URL>' npm run upgrade:preflight -- upgrade.json
-```
-
-`upgrade.json` contains operator attestations, not backups made by the tool:
-
-```json
-{
-  "database": "deployment/database identity",
-  "sourceRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "writersStopped": true,
-  "collectorsStopped": true,
-  "databaseBackup": "verified database backup identifier/location",
-  "blobBackup": "verified matching blob backup identifier/location"
-}
-```
-
-Replace the example revision with the exact deployed commit. Missing fields,
-false stop assertions, a branch name instead of a commit, an unreachable target
-or incompatible ancestry/schema fail. Success prints the actual journal, target
-chain and attestation for comparison; it does not authorize an upgrade, stop
-writers, verify a backup or apply migrations. SQLite inspection requires an
-existing file, opens read-only and does not change journal mode. Keep connection
-secrets and backup contents out of the attestation and source control.
-
-The server applies migrations before listening. SQLite uses transactional DDL
-including the migration journal; PostgreSQL uses its transactional migrator.
-A failed migration must preserve the prior committed schema/journal, but still
-requires log inspection before retry. Scope preparation/recovery is separate
-from SQL migration success.
-
-There is no supported destructive downgrade. Incompatible earlier schemas or
-legacy group evidence require a planned export/import or a new compatible
-migration; disposable installations can be recreated. Rollback restores the
-matching old database, blobs and keys, then runs the old image. Restoring a
-snapshot may disagree with clients' cursors, so validate authenticated history,
-downloads and reconnect behavior before admitting real clients.
+The writer has no legacy admission/security imports or scoped-writer bridge.
+Legacy account/vault transport and schemas live only in test fixtures for
+independent engine regressions. No production source imports them. See the
+acceptance harness for the explicit server/client integration boundary.

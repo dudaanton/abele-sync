@@ -5,7 +5,7 @@ import { sql, type Kysely, type Transaction } from 'kysely'
 import type { Dialect } from '../db/connect.js'
 import type { Database } from '../db/schema.js'
 import { withVaultLock } from '../oplog/lock.js'
-import { getVaultSettings } from '../vault/vaults.js'
+import { getVaultSettings } from '../access/spaceSettings.js'
 import { TOMBSTONE } from './refs.js'
 import type { BlobStore } from './store.js'
 import type { UploadManager } from './uploads.js'
@@ -28,6 +28,8 @@ import type { UploadManager } from './uploads.js'
 export interface UploadOwner {
   vaultId: string
   deviceId: string
+  /** HTTP multipart routes bind the path digest as well as the token/space. */
+  sha?: string
 }
 
 /** What admitting an upload needs: the database, and its dialect for the vault's lock. */
@@ -51,7 +53,7 @@ export async function admitUpload(
   upload: UploadOwner & { sha: string; size: number; at: Date }
 ): Promise<boolean> {
   return withVaultLock(deps.db, deps.dialect, upload.vaultId, async (trx) => {
-    await hasRoom(trx, upload.vaultId, upload.sha, upload.size, upload.at)
+    await hasRoom(trx, upload.vaultId, upload.sha, upload.size)
     const existing = await trx
       .selectFrom('blob_uploads')
       .select('sha')
@@ -98,8 +100,6 @@ export async function hasRoom(
   vaultId: string,
   sha: string,
   size: number,
-  at: Date = new Date(),
-  replacingScopedReservation?: string,
   discountProvedSha = true
 ): Promise<void> {
   const { quota_bytes } = await getVaultSettings({ db: trx }, vaultId)
@@ -111,13 +111,7 @@ export async function hasRoom(
     })
   }
   // Hash-only reservations cannot discount private matching entitlements.
-  const waiting = await waitingBytes(
-    trx,
-    vaultId,
-    discountProvedSha ? sha : undefined,
-    at,
-    replacingScopedReservation
-  )
+  const waiting = await waitingBytes(trx, vaultId, discountProvedSha ? sha : undefined)
   if (waiting + size > quota_bytes) {
     throw new AbeleError(
       'quota_waiting',
@@ -154,23 +148,12 @@ export async function waitOn(
 async function waitingBytes(
   trx: Transaction<Database>,
   vaultId: string,
-  except: string | undefined,
-  at: Date,
-  replacingScopedReservation?: string
+  except: string | undefined
 ): Promise<number> {
   const entitlements = trx
     .selectFrom('blob_uploads')
     .select(['sha', 'size'])
     .where('vault_id', '=', vaultId)
-    .unionAll(
-      trx
-        .selectFrom('scope_blob_uploads')
-        .select(['sha', 'size'])
-        .where('vault_id', '=', vaultId)
-        .where((eb) =>
-          eb.or([eb('expires_at', 'is', null), eb('expires_at', '>', at.toISOString())])
-        )
-    )
     .as('entitlements')
   let bySha = trx
     .selectFrom(entitlements)
@@ -188,19 +171,7 @@ async function waitingBytes(
     .where('vault_id', '=', vaultId)
     .executeTakeFirst()
   // Postgres sums into a bigint, which its driver hands over as a string.
-  let scopedQuery = trx
-    .selectFrom('scope_uploads')
-    .select((eb) => eb.fn.coalesce(eb.fn.sum<number>('size'), sql<number>`0`).as('total'))
-    .where('vault_id', '=', vaultId)
-    .where('expires_at', '>', at.toISOString())
-  if (replacingScopedReservation !== undefined)
-    scopedQuery = scopedQuery.where('id', '!=', replacingScopedReservation)
-  const scopedProgress = await scopedQuery.executeTakeFirst()
-  return (
-    Number(waiting?.total ?? 0) +
-    Number(inProgress?.total ?? 0) +
-    Number(scopedProgress?.total ?? 0)
-  )
+  return Number(waiting?.total ?? 0) + Number(inProgress?.total ?? 0)
 }
 
 /** A version of the vault names the sha now: it is the `blobs` row's to keep, not these rows'. */
@@ -318,14 +289,9 @@ export async function hasWaitingEntitlement(
     .limit(1)
     .executeTakeFirst()
   if (row !== undefined) return true
-  const scoped = await db
-    .selectFrom('scope_blob_uploads')
-    .select('sha')
-    .where('sha', '=', sha)
-    .where((eb) => eb.or([eb('expires_at', 'is', null), eb('expires_at', '>', at.toISOString())]))
-    .limit(1)
-    .executeTakeFirst()
-  return scoped !== undefined
+  // All token principals share the retained engine's pending-upload table.
+  // A separate scoped upload/admission entitlement no longer exists.
+  return false
 }
 
 const HEX2 = /^[0-9a-f]{2}$/

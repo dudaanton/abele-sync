@@ -94,6 +94,32 @@ async function waitFor(done: () => boolean, ms = 10_000): Promise<void> {
   while (!done() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25))
 }
 
+/** fs.watch has no ready event. Observe real I/O before testing later events:
+ * a probe written before FSEvents is armed may itself be lost, so keep changing
+ * it until the callback sees it. Probe events never reach the test's assertions. */
+async function watchReady(fs: NodeFileSystem, cb: (paths: string[]) => void): Promise<() => void> {
+  const probe = 'watch-readiness-probe.md'
+  let ready = false
+  const stop = fs.watch!((paths) => {
+    if (paths.includes(probe)) ready = true
+    const real = paths.filter((path) => path !== probe)
+    if (real.length > 0) cb(real)
+  })
+  try {
+    const deadline = Date.now() + 10_000
+    while (!ready && Date.now() < deadline) {
+      await appendFile(join(root, probe), 'probe\n')
+      await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_MS + 25))
+    }
+    expect(ready, 'recursive watcher must observe the readiness probe').toBe(true)
+    await rm(join(root, probe))
+    return stop
+  } catch (error) {
+    stop()
+    throw error
+  }
+}
+
 async function collect(fs: NodeFileSystem): Promise<FileInfo[]> {
   const found: FileInfo[] = []
   for await (const info of fs.list()) found.push(info)
@@ -444,7 +470,7 @@ describe('NodeFileSystem', () => {
     const fs = new NodeFileSystem(root)
     expect(fs.supportsWatch).toBe(true)
     const seen: string[] = []
-    const stop = fs.watch!((paths) => seen.push(...paths))
+    const stop = await watchReady(fs, (paths) => seen.push(...paths))
     try {
       await fs.writeAtomic('notes/watched.md', bytes('hi'), 1000)
       await waitFor(() => seen.includes('notes/watched.md'))
@@ -460,7 +486,7 @@ describe('NodeFileSystem', () => {
     async () => {
       const fs = new NodeFileSystem(root, { ignoreDirs: ['.trash'] })
       const seen: string[] = []
-      const stop = fs.watch!((paths) => seen.push(...paths))
+      const stop = await watchReady(fs, (paths) => seen.push(...paths))
       try {
         await mkdir(join(root, '.abele-sync'), { recursive: true })
         await writeFile(join(root, '.abele-sync', 'config.json'), '{"deviceToken":"secret"}')
@@ -482,7 +508,7 @@ describe('NodeFileSystem', () => {
       await mkdir(join(root, '.obsidian'), { recursive: true })
       const fs = new NodeFileSystem(root, { skipHidden: true })
       const seen: string[] = []
-      const stop = fs.watch!((paths) => seen.push(...paths))
+      const stop = await watchReady(fs, (paths) => seen.push(...paths))
       try {
         await writeFile(join(root, '.git', 'objects', 'pack'), 'churn')
         await writeFile(join(root, '.git', 'index'), 'churn')
@@ -507,7 +533,7 @@ describe('NodeFileSystem', () => {
       await mkdir(join(root, 'folder'))
       const fs = new NodeFileSystem(root)
       const seen: string[] = []
-      const stop = fs.watch!((paths) => seen.push(...paths))
+      const stop = await watchReady(fs, (paths) => seen.push(...paths))
       try {
         await writeFile(join(root, 'folder', 'note.md'), 'hi')
         await writeFile(join(root, 'gone.md'), 'bye')
@@ -530,7 +556,7 @@ describe('NodeFileSystem', () => {
       const staging = await mkdtemp(join(tmpdir(), 'abele-staged-'))
       const fs = new NodeFileSystem(root)
       const seen: string[] = []
-      const stop = fs.watch!((paths) => seen.push(...paths))
+      const stop = await watchReady(fs, (paths) => seen.push(...paths))
       try {
         await mkdir(join(staging, 'Imported'))
         await writeFile(join(staging, 'Imported', 'one.md'), '1')
@@ -553,7 +579,7 @@ describe('NodeFileSystem', () => {
     async () => {
       const fs = new NodeFileSystem(root)
       const batches: string[][] = []
-      const stop = fs.watch!((paths) => batches.push(paths))
+      const stop = await watchReady(fs, (paths) => batches.push(paths))
       const name = basename(root)
       try {
         await writeFile(join(root, name), 'hi')
@@ -639,9 +665,10 @@ describe('NodeFileSystem', () => {
   it.skipIf(!RECURSIVE_WATCH)('says nothing more once it has been stopped', async () => {
     const fs = new NodeFileSystem(root)
     const seen: string[] = []
-    const stop = fs.watch!((paths) => seen.push(...paths))
+    const stop = await watchReady(fs, (paths) => seen.push(...paths))
     await writeFile(join(root, 'before.md'), '1')
     await waitFor(() => seen.includes('before.md'))
+    expect(seen).toContain('before.md')
     const reported = seen.length
 
     stop()
@@ -657,9 +684,11 @@ describe('NodeFileSystem', () => {
     async () => {
       const fs = new NodeFileSystem(root)
       const seen: string[] = []
-      const stop = fs.watch!((paths) => seen.push(...paths))
+      const stop = await watchReady(fs, (paths) => seen.push(...paths))
       // Stopped well inside the debounce window: the batch exists and is never handed over.
       await writeFile(join(root, 'pending.md'), '1')
+      // Prove a batch is actually queued even if native delivery is delayed.
+      emit('pending.md')
       stop()
       await new Promise((r) => setTimeout(r, 800))
       expect(seen).toEqual([])

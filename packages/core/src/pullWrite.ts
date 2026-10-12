@@ -4,6 +4,7 @@ import type { StateEntry, StateStore } from './state.js'
 
 /** Intent saved before a pull touches the disk, retired atomically with its ledger update. */
 interface PendingPullWrite {
+  stageId?: string
   owner?: string
   fileId: string
   versionId: string
@@ -29,11 +30,13 @@ export class PendingPullWrites {
     change: ChangeItem,
     base: StateEntry | null,
     target: string,
-    from: string | null
+    from: string | null,
+    stageId?: string
   ): Promise<void> {
     if (this.state.getMeta === undefined || this.state.setMeta === undefined) return
     const owner = this.state.effectOwner?.()
     const pending: PendingPullWrite = {
+      ...(stageId === undefined ? {} : { stageId }),
       ...(owner === undefined ? {} : { owner }),
       fileId: change.file_id,
       versionId: change.version_id,

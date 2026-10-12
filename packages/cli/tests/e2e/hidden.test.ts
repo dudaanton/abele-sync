@@ -4,10 +4,8 @@ import { encodeText, sha256 } from '@abele/sync-core'
 import {
   clientFor,
   cleanupFolders,
-  EMAIL,
   listing,
   manifestPaths,
-  PASSWORD,
   read,
   SETUP_MS,
   syncOnce,
@@ -29,7 +27,6 @@ let pair: Pair
 
 beforeAll(async () => {
   server = await spawnServer()
-  await server.createAccount(EMAIL, PASSWORD)
   pair = await vaultPair(server, 'Hidden')
 }, SETUP_MS)
 
@@ -88,6 +85,15 @@ describe('hidden paths', () => {
       db.prepare('update versions set path = ? where path = ?').run(
         '.stfolder/marker',
         'legacy-marker'
+      )
+      // V2 materialized visibility must match the synthetic historical head too.
+      db.prepare('update scope_members set item = replace(item, ?, ?)').run(
+        '"path":"legacy-marker"',
+        '"path":".stfolder/marker"'
+      )
+      db.prepare('update scope_changes set event = replace(event, ?, ?)').run(
+        '"path":"legacy-marker"',
+        '"path":".stfolder/marker"'
       )
     } finally {
       db.close()

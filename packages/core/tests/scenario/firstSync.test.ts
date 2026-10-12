@@ -41,7 +41,7 @@ describe('first sync of a device that already has files', () => {
     const pushed = (await newcomer.sync()).push.committed
     // The scanner sends creates in path order, where the sim sent them in the order they were written.
     expect(pushed?.results).toEqual([
-      expect.objectContaining({ status: 'merged', path: 'Diff.md' }),
+      expect.objectContaining({ status: 'conflict', path: 'Diff.md' }),
       expect.objectContaining({ status: 'applied', path: 'Only on the newcomer.md' }),
       expect.objectContaining({ status: 'applied', path: 'diff.png' }),
     ])
@@ -52,12 +52,16 @@ describe('first sync of a device that already has files', () => {
     expect((await newcomer.state.get('same.png'))?.fileId).toBe(
       (await laptop.state.get('same.png'))?.fileId
     )
-    // Uploads: the three unique blobs; downloads: the laptop-only note and the merged text.
-    expect(newcomer.stats).toEqual({ blobPuts: 3, blobHeads: 3, blobGets: 2, commits: 1 })
+    // The real engine also pulls the new conflict identity from the feed after its push.
+    expect(newcomer.stats).toEqual({ blobPuts: 3, blobHeads: 3, blobGets: 3, commits: 1 })
 
+    const result = pushed?.results[0]
+    if (result?.status !== 'conflict') throw new Error('expected complete conflict copy')
+    const copy = result.conflict_path
     await converge(laptop, newcomer)
     for (const d of [laptop, newcomer]) {
       expect(d.paths()).toEqual([
+        copy,
         'Diff.md',
         'Only on the laptop.md',
         'Only on the newcomer.md',
@@ -65,7 +69,8 @@ describe('first sync of a device that already has files', () => {
         'diff.png',
         'same.png',
       ])
-      expect(await d.text('Diff.md')).toBe('laptop wrote this\nnewcomer wrote this\n')
+      expect(await d.text('Diff.md')).toBe('laptop wrote this\n')
+      expect(await d.text(copy)).toBe('newcomer wrote this\n')
       expect(await d.holds('diff.png', newerImage)).toBe(true)
       expect(await d.holds('same.png', sameImage)).toBe(true)
     }

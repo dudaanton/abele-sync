@@ -10,8 +10,6 @@ import {
   ExternalStateError,
   RecoveryBarrier,
   sameConnection,
-  ScopedJournalSchema,
-  ScopedKnownFileSchema,
   type ConnectionBinding,
 } from '@abele/sync-core'
 import { ChangeItemSchema, CommitOpSchema, validatePath } from '@abele/sync-protocol'
@@ -106,7 +104,6 @@ export function assertLocalSafety(
   lifecycle?: LifecycleInventory
 ): void {
   const folder = stateFolder(dir)
-  const scopedSources = new Set<string>()
   try {
     if (
       existsSync(folder) &&
@@ -181,12 +178,6 @@ export function assertLocalSafety(
           }
           if ((scan || retirement) && row.key.startsWith('daemon:scoped-placement:pull-write:'))
             hold('unfinished scoped pull installation intent')
-          if (row.key === 'daemon:owner-publication-held') {
-            const units = JSON.parse(row.value) as unknown
-            if (!Array.isArray(units)) hold('malformed owner publication hold')
-            units.forEach(journal)
-            if (units.length) hold('unresolved owner publication units')
-          }
           if (row.key === 'daemon:deferred-changes') {
             const pending = JSON.parse(row.value) as {
               staged?: { change: unknown; base: unknown }[]
@@ -221,56 +212,8 @@ export function assertLocalSafety(
               hold('unresolved deletion decision')
           }
           if (row.key === 'journal') {
-            const publication = JSON.parse(row.value) as { ownerBinding?: unknown }
-            journal(publication)
-            if (publication.ownerBinding && existsSync(join(folder, 'config.json'))) {
-              const cfg = readConfig(dir)
-              const expected = cfg && {
-                issuer: personalBinding(cfg).endpoint,
-                vaultId: cfg.vaultId,
-                credentialFingerprint: personalBinding(cfg).credentialAssociation,
-              }
-              const actual = publication.ownerBinding as {
-                issuer?: unknown
-                vaultId?: unknown
-                credentialFingerprint?: unknown
-              }
-              if (
-                !expected ||
-                actual.issuer !== expected.issuer ||
-                actual.vaultId !== expected.vaultId ||
-                actual.credentialFingerprint !== expected.credentialFingerprint
-              )
-                hold('foreign publication binding')
-            }
+            journal(JSON.parse(row.value))
             if (retirement) hold('unresolved publication journal')
-          }
-          if (row.key === 'daemon:scoped-v4-state') {
-            const root = JSON.parse(row.value) as { journal?: unknown }
-            if (root.journal) {
-              const parsed = ScopedJournalSchema.safeParse(root.journal)
-              if (!parsed.success) hold('malformed scoped publication journal')
-              for (const source of parsed.data.sources ?? []) {
-                if (
-                  source.stagedPath !==
-                  `.abele-sync/scoped-outbox/${parsed.data.request_id}/${source.index}-${source.sha}`
-                )
-                  hold('unbound scoped staging source')
-                scopedSources.add(source.stagedPath)
-              }
-              if (retirement) hold('unresolved scoped publication')
-            }
-          }
-          if (row.key.startsWith('daemon:scoped-v4-file:')) {
-            const known = ScopedKnownFileSchema.parse(JSON.parse(row.value))
-            if (
-              retirement &&
-              (known.dirty ||
-                ['detached', 'held'].includes(known.state) ||
-                (known.state === 'known_not_materialized' &&
-                  !lifecycle?.materializing?.has(known.file_id)))
-            )
-              hold('unresolved scoped placement/conflict')
           }
         }
       } finally {
@@ -287,17 +230,6 @@ export function assertLocalSafety(
         if (!child.isFile() || child.isSymbolicLink() || !lifecycle?.staging?.has(path))
           hold('orphan disconnect staging artifact')
       }
-    }
-    if (scan && existsSync(join(folder, 'scoped-outbox'))) {
-      const inspect = (relative: string): void => {
-        const path = join(dir, relative),
-          stat = lstatSync(path)
-        if (stat.isSymbolicLink()) hold('unsafe scoped staging artifact')
-        if (stat.isDirectory()) for (const name of readdirSync(path)) inspect(`${relative}/${name}`)
-        else if (!stat.isFile() || !scopedSources.has(relative))
-          hold('orphan scoped staging artifact')
-      }
-      inspect('.abele-sync/scoped-outbox')
     }
     if (retirement)
       for (const name of ['tmp', 'code-approvals', 'external', 'recovery', 'scoped-outbox']) {
@@ -482,7 +414,8 @@ export async function activateBoundExternalFiles(
   claim()
   state.assertExternalEffectsAllowed()
   if (
-    (binding.mode === 'personal') !== (ledgerFile === 'state.db') ||
+    binding.mode !== 'token' ||
+    ledgerFile !== 'state.db' ||
     !state.isLedgerFile(join(stateFolder(dir), ledgerFile))
   )
     hold("activation requires this vault's own ledger connection")

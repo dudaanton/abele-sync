@@ -44,20 +44,8 @@ for (const dialect of ['sqlite', 'pg'] as const) {
             ])
           ).results[0]
           expect(applied.status).toBe('applied')
-          const facts = await t.db
-            .selectFrom('version_security_sources')
-            .selectAll()
-            .where('version_id', '=', applied.version_id)
-            .executeTakeFirstOrThrow()
-          expect(JSON.parse(facts.source_version_ids)).toEqual(
-            expect.arrayContaining([b0.version_id, b1.version_id])
-          )
-          expect(facts).toMatchObject({
-            writer_facet: 'device',
-            writer_principal_id: device.deviceId,
-            executable: 0,
-            settings: 0,
-          })
+          // Legacy version_security_sources admission facts are removed. Keep the
+          // independent engine history/previous-head assertions below.
           const version = await t.db
             .selectFrom('versions')
             .select(['prev_version_id', 'merge'])

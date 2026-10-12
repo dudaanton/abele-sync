@@ -3,10 +3,11 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ExternalState, selectiveDefaults } from '@abele/sync-core'
-import { writeConfig, stateFolder, type DaemonConfig } from '../../src/config.js'
+import { writeConfig, stateFolder, personalBinding, type DaemonConfig } from '../../src/config.js'
+import { tokenFor } from '../helpers/token.js'
 import { SqliteStateStore } from '../../src/sqliteState.js'
 import { runRun } from '../../src/commands/run.js'
-import { runInit } from '../../src/commands/init.js'
+import { runConnect } from '../../src/commands/connect.js'
 import { runDisconnect } from '../../src/commands/disconnect.js'
 import { runRestore } from '../../src/commands/restore.js'
 import { runCode } from '../../src/commands/code.js'
@@ -20,20 +21,11 @@ const cfg: DaemonConfig = {
   serverUrl: 'https://synthetic.example.test',
   vaultId: 'vault',
   deviceId: 'device',
-  deviceToken: 'absd_synthetic',
+  deviceToken: tokenFor('https://synthetic.example.test'),
   deviceName: 'synthetic',
   selective: selectiveDefaults(),
 }
-const binding = {
-  endpoint: cfg.serverUrl,
-  vaultId: cfg.vaultId,
-  mode: 'personal' as const,
-  principalId: cfg.deviceId,
-  principalType: 'device' as const,
-  grantId: null,
-  generation: 1,
-  credentialAssociation: 'slot',
-}
+const binding = personalBinding(cfg)
 const dbFile = () => join(stateFolder(dir), 'state.db')
 function context(): CommandContext {
   return {
@@ -93,19 +85,8 @@ async function dependency(
 }
 const commands = {
   run: (ctx: CommandContext) => runRun({ dir, once: true }, ctx),
-  init: (ctx: CommandContext) =>
-    runInit(
-      {
-        dir,
-        server: cfg.serverUrl,
-        email: 'synthetic@example.test',
-        password: 'synthetic',
-        force: true,
-        prefer: 'merge',
-      },
-      ctx
-    ),
-  disconnect: (ctx: CommandContext) => runDisconnect({ dir, force: true }, ctx),
+  connect: (ctx: CommandContext) => runConnect({ dir, token: cfg.deviceToken }, ctx),
+  disconnect: (ctx: CommandContext) => runDisconnect({ dir }, ctx),
   restore: (ctx: CommandContext) => runRestore('Media/a.jpg', { dir, version: 'version' }, ctx),
   restoreMany: (ctx: CommandContext) =>
     runRestore(undefined, { dir, deletedSince: '2h', yes: true }, ctx),
@@ -161,7 +142,7 @@ describe('initial CLI recovery and lifecycle holds', () => {
   for (const availability of ['deleted', 'detached', 'unavailable'] as const)
     it(`BUG: ${availability} dependencies cannot be retired even with force`, async () => {
       await dependency(availability)
-      await expect(runDisconnect({ dir, force: true }, context())).rejects.toMatchObject({
+      await expect(runDisconnect({ dir }, context())).rejects.toMatchObject({
         reason: 'recovery-required',
       })
       expect(existsSync(join(stateFolder(dir), 'config.json'))).toBe(true)
@@ -198,7 +179,7 @@ describe('initial CLI recovery and lifecycle holds', () => {
         )
       const ctx = context()
       await expect(commands.run(ctx)).rejects.toMatchObject({ reason: 'recovery-required' })
-      await expect(commands.init(ctx)).rejects.toMatchObject({ reason: 'recovery-required' })
+      await expect(commands.connect(ctx)).rejects.toMatchObject({ reason: 'recovery-required' })
       expect(ctx.fetch).not.toHaveBeenCalled()
       expect(existsSync(dbFile())).toBe(false)
     })
@@ -215,7 +196,7 @@ describe('initial CLI recovery and lifecycle holds', () => {
     await expect(commands.run(ctx)).rejects.toMatchObject({ reason: 'recovery-required' })
     expect(ctx.fetch).not.toHaveBeenCalled()
   })
-  for (const key of ['deferred-changes', 'owner-publication-held', 'pull-write:file'])
+  for (const key of ['deferred-changes', 'pull-write:file'])
     it(`BUG: ${key} dependencies are not bypassed by force retirement`, async () => {
       const state = SqliteStateStore.open(dbFile())
       const value =
@@ -241,23 +222,14 @@ describe('initial CLI recovery and lifecycle holds', () => {
                 },
               ],
             }
-          : key === 'owner-publication-held'
-            ? [
-                {
-                  batchId: 'held',
-                  idempotencyKey: 'held',
-                  startedAt: new Date().toISOString(),
-                  ops: [],
-                },
-              ]
-            : {
-                fileId: 'file',
-                versionId: 'version',
-                target: 'Media/a.jpg',
-                wirePath: 'Media/a.jpg',
-                from: null,
-                base: null,
-              }
+          : {
+              fileId: 'file',
+              versionId: 'version',
+              target: 'Media/a.jpg',
+              wirePath: 'Media/a.jpg',
+              from: null,
+              base: null,
+            }
       state.setMeta(key, JSON.stringify(value))
       state.close()
       const ctx = context()
@@ -273,8 +245,8 @@ describe('initial CLI recovery and lifecycle holds', () => {
     })
     expect(readFileSync(join(stateFolder(dir), 'tmp', 'incoming'), 'utf8')).toBe('retained bytes')
   })
-  it('BUG: orphaned scoped staging bytes block startup and forced retirement without deletion', async () => {
-    const path = join(stateFolder(dir), 'scoped-outbox', 'orphan')
+  it('BUG: orphaned disconnect staging bytes block startup and retirement without deletion', async () => {
+    const path = join(stateFolder(dir), 'disconnect-staging')
     await mkdir(path, { recursive: true })
     await writeFile(join(path, 'incoming'), 'retained source')
     const ctx = context()

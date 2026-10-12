@@ -40,19 +40,24 @@ describe('first sync of a device that already has files', () => {
 
     const pushed = await newcomer.sync()
     expect(pushed?.results).toEqual([
-      expect.objectContaining({ status: 'merged', path: 'Diff.md' }),
+      expect.objectContaining({ status: 'conflict', path: 'Diff.md' }),
       expect.objectContaining({ status: 'applied', path: 'diff.png' }),
       expect.objectContaining({ status: 'applied', path: 'Only on the newcomer.md' }),
     ])
     // The two equal files linked to the server's without a byte moving either way.
     expect(newcomer.state.get('Same.md')?.fileId).toBe(laptop.state.get('Same.md')?.fileId)
     expect(newcomer.state.get('same.png')?.fileId).toBe(laptop.state.get('same.png')?.fileId)
-    // Uploads: the three unique blobs; downloads: the laptop-only note and the merged text.
+    // Uploads: three unique blobs; downloads: the laptop-only note and unchanged original.
     expect(newcomer.stats).toEqual({ blobPuts: 3, blobHeads: 3, blobGets: 2, commits: 1 })
 
+    const result = pushed?.results[0]
+    if (result?.status !== 'conflict') throw new Error('expected complete conflict copy')
+    const copy = result.conflict_path
+    expect(copy).toMatch(/^Diff \(Conflicted copy newcomer \d{12}\)\.md$/)
     await converge(laptop, newcomer)
     for (const d of [laptop, newcomer]) {
       expect([...d.disk.keys()].sort()).toEqual([
+        copy,
         'Diff.md',
         'Only on the laptop.md',
         'Only on the newcomer.md',
@@ -60,7 +65,8 @@ describe('first sync of a device that already has files', () => {
         'diff.png',
         'same.png',
       ])
-      expect(d.text('Diff.md')).toBe('laptop wrote this\nnewcomer wrote this\n')
+      expect(d.text('Diff.md')).toBe('laptop wrote this\n')
+      expect(d.text(copy)).toBe('newcomer wrote this\n')
       expect(d.disk.get('diff.png')?.content.equals(newerImage)).toBe(true)
       expect(d.disk.get('same.png')?.content.equals(sameImage)).toBe(true)
     }

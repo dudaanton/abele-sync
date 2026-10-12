@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import { bytesFor } from '../../src/apply.js'
-import { encodeText, MemoryFileSystem, sha256, type VaultClient } from '../../src/index.js'
+import { encodeText, MemoryFileSystem, sha256, type VaultClient } from '../legacy/index.js'
 
 it('hashes local bytes even when the stat before reading matched the ledger', async () => {
   const fs = new MemoryFileSystem()

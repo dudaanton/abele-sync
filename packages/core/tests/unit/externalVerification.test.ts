@@ -1,31 +1,28 @@
 import { describe, expect, it, vi } from 'vitest'
-import { SyncClient } from '../../src/client.js'
-import { createScopedClient } from '../../src/scopedClient.js'
+import { V2EngineClient } from '../../src/v2Client.js'
+import { encodeAccessToken } from '@abele/sync-protocol'
 
 const capabilities = {
   extension_version: 1,
   projection_schema: 1,
-  personal: true,
-  scoped: true,
+  token: true,
   verification: { live_head: true, sha256: true, actual_size: true, authorization_rechecked: true },
   max_file_size: 200 * 1024 * 1024,
 }
 const expected = { version_id: 'v', path: 'Agents/a.bin', sha: 'a'.repeat(64), size: 12 }
 const response = { verified: true, file_id: 'file', ...expected }
-async function client(mode: 'personal' | 'scoped', fetch: typeof globalThis.fetch) {
-  const opts = { baseUrl: 'https://issuer.example.test', fetch }
-  return mode === 'personal'
-    ? new SyncClient({ ...opts, token: `absd_${'d'.repeat(43)}` }).forVault('vault')
-    : createScopedClient({
-        ...opts,
-        token: `absk_${'k'.repeat(43)}`,
-        vaultId: 'vault',
-        grantId: 'grant',
-        principalKind: 'key',
-        principalId: 'key',
-      })
+async function client(_mode: 'token', fetch: typeof globalThis.fetch) {
+  return new V2EngineClient(
+    encodeAccessToken({
+      v: 1,
+      address: 'https://issuer.example.test',
+      key: 'k'.repeat(43),
+      scope: { kind: 'folder', id: 'folder', path: '/' },
+    }),
+    { fetch }
+  )
 }
-for (const mode of ['personal', 'scoped'] as const)
+for (const mode of ['token'] as const)
   describe(`external verification client (${mode})`, () => {
     it('BUG: negotiates and verifies the exact request with version headers and no fallback', async () => {
       const requests: { url: string; init: RequestInit }[] = []
@@ -36,19 +33,11 @@ for (const mode of ['personal', 'scoped'] as const)
       const c = await client(mode, fetch as typeof globalThis.fetch)
       expect(await c.verifyExternalFile('file', expected)).toEqual(response)
       expect(requests.map((r) => r.url)).toEqual([
-        'https://issuer.example.test/v1/external-files/capabilities',
-        mode === 'personal'
-          ? 'https://issuer.example.test/v1/vaults/vault/files/file/external/verify'
-          : 'https://issuer.example.test/v1/scoped/vaults/vault/grants/grant/files/file/external/verify',
+        'https://issuer.example.test/v2/external-files/capabilities',
+        'https://issuer.example.test/v2/files/file/external/verify',
       ])
       expect(requests[1]!.init.headers).toMatchObject({ 'x-abele-external-files-version': '1' })
       expect(JSON.parse(String(requests[1]!.init.body))).toEqual(expected)
-      if (mode === 'scoped')
-        for (const r of requests) {
-          expect(r.init.headers).toMatchObject({ 'x-abele-scoped-version': '4' })
-          expect(r.init.redirect).toBe('manual')
-          expect(r.init.cache).toBe('no-store')
-        }
     })
     for (const unavailable of ['absent', 'unknown', 'partial', 'disabled', 'malformed'] as const)
       it(`BUG: ${unavailable} extension refuses verification before any destructive continuation`, async () => {
@@ -143,10 +132,8 @@ it('BUG: personal head sends extension version and decodes existing manifest met
     async (_input: string | URL | Request, _init?: RequestInit) =>
       new Response(JSON.stringify(head))
   )
-  const c = await client('personal', fetch as typeof globalThis.fetch)
+  const c = await client('token', fetch as typeof globalThis.fetch)
   expect(await c.head('file')).toEqual(head)
-  expect(fetch.mock.calls[0]![0]).toBe(
-    'https://issuer.example.test/v1/vaults/vault/files/file/head'
-  )
+  expect(fetch.mock.calls[0]![0]).toBe('https://issuer.example.test/v2/files/file/head')
   expect(fetch.mock.calls[0]![1]!.headers).toMatchObject({ 'x-abele-external-files-version': '1' })
 })

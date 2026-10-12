@@ -14,9 +14,8 @@ import {
   waitForFolderWork,
   clientFor,
   converge,
-  EMAIL,
-  PASSWORD,
   read,
+  listing,
   SETUP_MS,
   syncOnce,
   vaultPair,
@@ -26,7 +25,6 @@ import {
 let server: SpawnedServer
 beforeEach(async () => {
   server = await spawnServer()
-  await server.createAccount(EMAIL, PASSWORD)
 }, SETUP_MS)
 afterEach(async () => {
   await waitForFolderWork()
@@ -72,28 +70,6 @@ async function killAt(dir: string, cut: string, env: NodeJS.ProcessEnv = {}) {
 describe('Adversarial: real daemon SIGKILL, local files and SQLite state', () => {
   // File transfers can exceed 30 seconds under concurrent full-suite load. Completion
   // is the acknowledged cut and child exit, not elapsed time; SETUP_MS is a safety deadline.
-  // BUG: B15 — config is switched before the old vault's ledger is discarded.
-  it(
-    'B15 restart after switching config to B must walk B instead of trusting cursor A',
-    () =>
-      withFolderWork(async () => {
-        const old = await vaultPair(server, 'old-vault')
-        const next = await vaultPair(server, 'new-vault')
-        for (let i = 0; i < 5; i++) await write(old.a, `old-${i}.md`, `old ${i}`)
-        await converge(old.a, old.b)
-        await write(next.a, 'new.md', 'must be downloaded')
-        await syncOnce(next.a)
-        await killAt(old.b, 'init-config', {
-          ABELE_TEST_SERVER: server.url,
-          ABELE_TEST_NEXT_VAULT: 'new-vault',
-        })
-        expect(config(old.b).vaultId).toBe(next.vaultId)
-        await syncOnce(old.b)
-        expect(await read(old.b, 'new.md').catch(() => null)).toBe('must be downloaded')
-      }),
-    SETUP_MS
-  )
-
   // BUG: B12 — committed deletes are not tallied in the same durable transaction.
   it(
     'B12 SIGKILL before delete tally must not bypass the rolling 50-delete guard',
@@ -144,9 +120,12 @@ describe('Adversarial: real daemon SIGKILL, local files and SQLite state', () =>
             writeConfig(b, { ...config(b), ...(prefer ? { joinPrefer: prefer } : {}) })
             await killAt(b, cut)
             await converge(a, b)
-            expect(await read(b, 'note.md')).toBe(
-              prefer === 'mine' ? 'local\n' : prefer === 'theirs' ? 'remote\n' : 'remote\nlocal\n'
-            )
+            expect(await read(b, 'note.md')).toBe(prefer === 'mine' ? 'local\n' : 'remote\n')
+            if (prefer === undefined) {
+              const copies = (await listing(b)).filter((p) => p.startsWith('note (Conflicted copy'))
+              expect(copies).toHaveLength(1)
+              expect(await read(b, copies[0]!)).toBe('local\n')
+            }
           }),
         SETUP_MS
       )
@@ -191,10 +170,14 @@ describe('Adversarial: real daemon SIGKILL, local files and SQLite state', () =>
   for (const cut of [
     'scan',
     'upload',
+    'upload-read',
+    'upload-second-pass',
     'commit-before',
     'commit-after',
     'record',
     'pull-write',
+    'pull-append',
+    'pull-seal',
     'pull-ledger',
     'pull-cursor',
   ]) {

@@ -9,11 +9,10 @@ import {
   config,
   folder,
   clientFor,
-  EMAIL,
-  PASSWORD,
   read,
   SETUP_MS,
   syncOnce,
+  touch,
   vaultPair,
   write,
 } from './helpers/folders.js'
@@ -24,7 +23,6 @@ let a: string, b: string
 const code = (id: string, file = 'main.js') => `.obsidian/plugins/${id}/${file}`
 beforeAll(async () => {
   server = await spawnServer()
-  await server.createAccount(EMAIL, PASSWORD)
   ;({ a, b } = await vaultPair(server, 'Plugin confirmation'))
 }, SETUP_MS)
 afterAll(async () => {
@@ -281,24 +279,18 @@ describe('daemon plugin code approval', () => {
     await syncOnce(a)
     const c = await folder()
     await write(c, code('joining'), 'localAtJoin()')
-    const init = await cli(
-      [
-        'init',
-        '--dir',
-        c,
-        '--server',
-        server.url,
-        '--email',
-        EMAIL,
-        '--vault',
-        'Plugin confirmation',
-        '--prefer',
-        'server',
-      ],
-      { ABELE_PASSWORD: PASSWORD }
-    )
-    expect(init.code, init.all).toBe(0)
-    expect(config(c).joinPrefer).toBe('theirs')
+    // Without the removed --prefer flag, executable binaries use newer-wins.
+    // Make the incoming server candidate newer while keeping the local file active.
+    await touch(c, code('joining'), 1)
+    const connected = await cli([
+      'connect',
+      '--dir',
+      c,
+      '--token',
+      server.tokenFor('Plugin confirmation', 'joining'),
+    ])
+    expect(connected.code, connected.all).toBe(0)
+    expect(config(c).joinPrefer).toBeUndefined()
     await syncOnce(c)
     expect(await read(c, code('joining'))).toBe('localAtJoin()')
     await syncOnce(c)

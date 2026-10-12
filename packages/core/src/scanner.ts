@@ -7,6 +7,8 @@ import {
   type CommitOp,
 } from '@abele/sync-protocol'
 import type { FileInfo, FileSystem } from './fs.js'
+import { fingerprintFile } from './fs.js'
+import { MAX_TEXT_BYTES } from './streaming.js'
 import { sha256 } from './hash.js'
 import { alike, comparable } from './likeness.js'
 import { isEngineOwn } from './selective.js'
@@ -301,7 +303,9 @@ export async function scan(
     }
     let sha: string
     try {
-      sha = await hash(await fs.read(info.path))
+      const fingerprint = await fingerprintFile(fs, info.path, hash)
+      if (fingerprint.size !== info.size) throw new Error('file changed during scan')
+      sha = fingerprint.sha
     } catch (error) {
       // Read after list is a race: the file may be gone or locked. Leave it for the next scan.
       skip(info.path, reasonOf(error))
@@ -336,7 +340,14 @@ export async function scan(
   missing.sort((a, b) => byPath(a.wirePath, b.wirePath))
   const moves = await pairRenames(missing, fresh, hashes, async (lost, found) => {
     const path = diskPaths.get(found)
-    if (opts.previous === undefined || path === undefined || !comparable(found)) return false
+    if (
+      opts.previous === undefined ||
+      path === undefined ||
+      !comparable(found) ||
+      lost.size > MAX_TEXT_BYTES ||
+      (infos.get(found)?.size ?? Infinity) > MAX_TEXT_BYTES
+    )
+      return false
     try {
       const before = await opts.previous(lost)
       return before !== null && alike(before, await fs.read(path))

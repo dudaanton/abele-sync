@@ -1,6 +1,5 @@
 import type { Generated } from 'kysely'
-import type { AuthorityDatabase } from './schemaAuthority.js'
-import type { ViewsDatabase } from './schemaViews.js'
+import type { AccessDatabase } from './schemaAccess.js'
 import type { Actor, FileKind, VersionOp } from '@abele/sync-protocol'
 
 /**
@@ -8,57 +7,10 @@ import type { Actor, FileKind, VersionOp } from '@abele/sync-protocol'
  * is integer milliseconds, sizes are integer bytes and JSON columns are text.
  */
 
-export interface AccountsTable {
-  id: string
-  email: string
-  password_hash: string
-  created_at: string
-  disabled_at: string | null
-}
-
-export interface AccountTokensTable {
-  token_hash: string
-  account_id: string
-  expires_at: string
-  /** Null legacy sessions cannot establish fresh owner authentication. */
-  issued_at: Generated<string | null>
-}
-
-export interface VaultsTable {
-  id: string
-  owner_account_id: string
-  name: string
-  /** JSON: VaultSettings. */
-  settings: string
-  created_at: string
-}
-
-export interface VaultMembersTable {
-  vault_id: string
-  account_id: string
-  role: string
-}
-
 export interface VaultSeqTable {
   vault_id: string
   head_seq: number
   epoch: Generated<number>
-}
-
-export interface DevicesTable {
-  id: string
-  account_id: string
-  vault_id: string
-  name: string
-  platform: string
-  token_hash: string
-  /** JSON: the device's selective-sync rules. */
-  selective: string
-  created_at: string
-  last_seen_at: string | null
-  revoked_at: string | null
-  /** The device whose token enrolled this one (`POST /v1/devices/self/siblings`); null for an account's. */
-  enrolled_by: string | null
 }
 
 export interface FilesTable {
@@ -168,13 +120,26 @@ export interface UsageDailyTable {
   by_kind: string
 }
 
-export interface Database extends AuthorityDatabase, ViewsDatabase {
-  accounts: AccountsTable
-  account_tokens: AccountTokensTable
-  vaults: VaultsTable
-  vault_members: VaultMembersTable
+/** Metadata survives file deletion and payload GC. No identity is inferred from old names. */
+export interface ConflictDivergencesTable {
+  divergence_key: string
+  vault_id: string
+  original_file_id: string
+  base_identity: string
+  incoming_sha: string
+  /** Explicit create locator evidence, not an identity component or filename inference. */
+  create_path_ci: string | null
+  conflict_file_id: string
+  conflict_version_id: string
+  first_head_version_id: string
+  chosen_path: string
+  created_at: string
+  disposition: 'copy' | 'deleted'
+}
+
+export interface Database extends AccessDatabase {
+  conflict_divergences: ConflictDivergencesTable
   vault_seq: VaultSeqTable
-  devices: DevicesTable
   files: FilesTable
   versions: VersionsTable
   blobs: BlobsTable

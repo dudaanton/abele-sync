@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "rootDir": ".",
+    "outDir": "../../.scratch/retained-test"
+  },
+  "include": [
+    "tests/helpers/retainedEngineApp.ts",
+    "tests/helpers/retainedEngineMigrations.ts",
+    "tests/helpers/retainedRetention.ts"
+  ]
+}

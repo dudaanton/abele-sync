@@ -59,10 +59,11 @@ const JOIN_KEY = 'join-open'
 export class SyncCycle {
   readonly filter: ScanFilter
   /**
-   * The vault's own cap on a file, as the server last said it: a file over it is excluded
-   * here, as it would be by the local cap, rather than uploaded to be refused.
+   * The server's own cap. Pulls exclude larger files; clients opting into size
+   * refusals still scan local files so the push reports their pending work.
    */
   private serverCap: number | null = null
+  private readonly scanFilter: ScanFilter
   /** sha → the refusal the server gave it for good, until the cap or the quota change. */
   private readonly refused = new Map<string, Refusal>()
   /** The cap and the quota the refusals were given under; a change empties the map. */
@@ -97,12 +98,17 @@ export class SyncCycle {
   constructor(private readonly ctx: CycleContext) {
     const { opts } = ctx
     const scriptsFolder = opts.scriptsFolder ?? DEFAULT_SCRIPTS_FOLDER
-    this.filter = {
+    const localFilter: ScanFilter = {
       excluded: (path, size) =>
-        (this.serverCap !== null && size > this.serverCap) ||
+        (opts.client.includes !== undefined && !opts.client.includes(path)) ||
         isExcluded(path, size, opts.selective, scriptsFolder) ||
         (opts.ignore?.ignores(path) ?? false),
     }
+    this.filter = {
+      excluded: (path, size) =>
+        (this.serverCap !== null && size > this.serverCap) || localFilter.excluded(path, size),
+    }
+    this.scanFilter = opts.client.reportSizeRefusals ? localFilter : this.filter
     // Through the guard like every other state write.
     this.scope = new ScopeMarks(opts.state)
     this.asides = new AsideMarks(opts.state)
@@ -184,13 +190,23 @@ export class SyncCycle {
    */
   async cycle(): Promise<SyncReport> {
     const { client, fs, state } = this.ctx.opts
+    await client.prepare?.(
+      fs,
+      state,
+      (path) =>
+        this.ctx.opts.ignore?.ignores(path + '/') === true ||
+        (this.ctx.opts.selective?.excludedFolders ?? []).some(
+          (folder) => path === folder || path.startsWith(folder + '/')
+        )
+    )
     const log = this.ctx.log
     const common = {
+      ...(this.ctx.opts.transferBudget === undefined
+        ? {}
+        : { transferBudget: this.ctx.opts.transferBudget }),
       expected: this.ctx.expected,
       refused: this.refused,
       filter: this.filter,
-      beforeUpload: this.ctx.opts.beforeUpload,
-      onSettled: this.ctx.opts.onSettled,
       // A push answered with the server's bytes for a staged path stages them, as a pull would
       ...(this.ctx.opts.defer === undefined
         ? {}
@@ -249,6 +265,7 @@ export class SyncCycle {
     // describe a disk the state does not know about yet.
     const replayed = await resumeJournal(client, fs, state, { ...common, onCommitted: tally })
     for (const path of replayed?.kept ?? []) this.kept.add(path)
+    await client.syncDirectories?.()
 
     // The watcher's latest batch, without waiting for the debounce: what it holds is exactly
     // what the pull must not write over.
@@ -270,7 +287,7 @@ export class SyncCycle {
     // from a delete and an unrelated create (`likeness.ts`).
     const previous = (entry: StateEntry): Promise<Uint8Array | null> =>
       fetchChecked(client, entry.sha, sha256)
-    const found = await scan(fs, state, this.filter, { log, previous })
+    const found = await scan(fs, state, this.scanFilter, { log, previous })
     for (const path of seen) reported.delete(path)
     this.unscanned = false
     this.unsettled = new Set(found.dirty)
@@ -327,6 +344,7 @@ export class SyncCycle {
       secondPull = await this.pull(new Set([...this.kept, ...holding]), undefined, holding)
       this.ctx.set({ cursor: secondPull.cursor })
     }
+    if (!this.ctx.stopping()) await client.finishPull?.()
     return {
       pull: before,
       push: pushed,
@@ -422,7 +440,9 @@ export class SyncCycle {
   ): Promise<PullReport> {
     const { client, fs, state } = this.ctx.opts
     const report = await pull(client, fs, state, {
-      onPersonalNoteApplied: this.ctx.opts.onPersonalNoteApplied,
+      ...(this.ctx.opts.transferBudget === undefined
+        ? {}
+        : { transferBudget: this.ctx.opts.transferBudget }),
       filter: this.filter,
       dirty,
       ...(recheck === undefined || recheck.size === 0 ? {} : { recheck }),

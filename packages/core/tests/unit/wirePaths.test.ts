@@ -13,7 +13,7 @@ import {
   type PullReport,
   type ScanFilter,
   type VaultClient,
-} from '../../src/index.js'
+} from '../legacy/index.js'
 
 /**
  * Paths the server has no business sending, and what the engine does with them: nothing.

@@ -12,8 +12,6 @@ import {
   cli,
   clientFor,
   ctxFor,
-  EMAIL,
-  PASSWORD,
   read,
   SETUP_MS,
   syncOnce,
@@ -38,7 +36,6 @@ let b: string
 
 beforeAll(async () => {
   server = await spawnServer()
-  await server.createAccount(EMAIL, PASSWORD)
   const pair = await vaultPair(server, 'Crash')
   a = pair.a
   b = pair.b

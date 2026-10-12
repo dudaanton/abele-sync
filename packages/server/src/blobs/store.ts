@@ -2,7 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes } f
 import { createReadStream, createWriteStream } from 'node:fs'
 import { mkdir, open, readFile, rename, rm, stat, type FileHandle } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import type { Writable } from 'node:stream'
+import { Readable, type Writable } from 'node:stream'
 import { finished } from 'node:stream/promises'
 import { AbeleError } from '@abele/sync-protocol'
 
@@ -228,7 +228,15 @@ export class BlobStore {
 
   /** The size of the authenticated upload's plaintext, without allocating its body. */
   async size(sha: string): Promise<number> {
-    const size = (await stat(this.pathFor(sha))).size - SEAL_OVERHEAD
+    let envelopeSize: number
+    try {
+      envelopeSize = (await stat(this.pathFor(sha))).size
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+        throw new AbeleError('not_found', `no blob ${sha}`)
+      throw error
+    }
+    const size = envelopeSize - SEAL_OVERHEAD
     if (size < 0) throw new AbeleError('internal', `blob ${sha} has a truncated envelope`)
     return size
   }
@@ -252,6 +260,101 @@ export class BlobStore {
     const from = Math.max(0, Math.min(start, bytes.length))
     const to = Math.max(from, Math.min(end + 1, bytes.length))
     return bytes.subarray(from, to)
+  }
+
+  /** Authenticate before exposing any plaintext, then replay the same opened envelope.
+   * AES-GCM authenticates the whole envelope, so ranges require a bounded first pass.
+   * The store only replaces envelopes by rename; the open handle pins that version.
+   */
+  async openRange(sha: string, start = 0, end?: number): Promise<Readable> {
+    let handle: FileHandle
+    try {
+      handle = await open(this.pathFor(sha), 'r')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+        throw new AbeleError('not_found', `no blob ${sha}`)
+      throw error
+    }
+    try {
+      const stats = await handle.stat()
+      const size = stats.size - SEAL_OVERHEAD
+      if (size < 0) throw new AbeleError('internal', `blob ${sha} has a truncated envelope`)
+      const readExact = async (offset: number, length: number) => {
+        const bytes = Buffer.alloc(length)
+        let filled = 0
+        while (filled < length) {
+          const result = await handle.read(bytes, filled, length - filled, offset + filled)
+          if (!result.bytesRead)
+            throw new AbeleError('internal', `blob ${sha} has a truncated envelope`)
+          filled += result.bytesRead
+        }
+        return bytes
+      }
+      const header = await readExact(0, HEADER_BYTES)
+      const tag = await readExact(stats.size - TAG_BYTES, TAG_BYTES)
+      if (!header.subarray(0, MAGIC.length).equals(MAGIC))
+        throw new AbeleError('internal', `blob ${sha} is not an envelope this server wrote`)
+      const makeDecipher = () => {
+        const decipher = createDecipheriv(
+          ALGORITHM,
+          this.keyFor(sha),
+          header.subarray(MAGIC.length)
+        )
+        decipher.setAuthTag(tag)
+        return decipher
+      }
+      const auth = makeDecipher()
+      const hash = createHash('sha256')
+      for (let offset = 0; offset < size; offset += 64 * 1024)
+        hash.update(
+          auth.update(await readExact(HEADER_BYTES + offset, Math.min(64 * 1024, size - offset)))
+        )
+      try {
+        hash.update(auth.final())
+      } catch {
+        throw new AbeleError('internal', `blob ${sha} could not be decrypted`)
+      }
+      if (hash.digest('hex') !== sha)
+        throw new AbeleError('internal', `blob ${sha} has a digest mismatch`)
+      const from = Math.max(0, Math.min(start, size))
+      const to = Math.max(from, Math.min((end ?? size - 1) + 1, size))
+      const stream = Readable.from(
+        (async function* () {
+          try {
+            const decipher = makeDecipher()
+            for (let offset = 0; offset < size; offset += 64 * 1024) {
+              const bytes = decipher.update(
+                await readExact(HEADER_BYTES + offset, Math.min(64 * 1024, size - offset))
+              )
+              const left = Math.max(0, from - offset)
+              const right = Math.min(bytes.length, to - offset)
+              if (right > left) yield bytes.subarray(left, right)
+            }
+            decipher.final()
+          } finally {
+            await handle.close()
+          }
+        })(),
+        { objectMode: false, highWaterMark: 64 * 1024 }
+      )
+      // destroy() before the generator's first next() must also release the pinned handle.
+      stream.once('close', () => {
+        void handle.close().catch(() => {})
+      })
+      return stream
+    } catch (error) {
+      await handle.close()
+      throw error
+    }
+  }
+
+  async *streamRange(sha: string, start: number, end: number): AsyncGenerator<Buffer> {
+    const stream = await this.openRange(sha, start, end)
+    try {
+      for await (const chunk of stream) yield chunk as Buffer
+    } finally {
+      stream.destroy()
+    }
   }
 
   /** Remove a blob. Only retention calls this; a reference count reaching zero does not. */

@@ -4,7 +4,7 @@ import {
   type TestApp,
   type TestAppOptions,
 } from '@abele/sync-server/tests/helpers/testApp.js'
-import { SyncClient, type ClientOptions, type VaultClient } from '../../src/index.js'
+import { SyncClient, type ClientOptions, type VaultClient } from '../legacy/index.js'
 import { fetchFor, wsFor } from './serverFetch.js'
 
 /** The base url every client is given. Only its scheme and shape matter; the host never resolves. */

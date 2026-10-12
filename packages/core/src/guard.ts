@@ -1,7 +1,51 @@
-import type { VaultClient } from './client.js'
+import type { EngineClient } from './engineClient.js'
 import { EngineError } from './errors.js'
 import type { FileSystem } from './fs.js'
 import type { StateStore } from './state.js'
+import type { ChunkSource } from './streaming.js'
+
+function stopped<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(new EngineError('offline', 'sync stopped'))
+    signal.addEventListener('abort', abort, { once: true })
+    work
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener('abort', abort))
+      .catch(() => undefined)
+    if (signal.aborted) abort()
+  })
+}
+
+function stoppedSource(source: ChunkSource, signal: AbortSignal, cleanup: () => void): ChunkSource {
+  let closing: Promise<void> | undefined
+  const close = () => {
+    if (!closing) {
+      signal.removeEventListener('abort', abort)
+      cleanup()
+      closing = Promise.resolve().then(() => source.close())
+    }
+    return closing
+  }
+  const abort = () => {
+    void close().catch(() => undefined)
+  }
+  signal.addEventListener('abort', abort, { once: true })
+  if (signal.aborted) abort()
+  return {
+    size: source.size,
+    signal,
+    ...(source.stamp === undefined ? {} : { stamp: source.stamp }),
+    read: (offset, length, cancellation) => {
+      if (signal.aborted) return Promise.reject(new EngineError('offline', 'sync stopped'))
+      return stopped(source.read(offset, length, cancellation), signal)
+    },
+    assertUnchanged: () => {
+      if (signal.aborted) return Promise.reject(new EngineError('offline', 'sync stopped'))
+      return stopped(source.assertUnchanged(), signal)
+    },
+    close,
+  }
+}
 
 /**
  * The engine's hands, each checked against the host's `stillHeld` before it does anything that
@@ -15,7 +59,7 @@ import type { StateStore } from './state.js'
  *. Reads are never checked, and neither is anything the host does
  * outside the engine.
  */
-export function guarded<T extends { client: VaultClient; fs: FileSystem; state: StateStore }>(
+export function guarded<T extends { client: EngineClient; fs: FileSystem; state: StateStore }>(
   opts: T,
   stillHeld: () => boolean
 ): T {
@@ -28,13 +72,25 @@ export function guarded<T extends { client: VaultClient; fs: FileSystem; state: 
     ...opts,
     client: checking(opts.client, check, {
       commitRaw: 'commit',
+      syncDirectories: 'commit',
+      finishPull: 'write',
       commit: 'commit',
       putBlob: 'upload',
+      putBlobSource: 'upload',
       restore: 'restore',
       restoreDeleted: 'restore',
       restoreDeletedMany: 'restore',
     }),
-    fs: checking(opts.fs, check, { writeAtomic: 'write', move: 'write', remove: 'write' }),
+    fs: checking(opts.fs, check, {
+      beginAtomicWrite: 'write',
+      reopenStage: 'write',
+      writeAtomic: 'write',
+      move: 'write',
+      remove: 'write',
+      mkdir: 'write',
+      removeDirectory: 'write',
+      moveDirectory: 'write',
+    }),
     state: checking(opts.state, check, {
       put: 'record',
       delete: 'record',
@@ -53,10 +109,10 @@ export function guarded<T extends { client: VaultClient; fs: FileSystem; state: 
  * socket, but correctness does not depend on that cancellation being honoured.
  */
 export function stoppableClient(
-  client: VaultClient,
+  client: EngineClient,
   signalFor: () => AbortSignal,
   activeWrites: { count: number }
-): VaultClient {
+): EngineClient {
   return new Proxy(client, {
     get(target, key) {
       const value: unknown = Reflect.get(target, key)
@@ -64,32 +120,67 @@ export function stoppableClient(
       return (...args: unknown[]): unknown => {
         const signal = signalFor()
         if (signal.aborted) throw new EngineError('offline', 'sync stopped')
-        const mutating = [
-          'commitRaw',
-          'commit',
-          'putBlob',
-          'restore',
-          'restoreDeleted',
-          'restoreDeletedMany',
-          'updateSettings',
-          'revokeVaultDevice',
-        ].includes(String(key))
+        let cleanup = () => {}
+        if (key === 'openVersion' || key === 'putBlobSource') {
+          const at = key === 'openVersion' ? 3 : 2
+          const provided = args[at] as AbortSignal | undefined
+          const controller = new AbortController()
+          const abort = () => controller.abort(signal.aborted ? signal.reason : provided?.reason)
+          signal.addEventListener('abort', abort, { once: true })
+          provided?.addEventListener('abort', abort, { once: true })
+          if (provided?.aborted) abort()
+          args[at] = controller.signal
+          cleanup = () => {
+            signal.removeEventListener('abort', abort)
+            provided?.removeEventListener('abort', abort)
+          }
+        }
+        const mutating =
+          (client.readEffects === true &&
+            ['prepare', 'manifest', 'changes'].includes(String(key))) ||
+          [
+            'commitRaw',
+            'syncDirectories',
+            'finishPull',
+            'commit',
+            'putBlob',
+            'putBlobSource',
+            'restore',
+            'restoreDeleted',
+            'restoreDeletedMany',
+            'updateSettings',
+            'revokeVaultDevice',
+          ].includes(String(key))
         if (mutating) activeWrites.count++
         let result: unknown
         try {
           result = (value as (...params: unknown[]) => unknown).apply(target, args)
         } catch (error) {
+          cleanup()
           if (mutating) activeWrites.count--
           throw error
         }
         if (!(result instanceof Promise)) {
+          cleanup()
           if (mutating) activeWrites.count--
           return result
         }
         if (mutating)
           return result.finally(() => {
+            cleanup()
             activeWrites.count--
           })
+        if (key === 'openVersion') {
+          const source = result.then(
+            (value) => stoppedSource(value as ChunkSource, args[3] as AbortSignal, cleanup),
+            (error) => {
+              cleanup()
+              throw error
+            }
+          )
+          return stopped(source, signal)
+        }
+        cleanup()
         return new Promise((resolve, reject) => {
           const abort = (): void => reject(new EngineError('offline', 'sync stopped'))
           signal.addEventListener('abort', abort, { once: true })
@@ -133,7 +224,18 @@ function checking<T extends object>(
       if (what === undefined) return (value as (...args: unknown[]) => unknown).bind(obj)
       return (...args: unknown[]): unknown => {
         check(what)
-        return (value as (...args: unknown[]) => unknown).apply(obj, args)
+        const result = (value as (...args: unknown[]) => unknown).apply(obj, args)
+        if (key === 'beginAtomicWrite' || key === 'reopenStage') {
+          return Promise.resolve(result).then((stage) =>
+            checking(stage as import('./streaming.js').AtomicStage, check, {
+              append: 'write',
+              seal: 'write',
+              commit: 'write',
+              discard: 'write',
+            })
+          )
+        }
+        return result
       }
     },
   })

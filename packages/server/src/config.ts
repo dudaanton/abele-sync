@@ -1,4 +1,4 @@
-import { registeredConfigurationDirectories } from './scoped/folderSecurity.js'
+import { registeredConfigurationDirectories } from './configurationDirectories.js'
 
 /** Server configuration, read once from the process environment. */
 export interface Config {
@@ -19,13 +19,10 @@ export interface Config {
   maxFileBytes: number
   simpleUploadBytes: number
   partBytes: number
-  accountTokenTtlMs: number
   idempotencyTtlMs: number
   retentionIntervalMs: number
   wsHelloTimeoutMs: number
-  /** Explicit all-or-nothing activation of scoped sync, management and publication. */
-  scopedSharing: boolean
-  /** Trusted registered configuration roots; cannot be overridden by a scoped request. */
+  /** Trusted configuration roots; cannot be overridden by token display hints. */
   configurationDirectories?: readonly string[]
 }
 
@@ -53,19 +50,11 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     maxFileBytes: 200 * MB,
     simpleUploadBytes: 8 * MB,
     partBytes: 8 * MB,
-    accountTokenTtlMs: HOUR_MS,
     idempotencyTtlMs: 24 * HOUR_MS,
     retentionIntervalMs: 6 * HOUR_MS,
     wsHelloTimeoutMs: 5000,
-    scopedSharing: scopedSharingFromEnv(env.ABELE_SCOPED_SHARING),
     configurationDirectories: configurationDirectoriesFromEnv(env.ABELE_CONFIGURATION_DIRS),
   }
-}
-
-function scopedSharingFromEnv(raw: string | undefined): boolean {
-  if (raw === undefined || raw === 'off') return false
-  if (raw === 'on') return true
-  throw new Error('ABELE_SCOPED_SHARING must be on or off')
 }
 
 function configurationDirectoriesFromEnv(raw: string | undefined): readonly string[] {

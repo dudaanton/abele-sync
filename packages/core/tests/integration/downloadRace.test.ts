@@ -10,7 +10,7 @@ import {
 } from '../../src/index.js'
 import { PullPlacer } from '../../src/pullPlace.js'
 import type { ChangeItem } from '@abele/sync-protocol'
-import type { VaultClient } from '../../src/client.js'
+import type { VaultClient } from '../legacy/client.js'
 import { serverHarness, type Harness } from '../helpers/harness.js'
 
 it('holds a pull when a fallback download races a same-stat local edit', async () => {

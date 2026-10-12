@@ -391,7 +391,15 @@ export type TrashRestoreRequest = z.infer<typeof TrashRestoreRequestSchema>
 
 /* ── Uploads ────────────────────────────────────────────────────────────── */
 
-export const UploadBeginRequestSchema = z.object({ size: z.number().int().positive() })
+export const UploadBeginRequestSchema = z.object({
+  size: z.number().int().positive(),
+  max_part_bytes: z
+    .number()
+    .int()
+    .positive()
+    .max(1024 * 1024)
+    .optional(),
+})
 export type UploadBeginRequest = z.infer<typeof UploadBeginRequestSchema>
 
 export const UploadBeginResponseSchema = z.object({

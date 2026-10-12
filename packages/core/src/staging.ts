@@ -1,9 +1,10 @@
 import { normalisePath, type ChangeItem, type CommitOp } from '@abele/sync-protocol'
-import type { VaultClient } from './client.js'
+import type { EngineClient } from './engineClient.js'
 import { deferredSource, StagedChanges, touchesDeferred, type Staged } from './defer.js'
 import { sha256 } from './hash.js'
 import type { ExpectedWrites } from './echo.js'
 import type { FileSystem } from './fs.js'
+import { fingerprintFile } from './fs.js'
 import { applyStaged } from './puller.js'
 import type { ScanFilter } from './scanner.js'
 import { isEngineOwn } from './selective.js'
@@ -81,7 +82,7 @@ function supersededLine(change: ChangeItem, entry: StateEntry | null, ours: bool
 
 /** The engine's adapters and settings, as staging needs them. */
 export interface StagingContext {
-  client: VaultClient
+  client: EngineClient
   fs: FileSystem
   state: StateStore
   filter: ScanFilter
@@ -259,7 +260,8 @@ export class Staging {
       const same =
         settled.sha === null
           ? here === null
-          : here !== null && (await sha256(await this.ctx.fs.read(settled.path))) === settled.sha
+          : here !== null &&
+            (await fingerprintFile(this.ctx.fs, settled.path, sha256)).sha === settled.sha
       if (same) {
         waiting.add(one.change.file_id)
         paths.add(normalisePath(settled.path))

@@ -8,6 +8,7 @@ import { readJson, writeJson } from '../db/json.js'
 import type { Database } from '../db/schema.js'
 import { newId } from '../ids.js'
 import { withVaultLock } from '../oplog/lock.js'
+import { getVaultSettings } from '../access/spaceSettings.js'
 import { hasRoom, waitOn, type UploadOwner } from './pending.js'
 import { SEAL_OVERHEAD, type BlobStore } from './store.js'
 
@@ -43,7 +44,8 @@ export class UploadManager {
     private readonly partBytes: number,
     private readonly maxFileBytes: number,
     private readonly now: () => Date = () => new Date(),
-    private readonly dialect: Dialect = 'sqlite'
+    private readonly dialect: Dialect = 'sqlite',
+    private readonly authorizeOwner?: (db: Kysely<Database>, owner: UploadOwner) => Promise<void>
   ) {}
 
   /**
@@ -51,7 +53,18 @@ export class UploadManager {
    * upload is counted against its vault, under the vault's lock, and replaces any upload of the
    * same bytes that device has open and is not completing.
    */
-  async begin(sha: string, size: number, owner?: UploadOwner): Promise<UploadBeginResponse> {
+  async begin(
+    sha: string,
+    size: number,
+    owner?: UploadOwner,
+    maxPartBytes?: number
+  ): Promise<UploadBeginResponse> {
+    if (
+      maxPartBytes !== undefined &&
+      (!Number.isInteger(maxPartBytes) || maxPartBytes < 1 || maxPartBytes > 1024 * 1024)
+    )
+      throw new AbeleError('invalid_request', 'invalid client part size')
+    const partBytes = Math.min(this.partBytes, maxPartBytes ?? this.partBytes)
     if (!Number.isInteger(size) || size <= 0) {
       throw new AbeleError('invalid_request', 'an upload needs a positive whole size')
     }
@@ -67,7 +80,7 @@ export class UploadManager {
       id,
       sha,
       size,
-      part_size: this.partBytes,
+      part_size: partBytes,
       parts_received: writeJson([]),
       created_at: this.now().toISOString(),
       vault_id: owner?.vaultId ?? null,
@@ -79,6 +92,10 @@ export class UploadManager {
       await this.db.insertInto('uploads').values(row).execute()
     } else {
       const result = await withVaultLock(this.db, this.dialect, owner.vaultId, async (trx) => {
+        await this.authorizeOwner?.(trx, owner)
+        const settings = await getVaultSettings({ db: trx }, owner.vaultId)
+        if (size > settings.max_file_bytes)
+          throw new AbeleError('too_large', 'file exceeds the space limit')
         const earlier = await trx
           .selectFrom('uploads')
           .select(['id', 'size', 'part_size'])
@@ -90,10 +107,12 @@ export class UploadManager {
         // Re-open the same upload after a client restart rather than discarding the bytes it
         // already sent. An upload of another size is replaced under the same vault lock.
         const same = earlier.find((upload) => Number(upload.size) === size)
+        if (same !== undefined && same.part_size !== partBytes)
+          throw new AbeleError('conflict', 'cannot resume an upload with a different part layout')
         if (same !== undefined) return { same, replaced: [] as string[] }
         const ids = earlier.map((upload) => upload.id)
         if (ids.length > 0) await trx.deleteFrom('uploads').where('id', 'in', ids).execute()
-        await hasRoom(trx, owner.vaultId, sha, size)
+        await hasRoom(trx, owner.vaultId, sha, size, this.authorizeOwner === undefined)
         await trx.insertInto('uploads').values(row).execute()
         return { same: null, replaced: ids }
       })
@@ -117,8 +136,8 @@ export class UploadManager {
     await mkdir(this.dirFor(id), { recursive: true })
     return {
       upload_id: id,
-      part_size: this.partBytes,
-      parts: partCount(size, this.partBytes),
+      part_size: partBytes,
+      parts: partCount(size, partBytes),
       received: [],
     }
   }
@@ -205,6 +224,7 @@ export class UploadManager {
       await this.db.deleteFrom('uploads').where('id', '=', uploadId).execute()
     } else {
       await withVaultLock(this.db, this.dialect, vaultId, async (trx) => {
+        await this.authorizeOwner?.(trx, { vaultId, deviceId, sha: stored.sha })
         await waitOn(trx, { vaultId, deviceId, sha: stored.sha, size: stored.size, at: this.now() })
         await trx.deleteFrom('uploads').where('id', '=', uploadId).execute()
       })
@@ -388,6 +408,7 @@ export class UploadManager {
 
   /** The upload, if there is one this owner may touch: another device's is not found either. */
   private async row(uploadId: string, owner?: UploadOwner) {
+    if (owner) await this.authorizeOwner?.(this.db, owner)
     const upload = await this.db
       .selectFrom('uploads')
       .selectAll()
@@ -395,7 +416,10 @@ export class UploadManager {
       .executeTakeFirst()
     if (
       !upload ||
-      (owner !== undefined && upload.device_id !== null && upload.device_id !== owner.deviceId)
+      (owner !== undefined &&
+        (upload.device_id !== owner.deviceId ||
+          upload.vault_id !== owner.vaultId ||
+          (owner.sha !== undefined && upload.sha !== owner.sha)))
     ) {
       throw new AbeleError('not_found', `no upload ${uploadId}`)
     }
@@ -410,6 +434,7 @@ export function createUploadManager(deps: {
   store: BlobStore
   now?: () => Date
   dialect?: Dialect
+  authorizeOwner?: (db: Kysely<Database>, owner: UploadOwner) => Promise<void>
 }): UploadManager {
   return new UploadManager(
     deps.db,
@@ -418,7 +443,8 @@ export function createUploadManager(deps: {
     deps.config.partBytes,
     deps.config.maxFileBytes,
     deps.now,
-    deps.dialect
+    deps.dialect,
+    deps.authorizeOwner
   )
 }
 

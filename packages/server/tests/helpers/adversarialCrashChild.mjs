@@ -2,11 +2,11 @@
 import { join } from 'node:path'
 import { mkdir } from 'node:fs/promises'
 import { createDb } from '../../dist/db/connect.js'
-import { runMigrations } from '../../dist/db/migrate.js'
+import { runRetainedEngineMigrations as runMigrations } from './retainedEngineServer.mjs'
 import { BlobStore } from '../../dist/blobs/store.js'
 import { addRef } from '../../dist/blobs/refs.js'
 import { collectUnreferenced } from '../../dist/blobs/pending.js'
-import { runRetention } from '../../dist/history/retention.js'
+import { runRetainedEngineRetention as runRetention } from '../../../../.scratch/retained-test/tests/helpers/retainedRetention.js'
 import { UploadManager } from '../../dist/blobs/uploads.js'
 
 const [dir, mode, phase] = process.argv.slice(2)

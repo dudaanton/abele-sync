@@ -8,9 +8,7 @@ import { writeLive } from '../../src/progress.js'
 import {
   cleanupFolders,
   cli,
-  EMAIL,
   manifestPaths,
-  PASSWORD,
   SETUP_MS,
   vaultPair,
   write,
@@ -26,7 +24,6 @@ let server: SpawnedServer
 
 beforeAll(async () => {
   server = await spawnServer()
-  await server.createAccount(EMAIL, PASSWORD)
 }, SETUP_MS)
 
 afterAll(async () => {

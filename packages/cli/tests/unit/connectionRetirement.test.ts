@@ -10,6 +10,7 @@ import {
   resumeConnectionRetirement,
 } from '../../src/connectionRetirement.js'
 import { SqliteStateStore } from '../../src/sqliteState.js'
+import { tokenFor } from '../helpers/token.js'
 const roots: string[] = []
 afterEach(() => {
   for (const dir of roots.splice(0)) rmSync(dir, { force: true, recursive: true })
@@ -23,7 +24,7 @@ async function fixture() {
     serverUrl: 'https://synthetic.example.test',
     vaultId: 'vault',
     deviceId: 'device',
-    deviceToken: 'absd_old',
+    deviceToken: tokenFor('https://synthetic.example.test'),
     deviceName: 'synthetic',
     selective: selectiveDefaults(),
   }

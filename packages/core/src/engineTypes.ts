@@ -1,5 +1,5 @@
 import { AbeleError, type JoinPrefer } from '@abele/sync-protocol'
-import type { VaultClient } from './client.js'
+import type { EngineClient } from './engineClient.js'
 import type { DeleteGuard } from './deletes.js'
 import { EngineError } from './errors.js'
 import type { FileSystem } from './fs.js'
@@ -9,8 +9,6 @@ import type { PushReport } from './pusher.js'
 import type { CaseCollision } from './scanner.js'
 import type { SelectiveSettings } from './selective.js'
 import type { StateStore } from './state.js'
-import type { OwnerPushHooks } from './ownerHooks.js'
-import type { PersonalNoteHook } from './personalNoteEvents.js'
 import type { RecoveryReadiness } from './external/recovery.js'
 
 /**
@@ -57,9 +55,10 @@ export interface EngineStatus {
   deferred?: number
 }
 
-export interface EngineOptions extends OwnerPushHooks {
-  onPersonalNoteApplied?: PersonalNoteHook
-  client: VaultClient
+export interface EngineOptions {
+  /** Share with other connections and host hydration/forwarding to cap active transfers. */
+  transferBudget?: import('./streaming.js').TransferBudget
+  client: EngineClient
   fs: FileSystem
   state: StateStore
   selective: SelectiveSettings

@@ -1,6 +1,6 @@
 import type { CommitOp } from '@abele/sync-protocol'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
-import { encodeText, sha256, type VaultClient } from '../../src/index.js'
+import { encodeText, sha256, type VaultClient } from '../legacy/index.js'
 import { Device } from '../helpers/device.js'
 import { BASE_URL, serverHarness, TEST_PASSWORD, type Harness } from '../helpers/harness.js'
 

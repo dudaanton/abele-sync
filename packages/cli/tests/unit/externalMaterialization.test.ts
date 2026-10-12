@@ -17,7 +17,9 @@ import { activateExternalFiles } from '../../src/externalSafety.js'
 import { SqliteStateStore } from '../../src/sqliteState.js'
 import { materializeForDisconnect } from '../../src/externalMaterialization.js'
 import { runDisconnect } from '../../src/commands/disconnect.js'
-import { runInit } from '../../src/commands/init.js'
+import { runConnect } from '../../src/commands/connect.js'
+import { tokenFor, connection } from '../helpers/token.js'
+import { createHash } from 'node:crypto'
 import type { CommandContext } from '../../src/context.js'
 
 vi.mock('node:fs/promises', async (load) => {
@@ -38,12 +40,13 @@ async function fixture(availability: 'active' | 'deleted' | 'unavailable' = 'act
     serverUrl: 'https://old.example.test',
     vaultId: 'vault',
     deviceId: 'old',
-    deviceToken: 'absd_old',
+    deviceToken: tokenFor('https://old.example.test'),
     deviceName: 'old',
     selective: selectiveDefaults(),
   }
   writeConfig(dir, cfg)
   const raw = SqliteStateStore.open(join(stateFolder(dir), 'state.db'))
+  raw.setMeta('token-connection', createHash('sha256').update(cfg.deviceToken).digest('hex'))
   const descriptor = await activateExternalFiles(dir, raw, cfg, () => true)
   const bytes = new TextEncoder().encode('verified attachment'),
     sha = await sha256(bytes)
@@ -116,24 +119,14 @@ function contextFor(f: Awaited<ReturnType<typeof fixture>>): CommandContext {
         expect(existsSync(join(f.dir, 'Media/a.bin.abele-ref'))).toBe(false)
         return new Response(null, { status: 204 })
       }
-      if (path.endsWith('/state'))
-        return Response.json({
-          head_seq: 1,
-          settings: {},
-          usage: {
-            live_bytes: f.bytes.length,
-            by_kind: {},
-            history_bytes: 0,
-            trash_bytes: 0,
-            quota_bytes: null,
-          },
-        })
+      if (path === '/v2/connection')
+        return Response.json({ ...connection, space_id: f.cfg.vaultId, token_id: f.cfg.deviceId })
+      if (path === '/v2/changes') return Response.json({ items: [], cursor: 1, next: null })
       if (path.endsWith('/capabilities'))
         return Response.json({
           extension_version: 1,
           projection_schema: 1,
-          personal: true,
-          scoped: true,
+          token: true,
           verification: {
             live_head: true,
             sha256: true,
@@ -155,81 +148,35 @@ function contextFor(f: Awaited<ReturnType<typeof fixture>>): CommandContext {
         })
       if (path.endsWith('/external/verify'))
         return Response.json({ verified: true, file_id: 'file', ...JSON.parse(String(init?.body)) })
-      if (path.endsWith('/versions/version')) return new Response(f.bytes)
-      if (path.endsWith('/login'))
-        return Response.json({
-          account_token: 'abst_synthetic',
-          expires_at: '2099-01-01T00:00:00.000Z',
-        })
-      if (path === '/v1/vaults')
-        return Response.json([
-          {
-            id: 'vault',
-            name: 'Vault',
-            role: 'owner',
-            usage: {
-              live_bytes: f.bytes.length,
-              by_kind: {},
-              history_bytes: 0,
-              trash_bytes: 0,
-              quota_bytes: null,
-            },
-          },
-        ])
-      if (path === '/v1/devices')
-        return Response.json({ device_id: 'target', device_token: 'absd_target' })
+      if (path.endsWith('/content')) return new Response(f.bytes)
       throw new Error(`unexpected request ${init?.method} ${path}`)
     }),
   }
 }
-it('disconnect materializes before the first revoke, even with force', async () => {
+it('disconnect materializes before local retirement without revoking the bearer token', async () => {
   const f = await fixture(),
     ctx = contextFor(f)
-  expect(await runDisconnect({ dir: f.dir, force: true }, ctx)).toBe(0)
+  expect(await runDisconnect({ dir: f.dir }, ctx)).toBe(0)
   expect(readConfig(f.dir)).toBeNull()
   expect(ctx.fetch).toHaveBeenCalled()
 })
 it('an activated tree can reenroll after a safely completed disconnect without deleting its SQLite identity', async () => {
   const f = await fixture(),
     ctx = contextFor(f)
-  await runDisconnect({ dir: f.dir, force: true }, ctx)
-  expect(
-    await runInit(
-      {
-        dir: f.dir,
-        server: f.cfg.serverUrl,
-        email: 'a@example.test',
-        password: 'synthetic',
-        force: true,
-        prefer: 'merge',
-      },
-      ctx
-    )
-  ).toBe(0)
-  expect(readConfig(f.dir)?.deviceId).toBe('target')
+  await runDisconnect({ dir: f.dir }, ctx)
+  expect(await runConnect({ dir: f.dir, token: f.cfg.deviceToken }, ctx)).toBe(0)
+  expect(readConfig(f.dir)?.deviceId).toBe(f.cfg.deviceId)
   expect(readFileSync(join(f.dir, f.base.path))).toEqual(Buffer.from(f.bytes))
 })
-it('force enrollment prepares the old connection before login, replacement or old-device revoke', async () => {
+it('cannot replace an activated token connection or materialize its bytes as a side effect of connecting', async () => {
   const f = await fixture(),
     ctx = contextFor(f)
-  expect(
-    await runInit(
-      {
-        dir: f.dir,
-        server: f.cfg.serverUrl,
-        email: 'a@example.test',
-        password: 'synthetic',
-        force: true,
-        prefer: 'merge',
-      },
-      ctx
-    )
-  ).toBe(0)
-  expect(readConfig(f.dir)?.deviceId).toBe('target')
-  const calls = vi.mocked(ctx.fetch).mock.calls.map(([url]) => String(url))
-  expect(calls.findIndex((url) => url.endsWith('/versions/version'))).toBeLessThan(
-    calls.findIndex((url) => url.endsWith('/login'))
-  )
+  await expect(
+    runConnect({ dir: f.dir, token: tokenFor(f.cfg.serverUrl, 'b'.repeat(43)) }, ctx)
+  ).rejects.toThrow()
+  expect(ctx.fetch).not.toHaveBeenCalled()
+  expect(readConfig(f.dir)).toEqual(f.cfg)
+  expect(existsSync(join(f.dir, f.base.path))).toBe(false)
 })
 it('materializes through native no-clobber installation before resolving the durable inventory', async () => {
   const f = await fixture()
@@ -480,7 +427,7 @@ it('rechecks the physical ledger between later verification HTTP requests', asyn
     }
     return response
   })
-  await expect(runDisconnect({ dir: f.dir, force: true }, ctx)).rejects.toThrow(/physical ledger/)
+  await expect(runDisconnect({ dir: f.dir }, ctx)).rejects.toThrow(/physical ledger/)
   expect(calls.some((path) => path.endsWith('/external/verify'))).toBe(false)
   expect(existsSync(join(f.dir, f.base.path))).toBe(false)
   expect(readConfig(f.dir)).toEqual(f.cfg)
@@ -604,19 +551,8 @@ it('force cannot revoke or replace a changed materialized original after prepara
     ctx = contextFor(f)
   await materializeForDisconnect(f.dir, 'state.db', personalBinding(f.cfg), f.client, () => {})
   writeFileSync(join(f.dir, f.base.path), 'new local edit')
-  await expect(runDisconnect({ dir: f.dir, force: true }, ctx)).rejects.toThrow(/local-changed/)
-  await expect(
-    runInit(
-      {
-        dir: f.dir,
-        server: f.cfg.serverUrl,
-        email: 'a@example.test',
-        password: 'synthetic',
-        force: true,
-      },
-      ctx
-    )
-  ).rejects.toThrow(/local-changed/)
+  await expect(runDisconnect({ dir: f.dir }, ctx)).rejects.toThrow(/local-changed/)
+  await expect(runConnect({ dir: f.dir, token: f.cfg.deviceToken }, ctx)).rejects.toThrow()
   expect(ctx.fetch).not.toHaveBeenCalled()
   expect(readConfig(f.dir)).toEqual(f.cfg)
 })

@@ -13,12 +13,14 @@ import { runDeletes } from '../../src/commands/deletes.js'
 import { openVault } from '../../src/vault.js'
 import type { CommandContext, PromptInput } from '../../src/context.js'
 
+import { tokenFor } from '../helpers/token.js'
+
 let dir: string
 const cfg = {
   serverUrl: 'https://synthetic.example.test',
   vaultId: 'vault',
   deviceId: 'device',
-  deviceToken: 'absd_synthetic',
+  deviceToken: tokenFor('https://synthetic.example.test'),
   deviceName: 'test',
   selective: selectiveDefaults(),
 }
@@ -33,7 +35,8 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true })
 })
 const changes = {
-  replaced: () => writeConfig(dir, { ...cfg, deviceToken: 'absd_replacement' }),
+  replaced: () =>
+    writeConfig(dir, { ...cfg, deviceToken: tokenFor(cfg.serverUrl, 'b'.repeat(43)) }),
   disconnected: () => rmSync(join(stateFolder(dir), 'config.json')),
   activation: () => writeFileSync(join(stateFolder(dir), 'external-activation.json'), '{preparing'),
 }

@@ -3,6 +3,7 @@ import { shaIndex } from './apply.js'
 import type { FileSystem } from './fs.js'
 import type { ScanResult } from './scanner.js'
 import type { StateStore } from './state.js'
+import type { ChunkSource } from './streaming.js'
 
 /**
  * Where an upload finds the bytes it wants on this disk: where the scan found each sha, or, for
@@ -11,6 +12,7 @@ import type { StateStore } from './state.js'
 
 /** The bytes an upload wants, from this disk: null when this device cannot find them. */
 export interface Sources {
+  open?(sha: string): Promise<ChunkSource | null>
   bytes(sha: string): Promise<Uint8Array | null>
 }
 
@@ -58,6 +60,19 @@ export async function sourcesFromOps(
  * `upload` treats that refusal as a file that has changed since the scan.
  */
 const sourcesAt = (fs: FileSystem, paths: Map<string, string>): Sources => ({
+  ...(fs.openRead === undefined
+    ? {}
+    : {
+        open: async (sha: string) => {
+          const path = paths.get(sha)
+          if (path === undefined) return null
+          try {
+            return await fs.openRead!(path)
+          } catch {
+            return null
+          }
+        },
+      }),
   bytes: async (sha) => {
     const path = paths.get(sha)
     if (path === undefined) return null

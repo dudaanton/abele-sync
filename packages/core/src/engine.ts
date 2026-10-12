@@ -19,6 +19,7 @@ import {
 import type { DeferredApplied, DeferredKept, Staging } from './staging.js'
 import { Wake } from './wake.js'
 import { WatchReports } from './watchReports.js'
+import { TransferBudget } from './streaming.js'
 
 export { classifyFailure, joinFinished } from './engineTypes.js'
 export type {
@@ -113,7 +114,9 @@ export class SyncEngine implements ExclusiveOperationPort {
   private readonly activeWrites = { count: 0 }
   private readonly hostOperations = exclusiveOperationPort((job) => this.exclusive(job))
 
+  readonly transferBudget: import('./streaming.js').TransferBudget
   constructor(opts: EngineOptions) {
+    this.transferBudget = opts.transferBudget ?? new TransferBudget()
     const hands =
       opts.stillHeld === undefined && opts.recovery === undefined
         ? opts
@@ -123,6 +126,7 @@ export class SyncEngine implements ExclusiveOperationPort {
           })
     this.opts = {
       ...hands,
+      transferBudget: this.transferBudget,
       client: stoppableClient(hands.client, () => this.cancellation.signal, this.activeWrites),
     }
     this.log = opts.log ?? noop

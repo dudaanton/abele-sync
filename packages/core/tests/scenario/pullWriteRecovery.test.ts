@@ -84,9 +84,12 @@ describe('pull write provenance', () => {
       })
       return commit(ops, id)
     }
-    expect((await next.sync()).push.merged).toBe(1)
-    expect(await next.text('note.md')).toContain('D\n')
-    expect(await next.text('note.md')).toContain('B\n')
+    const result = (await next.sync()).push
+    expect(result.conflicts).toBe(1)
+    expect(await next.text('note.md')).toBe('B\n')
+    const copy = result.committed?.results[0]
+    if (copy?.status !== 'conflict') throw new Error('expected conflict')
+    expect(await next.text(copy.conflict_path)).toBe('D\n')
   })
 
   it('does not adopt an offline edit matching an intermediate version on an earlier feed page', async () => {
@@ -154,8 +157,10 @@ describe('pull write provenance', () => {
         mtime: localMtime,
       },
     ])
-    expect(report.push.merged).toBe(1)
-    expect(await b.text('note.md')).toContain('B\n')
-    expect(await b.text('note.md')).toContain('C\n')
+    expect(report.push.conflicts).toBe(1)
+    expect(await b.text('note.md')).toBe('C\n')
+    const copy = report.push.committed?.results[0]
+    if (copy?.status !== 'conflict') throw new Error('expected conflict')
+    expect(await b.text(copy.conflict_path)).toBe('B\n')
   })
 })

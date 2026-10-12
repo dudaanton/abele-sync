@@ -1,5 +1,5 @@
 import type { VersionInfo } from '@abele/sync-protocol'
-import type { VaultClient } from '@abele/sync-core'
+import type { V2EngineClient } from '@abele/sync-core'
 import { EXIT_OK, UsageError, type CommandContext } from '../context.js'
 import { unifiedDiff } from '../diff.js'
 import { fileIdFor, humanBytes, prepareVault, vaultDir, wirePath } from '../vault.js'
@@ -57,6 +57,9 @@ function list(versions: VersionInfo[], ctx: CommandContext): void {
     return
   }
   for (const version of versions) {
+    // Display the authored modification time, never the server receipt/audit time.
+    const original = new Date(version.mtime)
+    const at = Number.isNaN(original.getTime()) ? String(version.mtime) : original.toISOString()
     ctx.io.out(
       [
         version.version_id,
@@ -64,7 +67,7 @@ function list(versions: VersionInfo[], ctx: CommandContext): void {
         version.op.padEnd(8),
         humanBytes(version.size).padStart(8),
         version.actor.name,
-        version.at,
+        at,
       ].join('  ')
     )
   }
@@ -72,7 +75,7 @@ function list(versions: VersionInfo[], ctx: CommandContext): void {
 
 /** The unified diff of two versions' texts, or what can be said about two that are not text. */
 async function diff(
-  client: VaultClient,
+  client: V2EngineClient,
   fileId: string,
   path: string,
   from: VersionInfo,

@@ -6,11 +6,9 @@ import {
   cleanupFolders,
   cli,
   converge,
-  EMAIL,
   folder,
   listing,
   manifestPaths,
-  PASSWORD,
   read,
   SETUP_MS,
   syncOnce,
@@ -36,7 +34,6 @@ beforeAll(async () => {
   await writeFile(join(probe, 'Probe'), '')
   folds = existsSync(join(probe, 'PROBE'))
   server = await spawnServer()
-  await server.createAccount(EMAIL, PASSWORD)
   pair = await vaultPair(server, 'Respell')
 }, SETUP_MS)
 
