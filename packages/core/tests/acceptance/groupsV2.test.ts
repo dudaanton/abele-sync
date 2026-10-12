@@ -111,7 +111,9 @@ describe.each(process.env.ABELE_TEST_PG_URL ? (['sqlite', 'pg'] as const) : (['s
           await f.close()
         }
       },
-      dialect === 'pg' ? 60_000 : 10_000
+      // Fixed convergence rounds across six real connections need the normal
+      // core test budget on a two-core runner, including durable fixture cleanup.
+      dialect === 'pg' ? 60_000 : 20_000
     )
 
     it(

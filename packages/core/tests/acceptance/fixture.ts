@@ -164,6 +164,13 @@ export class AcceptanceDevice {
     return this.fs.remove(path)
   }
   async text(path: string) {
+    // Assertions name wire paths; the local disk may keep a different Unicode spelling.
+    if ((await this.fs.stat(path)) === null)
+      for await (const file of this.fs.list())
+        if (file.path.normalize('NFC') === path.normalize('NFC')) {
+          path = file.path
+          break
+        }
     return new TextDecoder().decode(await this.fs.read(path))
   }
   sync(id: string) {

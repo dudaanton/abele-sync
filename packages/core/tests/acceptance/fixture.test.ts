@@ -2,6 +2,8 @@ import { afterEach, expect, it } from 'vitest'
 import { SyncEngine } from '../../src/index.js'
 import { hasPgTestDb } from '@abele/sync-server/tests/helpers/tempDb.js'
 import { sql } from 'kysely'
+import { connect } from 'node:net'
+import { once } from 'node:events'
 import { acceptanceFixture, type AcceptanceFixture } from './fixture.js'
 let fixture: AcceptanceFixture | undefined
 afterEach(async () => {
@@ -39,3 +41,46 @@ it.skipIf(!hasPgTestDb)(
     expect(names[0]).not.toBe(names[1])
   }
 )
+
+it('reads a normalized note name through the spelling present on disk', async () => {
+  fixture = await acceptanceFixture()
+  const device = fixture.devices[0]!
+  await device.write('Notes/Café.md'.normalize('NFD'), 'decomposed name')
+  expect(await device.text('Notes/Café.md')).toBe('decomposed name')
+})
+
+it('closes owned listeners without waiting for unfinished HTTP connections', async () => {
+  fixture = await acceptanceFixture()
+  const sockets = fixture.servers.map((server) =>
+    connect(Number(new URL(server.address).port), '127.0.0.1')
+  )
+  const errors: NodeJS.ErrnoException[] = []
+  for (const socket of sockets) socket.on('error', (error) => errors.push(error))
+  const closed = sockets.map(
+    (socket) => new Promise<void>((resolve) => socket.once('close', () => resolve()))
+  )
+  try {
+    await Promise.all(sockets.map((socket) => once(socket, 'connect')))
+    for (const socket of sockets) socket.write('GET /healthz HTTP/1.1\r\nHost: localhost\r\n')
+    const closing = fixture.close()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        closing,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('fixture shutdown stalled')), 1000)
+        }),
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+      for (const socket of sockets) socket.destroy()
+      await Promise.all(closed)
+      await closing
+      fixture = undefined
+    }
+    // Linux may report EOF; macOS may reset an incomplete request on forced close.
+    expect(errors.map((error) => error.code).every((code) => code === 'ECONNRESET')).toBe(true)
+  } finally {
+    for (const socket of sockets) socket.destroy()
+  }
+})

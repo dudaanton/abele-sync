@@ -61,6 +61,9 @@ export async function v2Server(
       },
       async close() {
         try {
+          // This disposable listener owns its sockets. Engines have already stopped;
+          // incomplete/pooled HTTP connections must not extend fixture teardown.
+          app.server.closeAllConnections()
           await app.close()
         } finally {
           try {

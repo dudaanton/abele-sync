@@ -58,7 +58,11 @@ for (const dialect of process.env.ABELE_TEST_PG_URL
               await conflictServerFacet(scenario.number, fixture)
             else await remainingServerFacet(scenario.number, fixture)
           },
-          scenario.number === 107 ? 120_000 : dialect === 'pg' ? 60_000 : 20_000
+          // 107 moves 1,005 real files through six connections, then checks every
+          // copy and a fixed number of idle rounds. Allow that bounded disk/HTTP
+          // work alongside the duplicate facet on a two-core runner; keep all
+          // convergence assertions intact.
+          scenario.number === 107 ? 600_000 : dialect === 'pg' ? 60_000 : 20_000
         )
       } else {
         // 117–124 are physical-iPhone/plugin UI obligations, not missing SQL/core facets.
