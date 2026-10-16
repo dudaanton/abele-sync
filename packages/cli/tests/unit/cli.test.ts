@@ -522,6 +522,22 @@ const denied = {
 }
 const hint = 'disconnect locally and connect with a new token'
 describe('revoked token', () => {
+  it('logs a startup recovery authorization failure once and releases the daemon lock and handlers', async () => {
+    setUp()
+    await withState((state) =>
+      state.setJournal({ batchId: 'pending', idempotencyKey: 'pending', startedAt: AT, ops: [] })
+    )
+    const run = await cli(['run', '--dir', dir], fakeServer(denied).fetch)
+    expect(run.code, run.all).toBe(4)
+    expect(run.all).toContain(hint)
+    expect(existsSync(join(stateFolder(dir), 'lock'))).toBe(false)
+    expect(process.listenerCount('SIGTERM')).toBe(0)
+    expect(process.listenerCount('SIGINT')).toBe(0)
+    expect(process.listenerCount('SIGUSR1')).toBe(0)
+    expect((await readFile(join(stateFolder(dir), 'log'), 'utf8')).match(/failed: /g)).toHaveLength(
+      1
+    )
+  })
   for (const once of [true, false])
     it(`stops ${once ? 'once' : 'daemon'} with the hint and releases handlers/lock`, async () => {
       setUp()

@@ -8,6 +8,8 @@ export interface UsersTable {
   disabled_at: string | null
 }
 export interface SpacesTable {
+  name: Generated<string>
+  deleted_at: string | null
   id: string
   user_id: string
   settings: string
@@ -33,6 +35,11 @@ export interface AccessScopesTable {
   effective_key: string
 }
 export interface AccessTokensTable {
+  scope_deleted_at: string | null
+  last_used_at: string | null
+  last_address: string | null
+  address_status: Generated<string>
+  read_only: Generated<number>
   id: string
   space_id: string
   secret_hash: string
@@ -43,6 +50,17 @@ export interface AccessTokensTable {
   revoked_at: string | null
 }
 export interface AccessDatabase {
+  scope_deletions: { secret_hash: string; deleted_at: string }
+  activity_daily: {
+    vault_id: string
+    token_id: string
+    day: string
+    uploaded_files: Generated<number>
+    uploaded_bytes: Generated<number>
+    downloaded_files: Generated<number>
+    downloaded_bytes: Generated<number>
+    commits: Generated<number>
+  }
   group_notes: { space_id: string; file_id: string; path: string; signature: string }
   group_write_bases: { token_id: string; file_id: string; version_id: string }
   group_names: { space_id: string; name: string; file_id: string; exact: number }

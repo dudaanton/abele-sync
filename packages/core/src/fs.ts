@@ -19,10 +19,14 @@ export interface FileSystem extends Partial<StreamingFileSystem> {
   list(): AsyncIterable<FileInfo>
   /** Stable local directory identities let a rename preserve its server selector. */
   listDirectories?(): AsyncIterable<{ path: string; identity: string; mtime: number }>
+  /** Raw immediate children for bounded alias rechecks; never collapse Unicode spellings. */
+  listChildren?(
+    parent: string
+  ): Promise<Array<{ path: string; kind: 'file' | 'directory'; identity?: string }>>
   mkdir?(path: string): Promise<void>
   moveDirectory?(from: string, to: string): Promise<void>
   /** Removes only an empty directory: untracked/local bytes are never swept recursively. */
-  removeDirectory?(path: string): Promise<void>
+  removeDirectory?(path: string, expectedIdentity?: string): Promise<void>
   /** Throws `EngineError('io')` if the path is missing. */
   read(path: string): Promise<Uint8Array>
   /** Creates parent directories, writes through a temp file and rename, then sets `mtime`. */

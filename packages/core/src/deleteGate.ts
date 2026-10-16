@@ -10,6 +10,7 @@ import {
 import type { FileSystem } from './fs.js'
 import type { ScanFilter } from './scanner.js'
 import type { StateEntry, StateStore } from './state.js'
+import { readReconciliation } from './reconciliation.js'
 
 /**
  * The delete guard as one sync runs it (see `deletes.ts`): which of a scan's deletes go and
@@ -42,7 +43,11 @@ export class DeleteGate {
   async judge(ops: CommitOp[], confirmed: ReadonlySet<string>): Promise<CommitOp[]> {
     const entries: StateEntry[] = []
     for await (const entry of this.ctx.state.all()) entries.push(entry)
-    const guard = this.ctx.deleteGuard ?? DEFAULT_DELETE_GUARD
+    const reconciliation = await readReconciliation(this.ctx.state)
+    const guard =
+      reconciliation && reconciliation.phase !== 'complete'
+        ? { count: 1, floor: 1, share: 0 }
+        : (this.ctx.deleteGuard ?? DEFAULT_DELETE_GUARD)
     const before = new Set((await this.ctx.holds.list()).map((one) => one.fileId))
     const recent = await this.ctx.holds.recent(this.ctx.now(), this.deleteWindow())
     const { send, held, inScope } = judgeDeletes(ops, entries, this.ctx.filter, confirmed, guard, {

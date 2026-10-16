@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   readHeldDeletes,
+  readReconciliation,
   readStaged,
   scan,
   type CaseCollision,
@@ -37,6 +38,7 @@ import {
 
 export interface StatusOptions {
   dir: string
+  json?: boolean
 }
 
 /** How many of the server's refusals the tail of the log is searched for. */
@@ -47,14 +49,21 @@ export async function runStatus(opts: StatusOptions, ctx: CommandContext): Promi
   const vault = await prepareVault(dir, ctx)
   try {
     if (wasRevoked(vault.state, personalRevocationBinding(vault.cfg))) {
+      if (opts.json) {
+        ctx.io.out(JSON.stringify({ state: 'revoked' }))
+        return EXIT_OK
+      }
       ctx.io.out('state      revoked')
       ctx.io.out(REVOKED_HINT)
       return EXIT_OK
     }
     const cursor = await vault.state.getCursor()
+    const reconciliation = await readReconciliation(vault.state)
+    if (reconciliation && !opts.json)
+      ctx.io.out(`reconcile  ${reconciliation.phase}: ${reconciliation.reason}`)
     // The approval queue is local: show it even if the following server request is offline.
     const groups = codeGroups(await readStaged(vault.state))
-    if (groups.length > 0) {
+    if (groups.length > 0 && !opts.json) {
       ctx.io.out(codeHeldLine(groups.reduce((n, group) => n + group.changes.length, 0)))
       for (const group of groups) ctx.io.out(`plugin     ${codeText(group.ids.join(', '))}`)
     }
@@ -74,12 +83,28 @@ export async function runStatus(opts: StatusOptions, ctx: CommandContext): Promi
       excluded: (path, size) =>
         !vault.client.includes(path) || size > cap || vault.filter.excluded(path, size),
     }
-    const found = await scan(vault.fs, vault.state, filter)
+    const found = await scan(vault.fs, vault.state, filter, { readOnly: true })
     // What the guard holds is waiting for a person, not for the next sync.
     const held = await readHeldDeletes(vault.state)
     const holding = new Set(held.map((one) => one.fileId))
     const pending = found.ops.filter((op) => op.op !== 'delete' || !holding.has(op.file_id))
     const tail = readLogTail(dir)
+    if (opts.json) {
+      ctx.io.out(
+        JSON.stringify({
+          cursor,
+          reconciliation,
+          head_seq: state.head_seq,
+          pending: pending.length,
+          heldDeletes: held,
+          collisions: found.collisions.map((collision) => ({
+            ...collision,
+            reason: collisionLine(collision),
+          })),
+        })
+      )
+      return EXIT_OK
+    }
 
     const say = (label: string, value: string): void => {
       ctx.io.out(`${label.padEnd(10)} ${value}`)
@@ -112,8 +137,15 @@ export async function runStatus(opts: StatusOptions, ctx: CommandContext): Promi
 }
 
 /** A file the scan holds back, and what to do about it, in one line. */
-export const collisionLine = ({ path, with: synced }: CaseCollision): string =>
-  `${path}: ${synced} is synced under the same name but for case; rename one of them`
+export const collisionLine = ({ path, with: synced }: CaseCollision): string => {
+  const points = (text: string) =>
+    Array.from(text)
+      .map((ch) => 'U+' + ch.codePointAt(0)!.toString(16).toUpperCase())
+      .join(' ')
+  return path.normalize('NFC') === synced.normalize('NFC')
+    ? `normalization collision: ${path} (${points(path)}): ${synced} (${points(synced)}); rename one of them`
+    : `${path}: ${synced} is synced under the same name but for case; rename one of them`
+}
 
 interface LogTail {
   lastSyncAt: string | null

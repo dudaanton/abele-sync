@@ -1,4 +1,9 @@
 import { AbeleError, ERROR_STATUS, ErrorCodeSchema, type ErrorCode } from '@abele/sync-protocol'
+import {
+  RESTORE_GENERATION_HEADER,
+  V2_CAPABILITIES_HEADER,
+  V2_READ_ONLY_CAPABILITY,
+} from '@abele/sync-protocol'
 import { z } from 'zod'
 import { EngineError, HttpError } from './errors.js'
 import { ExternalStateError } from './external/state.js'
@@ -63,6 +68,9 @@ export interface SendInit {
  */
 export class Http {
   private readonly base: string
+  /** Pinned by the sync handshake. Absent on old servers. */
+  generation: string | undefined
+  observedGeneration: string | undefined
 
   constructor(private readonly opts: ClientOptions) {
     this.base = opts.baseUrl.replace(/\/+$/, '')
@@ -148,6 +156,8 @@ export class Http {
     tolerate: readonly number[] = []
   ): Promise<Response> {
     const headers: Record<string, string> = { ...init.headers }
+    headers[V2_CAPABILITIES_HEADER] = V2_READ_ONLY_CAPABILITY
+    if (this.generation !== undefined) headers[RESTORE_GENERATION_HEADER] = this.generation
     if (this.opts.token !== '') headers['authorization'] = `Bearer ${this.opts.token}`
     if (this.opts.userAgent !== undefined) headers['user-agent'] = this.opts.userAgent
 
@@ -177,6 +187,16 @@ export class Http {
       throw new EngineError('offline', `${method} ${path} never reached the server`, cause)
     }
 
+    this.observedGeneration = response.headers.get(RESTORE_GENERATION_HEADER) ?? undefined
+    if (
+      this.generation !== undefined &&
+      this.observedGeneration !== undefined &&
+      this.generation !== this.observedGeneration
+    )
+      throw new EngineError(
+        'conflict',
+        'server generation changed; local files are preserved; retry to reconcile'
+      )
     if (!response.ok && !tolerate.includes(response.status))
       throw await failure(response, method, path)
     return response

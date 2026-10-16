@@ -8,6 +8,7 @@ import {
   DEFAULT_DELETE_WINDOW_MS,
   ExpectedWrites,
   resumeJournal,
+  fenceRestoredJournal,
   recoverPendingPullWrites,
   StagedChanges,
   IgnoreRules,
@@ -207,6 +208,7 @@ export function openVault(dir: string, ctx: CommandContext, held?: () => boolean
     pullRecoveryClients.set(vault, replay)
     publicationRecovery.set(vault, async (disk) => {
       if (await state.getJournal()) {
+        await fenceRestoredJournal(state, (await replay.state()).head_seq, disk, undefined, replay)
         const holds = new DeleteHolds(state),
           filed = await holds.decision()
         if (filed !== null) await holds.resetTally()
@@ -256,6 +258,10 @@ export async function recoverVault(vault: OpenVault, held: () => boolean): Promi
     effectTracker: vault.fence?.track,
   })
   await CodeGroupDisk.recover({ ...vault, disk: recoveryDisk }, held)
+  // Local installation evidence must be checked without HTTP first. Only retained remote
+  // effects require a generation handshake here; ordinary sync prepares its client itself.
+  if ((await vault.state.getJournal()) || vault.state.metadataKeys('pull-write:').length > 0)
+    await pullRecoveryClients.get(vault)?.prepare?.(recoveryDisk, vault.state)
   const pullIds = vault.state
     .metadataKeys('pull-write:')
     .map((key) => key.slice('pull-write:'.length))
@@ -484,9 +490,10 @@ export function summarise(report: SyncReport): string {
   // Changes the pull held back behind an edit here, which the next sync takes: not held deletes.
   const waiting = (report.secondPull ?? report.pull).held.length
   return (
-    `sync: done (pulled ${pulled}, pushed ${report.push.applied}, ` +
+    `sync: ${report.collisions.length ? 'partial' : 'done'} (pulled ${pulled}, pushed ${report.push.applied}, ` +
     `merged ${report.push.merged}, conflicts ${report.push.conflicts}, ` +
-    `rejected ${report.push.rejected.length}, pulls waiting ${waiting})`
+    `rejected ${report.push.rejected.length}, pulls waiting ${waiting}` +
+    (report.collisions.length ? `, collisions ${report.collisions.length})` : ')')
   )
 }
 

@@ -20,6 +20,7 @@ import type { DeferredApplied, DeferredKept, Staging } from './staging.js'
 import { Wake } from './wake.js'
 import { WatchReports } from './watchReports.js'
 import { TransferBudget } from './streaming.js'
+import { requestReconciliation } from './reconciliation.js'
 
 export { classifyFailure, joinFinished } from './engineTypes.js'
 export type {
@@ -248,6 +249,12 @@ export class SyncEngine implements ExclusiveOperationPort {
       return Promise.reject(error)
     }
     this.cycle.rewind = true
+    return this.sync()
+  }
+
+  /** Verify all local content once and review every outgoing delete, in the sync queue. */
+  async reconcile(): Promise<SyncReport> {
+    await this.exclusive(() => requestReconciliation(this.opts.state))
     return this.sync()
   }
 

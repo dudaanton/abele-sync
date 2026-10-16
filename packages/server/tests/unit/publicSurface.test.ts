@@ -11,8 +11,11 @@ it('ships only deployment and current-state reference documents', () => {
     'core-v2-engine.md',
     'deploy.md',
     'external-file-cli-state.md',
+    'local-paths.md',
+    'operator.md',
     'protocol-v2.md',
     'protocol.md',
+    'restored-vault-reconciliation.md',
     'schema.md',
     'security.md',
   ])

@@ -1,6 +1,7 @@
 /** Every error code the wire protocol can carry; also used to build its zod enum. */
 export const ERROR_CODES = [
   'unauthorized',
+  'scope_deleted',
   'account_password_required',
   'forbidden',
   'scoped_unavailable',
@@ -37,6 +38,7 @@ export type ErrorCode = (typeof ERROR_CODES)[number]
 /** The HTTP status each code answers with. */
 export const ERROR_STATUS: Record<ErrorCode, number> = {
   unauthorized: 401,
+  scope_deleted: 401,
   account_password_required: 403,
   forbidden: 403,
   scoped_unavailable: 503,

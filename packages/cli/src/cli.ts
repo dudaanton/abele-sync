@@ -111,6 +111,14 @@ function buildProgram(
     })
 
   program
+    .command('reconcile')
+    .description('rehash all tracked content once; hold every outgoing delete for review')
+    .requiredOption('--dir <dir>', 'the vault directory')
+    .action((opts: { dir: string }) => {
+      chosen.run = () => runRun({ ...opts, once: true, reconcile: true }, ctx)
+    })
+
+  program
     .command('disconnect')
     .description('disconnect locally, keeping files and state; this does not revoke a shared token')
     .requiredOption('--dir <dir>', 'the vault directory')
@@ -122,6 +130,7 @@ function buildProgram(
     .command('status')
     .description('where this vault stands')
     .requiredOption('--dir <dir>', 'the vault directory')
+    .option('--json', 'print machine-readable status')
     .action((opts: StatusOptions) => {
       chosen.run = () => runStatus(opts, ctx)
     })

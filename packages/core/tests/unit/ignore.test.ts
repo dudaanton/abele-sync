@@ -5,6 +5,15 @@ function rules(...lines: string[]): IgnoreRules {
   return IgnoreRules.parse(lines.join('\n'))
 }
 
+it('matches composed and decomposed Unicode literals, negations, directories and classes', () => {
+  const r = rules('й-folder/'.normalize('NFD'), '!й-folder/ё.md'.normalize('NFD'))
+  expect(r.ignores('й-folder/no.md')).toBe(true)
+  expect(r.ignores('й-folder/ё.md'.normalize('NFD'))).toBe(false)
+  expect(rules('ё.md').ignores('ё.md'.normalize('NFD'))).toBe(true)
+  expect(rules('[ё].md'.normalize('NFD')).ignores('ё.md')).toBe(true)
+  expect(rules('[е]\\u0308.md').ignores('ё.md')).toBe(false)
+})
+
 describe('IgnoreRules.parse', () => {
   it('ignores nothing when there are no rules', () => {
     const r = IgnoreRules.parse('')

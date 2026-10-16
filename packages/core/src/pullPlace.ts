@@ -8,6 +8,7 @@ import { downloadToStage, TransferBudget } from './streaming.js'
 import type { PullOptions } from './puller.js'
 import { PendingPullWrites } from './pullWrite.js'
 import type { StateEntry, StateStore } from './state.js'
+import { LocalPaths, resolveLocalFile } from './localPaths.js'
 
 /**
  * A change put onto this disk: its file carried to where the change says, its bytes written or
@@ -30,6 +31,7 @@ export class PullPlacer {
   /** Shas the server answered with bytes that do not hash to them; nothing of theirs is written. */
   readonly lying = new Set<string>()
   readonly pending: PendingPullWrites
+  private readonly paths: (path: string) => Promise<LocalPaths>
 
   constructor(
     private readonly client: Pick<EngineClient, 'getBlob' | 'openVersion'>,
@@ -42,6 +44,7 @@ export class PullPlacer {
     private readonly hash: (bytes: Uint8Array) => Promise<string>
   ) {
     this.pending = new PendingPullWrites(state)
+    this.paths = LocalPaths.filePass(fs, state)
     this.budget = opts.transferBudget ?? new TransferBudget()
   }
 
@@ -79,8 +82,15 @@ export class PullPlacer {
    */
   async adopt(change: ChangeItem, entry: StateEntry | null): Promise<boolean> {
     if (change.op === 'delete' || change.sha === null) return false
+    if ((await this.paths(change.path)).blocked(change.path)) return false
     const pending = await this.pending.matching(change, entry)
     if (pending === null) return false
+    try {
+      const resolved = await resolveLocalFile(this.fs, this.state, change.path, pending.target)
+      if (resolved !== pending.target) return false
+    } catch {
+      return false
+    }
     const notWritten = async (): Promise<false> => {
       if (pending.stageId !== undefined) return false
       // Once the planned result is absent or edited, the intent cannot authorize a later save.
@@ -108,7 +118,17 @@ export class PullPlacer {
   /** A deferred path may adopt bytes already present, but never mutate the filesystem. */
   async adoptExisting(change: ChangeItem, entry: StateEntry | null): Promise<boolean> {
     if (change.op === 'delete' || change.sha === null) return false
-    const target = entry !== null && entry.wirePath === change.path ? entry.path : change.path
+    let target: string
+    try {
+      target = await resolveLocalFile(
+        this.fs,
+        this.state,
+        change.path,
+        entry?.wirePath === change.path ? entry.path : undefined
+      )
+    } catch {
+      return false
+    }
     const from = entry === null || entry.path === target ? null : entry.path
     if (from !== null && (await this.fs.stat(from)) !== null) return false
     const occupant = await this.state.get(target)
@@ -131,6 +151,8 @@ export class PullPlacer {
    * is held for a later pull, rather than the whole sync failing on it every time.
    */
   async drop(entry: StateEntry): Promise<boolean> {
+    if ((await LocalPaths.forFile(this.fs, entry.wirePath, this.state)).blocked(entry.wirePath))
+      return false
     if (!(await this.clearPath(entry.path))) return false
     this.opts.expected.clear(entry.path)
     await this.state.transaction(async () => {
@@ -179,8 +201,19 @@ export class PullPlacer {
     // its own decomposition of an NFC wire path — and the wire's otherwise. Case is part of
     // the path here, not folded away: a server-side rename of `Note.md` to `note.md` is a
     // rename, and a device that kept its old spelling would push it straight back.
-    const target =
-      entry !== null && normalisePath(entry.path) === change.path ? entry.path : change.path
+    let target: string
+    try {
+      target = await resolveLocalFile(
+        this.fs,
+        this.state,
+        change.path,
+        entry?.wirePath === change.path ? entry.path : undefined,
+        await this.paths(change.path)
+      )
+    } catch (error) {
+      this.opts.log?.(`pull: held ${change.path}: ${(error as Error).message}`)
+      return false
+    }
     const from = entry === null || entry.path === target ? null : entry.path
 
     // The first snapshot precedes the decision. A file created or edited during clear()
@@ -190,6 +223,12 @@ export class PullPlacer {
     // A durable stage is authorized by this exact version and unchanged ledger base.
     // Recover it before ordinary clearance: a crash may already have moved the old name.
     const pending = await this.pending.matching(change, entry)
+    if (pending && pending.target !== target) {
+      this.opts.log?.(
+        `pull: held ${change.path}: pending physical write path changed; review required`
+      )
+      return false
+    }
     if (pending?.stageId && this.fs.reopenStage && this.client.openVersion) {
       if (pending.target !== target || pending.from !== from) return false
       const occupant = await this.state.get(target)
@@ -286,6 +325,7 @@ export class PullPlacer {
           await this.pending.clear(change.file_id)
           return false
         }
+        await this.recheckTarget(change.path, target)
         await writeExpected(this.fs, this.opts.expected, target, sha, bytes, change.mtime ?? 0)
         wrote = { size: bytes.length, mtime: change.mtime ?? 0 }
       }
@@ -325,6 +365,7 @@ export class PullPlacer {
     try {
       const source = await this.client.openVersion!(change.file_id, change.version_id, identity)
       await downloadToStage(source, stage, identity, this.budget, undefined, async () => {
+        await this.recheckTarget(change.path, target)
         if (
           !sameStat(beforeTarget, await this.fs.stat(target)) ||
           !sameStat(beforeFrom, from === null ? null : await this.fs.stat(from)) ||
@@ -351,6 +392,15 @@ export class PullPlacer {
       this.opts.log?.(`pull: holding ${target}: ${(error as Error).message}`)
       return false
     }
+  }
+
+  private async recheckTarget(wire: string, target: string): Promise<void> {
+    try {
+      if ((await resolveLocalFile(this.fs, this.state, wire, target)) === target) return
+    } catch {
+      // Inventory equivalence is not permission to write through a new alias.
+    }
+    throw new EngineError('conflict', `normalization collision or changed parent: ${target}`)
   }
 
   /**

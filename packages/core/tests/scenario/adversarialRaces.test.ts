@@ -109,7 +109,18 @@ describe('Adversarial: late edits and recovery', () => {
     await a.write('note.md', 'remote\n', 20)
     await a.sync()
     await b.sync()
-    expect(await b.text('note.md')).toContain('mine')
+    // Rolling verification now publishes this edit through normal conflict resolution:
+    // the remote head remains at its path and the complete local variant is a copy.
+    expect(await b.text('note.md')).toBe('remote\n')
+    const copies = b.paths().filter((path) => path.startsWith('note (Conflicted copy'))
+    expect(copies).toHaveLength(1)
+    expect(await b.text(copies[0]!)).toBe('mine\n')
+    const items = (await b.client.manifest(null)).items
+    const bytes = await Promise.all(items.map((item) => b.client.getBlob(item.sha)))
+    expect(bytes.map((value) => new TextDecoder().decode(value)).sort()).toEqual([
+      'mine\n',
+      'remote\n',
+    ])
   })
 
   it('lost commit reply within TTL replays once and leaves no duplicate history', async () => {

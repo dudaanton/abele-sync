@@ -13,7 +13,6 @@ import {
   type SyncReport,
 } from './engineTypes.js'
 import { EngineError } from './errors.js'
-import type { FileInfo } from './fs.js'
 import { sha256 } from './hash.js'
 import { pull, type PullReport } from './puller.js'
 import { push, resumeJournal, type PushReport, type Refusal } from './pusher.js'
@@ -23,6 +22,14 @@ import { isExcluded } from './selective.js'
 import { Staging } from './staging.js'
 import type { StateEntry } from './state.js'
 import type { WatchReports } from './watchReports.js'
+import { refreshLocalPaths } from './localPaths.js'
+import { GENERATION_KEY, MEMBERS_KEY, RECONCILING_KEY } from './restoreGeneration.js'
+import {
+  reconciliationScan,
+  preserveRestoredEdits,
+  preserveGenerationConflicts,
+  RECONCILIATION_KEY,
+} from './reconciliation.js'
 
 /**
  * One sync, and what the engine remembers from one to the next to run it: pull, scan, push,
@@ -81,6 +88,8 @@ export class SyncCycle {
   rewind = false
   /** Set once a run has started or ended with the cursor above 0: no preference is sent again. */
   private joined = false
+  /** Only a batch this live engine just sent is known not to originate in a restored profile. */
+  private liveJournalKey: string | undefined
   /** The synced files out of scope since this device last saw them in it; see `ScopeMarks`. */
   private readonly scope: ScopeMarks
   /** The marks this engine last asked for, which a run waits for before it reviews them. */
@@ -190,15 +199,26 @@ export class SyncCycle {
    */
   async cycle(): Promise<SyncReport> {
     const { client, fs, state } = this.ctx.opts
+    await refreshLocalPaths(fs, state)
+    const generationBefore = await state.getMeta?.(GENERATION_KEY)
     await client.prepare?.(
       fs,
       state,
       (path) =>
         this.ctx.opts.ignore?.ignores(path + '/') === true ||
         (this.ctx.opts.selective?.excludedFolders ?? []).some(
-          (folder) => path === folder || path.startsWith(folder + '/')
+          (folder) =>
+            path === folder.normalize('NFC') || path.startsWith(folder.normalize('NFC') + '/')
         )
     )
+    if (generationBefore !== (await state.getMeta?.(GENERATION_KEY))) {
+      this.staging.records.invalidate()
+      this.refused.clear()
+      this.kept.clear()
+      this.unsettled.clear()
+      this.unscanned = true
+      this.ctx.log('sync: server generation observed; reconciling with local files preserved')
+    }
     const log = this.ctx.log
     const common = {
       ...(this.ctx.opts.transferBudget === undefined
@@ -222,7 +242,8 @@ export class SyncCycle {
     // its first pull moved the cursor still joins, with the side the person chose.
     const marked = await this.joinMarked()
     if ((await state.getCursor()) > 0 && !marked) this.joined = true
-    const joining = !this.joined
+    const reconciling = (await state.getMeta?.(RECONCILING_KEY)) != null
+    const joining = !this.joined && !reconciling
     const prefer = joining ? this.ctx.opts.joinPrefer : undefined
     if (joining && !marked) await this.markJoin(true)
     if (prefer !== undefined) log(`sync: joining the vault; where both hold a file, ${prefer} wins`)
@@ -240,6 +261,34 @@ export class SyncCycle {
       log('scope: a local file a server file was passed over for has gone; walking the vault')
       this.rewind = true
     }
+    const vault = await client.state()
+    this.ctx.set({ headSeq: vault.head_seq, cursor: await state.getCursor() })
+    this.learnLimits(vault.settings.max_file_bytes, vault.settings.quota_bytes)
+    const inspection = await reconciliationScan(
+      fs,
+      state,
+      this.scanFilter,
+      vault.head_seq,
+      this.liveJournalKey,
+      reconciling
+        ? (JSON.parse((await state.getMeta?.(MEMBERS_KEY)) ?? '[]') as StateEntry[])
+        : undefined,
+      this.unscanned,
+      client
+    )
+    const reconciliation = inspection.reconciliation
+    if (!reconciling && reconciliation && reconciliation.phase !== 'complete')
+      await preserveRestoredEdits(
+        client,
+        fs,
+        inspection.basis,
+        inspection.found,
+        this.scanFilter,
+        false,
+        this.ctx.opts.defer
+      )
+    this.ctx.set({ reconciliation })
+
     // Read through the guarded state, and every step it leads to is a guarded write: a daemon
     // whose lock lapsed takes nothing of it (see `stillHeld`).
     const filed = await this.holds.decision()
@@ -257,15 +306,13 @@ export class SyncCycle {
     }
     // Carried out once the feed is rewound: killed before that, the next run does it again.
     if (filed?.decision.kind === 'restore') await this.holds.settle(filed.raw)
-    const vault = await client.state()
-    this.ctx.set({ headSeq: vault.head_seq, cursor: await state.getCursor() })
-    this.learnLimits(vault.settings.max_file_bytes, vault.settings.quota_bytes)
 
     // A batch the last run never finished recording goes first: a scan taken over it would
     // describe a disk the state does not know about yet.
     const replayed = await resumeJournal(client, fs, state, { ...common, onCommitted: tally })
+    this.liveJournalKey = undefined
     for (const path of replayed?.kept ?? []) this.kept.add(path)
-    await client.syncDirectories?.()
+    if (!reconciliation || reconciliation.phase === 'complete') await client.syncDirectories?.()
 
     // The watcher's latest batch, without waiting for the debounce: what it holds is exactly
     // what the pull must not write over.
@@ -273,8 +320,18 @@ export class SyncCycle {
     await this.ctx.watch.examine()
     const holding = await this.holds.held()
     const protect = new Set([...this.kept, ...reported, ...this.unsettled, ...holding])
-    for (const path of await this.guess()) protect.add(path)
+    for await (const entry of state.all())
+      if (inspection.found.dirty.has(entry.wirePath)) protect.add(entry.wirePath)
     const first = await this.pull(protect, scope.recheck, holding)
+    if (reconciling)
+      await preserveGenerationConflicts(
+        client,
+        fs,
+        state,
+        inspection.found,
+        first.held,
+        this.scanFilter
+      )
     this.ctx.set({ cursor: first.cursor })
     await this.staging.tidy(protect)
     // A walk that finished has confirmed every file back in scope, or taken it.
@@ -287,7 +344,12 @@ export class SyncCycle {
     // from a delete and an unrelated create (`likeness.ts`).
     const previous = (entry: StateEntry): Promise<Uint8Array | null> =>
       fetchChecked(client, entry.sha, sha256)
-    const found = await scan(fs, state, this.scanFilter, { log, previous })
+    const found = await scan(fs, state, this.scanFilter, {
+      log,
+      previous,
+      verifyPaths: inspection.found.dirty,
+      pairMoves: !reconciliation || reconciliation.phase === 'complete',
+    })
     for (const path of seen) reported.delete(path)
     this.unscanned = false
     this.unsettled = new Set(found.dirty)
@@ -317,6 +379,7 @@ export class SyncCycle {
         }
       )
     } catch (error) {
+      this.liveJournalKey = (await state.getJournal())?.idempotencyKey
       // A push that failed says nothing reliable about what is left: the scan's count stands.
       this.ctx.set({ pending: judged.length })
       throw error
@@ -345,6 +408,24 @@ export class SyncCycle {
       this.ctx.set({ cursor: secondPull.cursor })
     }
     if (!this.ctx.stopping()) await client.finishPull?.()
+    if (reconciliation && reconciliation.phase !== 'complete') {
+      const unresolved =
+        (await this.holds.list()).length > 0 ||
+        sent.rejected.length > 0 ||
+        sent.kept.length > 0 ||
+        this.kept.size > 0 ||
+        (secondPull ?? before).held.length > 0 ||
+        this.ctx.stopping()
+      reconciliation.phase = unresolved ? 'review' : 'complete'
+      await state.transaction(async () => {
+        await state.setMeta?.(RECONCILIATION_KEY, JSON.stringify(reconciliation))
+        if (reconciling && !unresolved) {
+          await state.setMeta?.(MEMBERS_KEY, null)
+          await state.setMeta?.(RECONCILING_KEY, null)
+        }
+      })
+      this.ctx.set({ reconciliation })
+    }
     return {
       pull: before,
       push: pushed,
@@ -376,8 +457,14 @@ export class SyncCycle {
     for (const { path, wirePath, with: synced } of collisions) {
       now.add(wirePath)
       if (this.collided.has(wirePath)) continue
+      const points = (text: string) =>
+        Array.from(text)
+          .map((ch) => 'U+' + ch.codePointAt(0)!.toString(16).toUpperCase())
+          .join(' ')
       this.ctx.log(
-        `scan: held ${path}: ${synced} is synced under the same name but for case; ` +
+        (path.normalize('NFC') === synced.normalize('NFC')
+          ? `scan: normalization collision: ${path} (${points(path)}): ${synced} (${points(synced)}); `
+          : `scan: held ${path}: ${synced} is synced under the same name but for case; `) +
           'rename one of them to sync both'
       )
     }
@@ -466,25 +553,5 @@ export class SyncCycle {
     await this.staging.afterPull()
     await this.countStaged()
     return report
-  }
-
-  /**
-   * Which synced files may hold an edit nobody has reported: a fresh process has no watcher
-   * history, and a host with no watcher never will. One listing, no hashing — a file whose
-   * size and mtime still match its entry is left to the scan, and one that is gone counts, so
-   * a local delete is not undone by a pull before the push can send it.
-   */
-  private async guess(): Promise<Set<string>> {
-    const dirty = new Set<string>()
-    if (!this.unscanned && this.ctx.watching()) return dirty
-    const disk = new Map<string, FileInfo>()
-    for await (const info of this.ctx.opts.fs.list()) disk.set(info.path, info)
-    for await (const entry of this.ctx.opts.state.all()) {
-      const info = disk.get(entry.path)
-      if (info === undefined || info.size !== entry.size || info.mtime !== entry.mtime) {
-        dirty.add(entry.wirePath)
-      }
-    }
-    return dirty
   }
 }

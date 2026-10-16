@@ -9,7 +9,7 @@ import { openVault, recoverVault, buildEngine } from '../../src/vault.js'
 import { NodeFileSystem } from '../../src/nodeFs.js'
 import type { CommandContext } from '../../src/context.js'
 
-import { tokenFor } from '../helpers/token.js'
+import { tokenFor, connection } from '../helpers/token.js'
 
 let dir: string
 const cfg = {
@@ -21,7 +21,16 @@ const cfg = {
   selective: selectiveDefaults(),
 }
 const ctx = (
-  fetch: typeof globalThis.fetch = vi.fn(async () => new Response('{}'))
+  fetch: typeof globalThis.fetch = vi.fn(
+    async (input) =>
+      new Response(
+        JSON.stringify(
+          String(input).endsWith('/v2/connection')
+            ? { ...connection, token_id: cfg.deviceId, space_id: cfg.vaultId }
+            : {}
+        )
+      )
+  )
 ): CommandContext => ({ fetch, env: {}, revokeTimeoutMs: 20, io: { out: vi.fn(), err: vi.fn() } })
 beforeEach(async () => {
   const scratch = resolve(import.meta.dirname, '../../../../.scratch')
@@ -54,7 +63,9 @@ describe('owned CLI effects after long awaits', () => {
   })
   it('BUG: multipart publication rechecks binding at each request, not just putBlob entry', async () => {
     const lock = await acquireLock(dir)
-    const fetch = vi.fn(async () => {
+    const fetch = vi.fn(async (input) => {
+      if (String(input).endsWith('/v2/connection'))
+        return Response.json({ ...connection, token_id: cfg.deviceId, space_id: cfg.vaultId })
       await Promise.resolve()
       writeConfig(dir, { ...cfg, deviceToken: tokenFor(cfg.serverUrl, 'b'.repeat(43)) })
       return new Response(

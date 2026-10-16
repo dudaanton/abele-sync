@@ -21,6 +21,7 @@ import {
   EXTERNAL_FILES_VERSION_HEADER,
   type V2AccessToken,
   type V2Connection,
+  type V2CommitResponse,
   type V2ManifestItem,
   type ManifestItem,
   type ChangeItem,
@@ -33,6 +34,8 @@ import {
 } from '@abele/sync-protocol'
 import type { EngineClient, CommitOutcome, VersionsQuery } from './engineClient.js'
 import { EngineError } from './errors.js'
+import { MEMBERS_KEY, reconcileGeneration } from './restoreGeneration.js'
+import type { StateEntry } from './state.js'
 import { Http, idempotency, type ClientOptions } from './http.js'
 import type { FileSystem } from './fs.js'
 import { fingerprintFile } from './fs.js'
@@ -58,6 +61,7 @@ export class V2EngineClient implements EngineClient {
   private readonly departed = new Set<string>()
   private readonly localGroupPaths = new Set<string>()
   private readonly authoredDepartures = new Set<string>()
+  private readonly restoreAssets = new Set<string>()
   private readonly localNoteCache = new Map<
     string,
     { size: number; mtime: number; sha: string; links: string[] }
@@ -75,6 +79,7 @@ export class V2EngineClient implements EngineClient {
     return value
   }
   includes(path: string) {
+    path = path.normalize('NFC')
     const scope = this.connectionInfo?.scope ?? this.token.scope
     if (scope.kind === 'group')
       return (
@@ -95,7 +100,15 @@ export class V2EngineClient implements EngineClient {
     if (!state.getMeta || !state.setMeta)
       throw new AbeleError('invalid_request', 'token sync requires durable metadata state ports')
     this.ports = { fs, state }
+    this.http.generation = undefined
     await this.connection()
+    const generation = this.http.observedGeneration
+    if (await reconcileGeneration(state, generation)) {
+      this.files.clear()
+      this.byteSources.clear()
+      this.localNoteCache.clear()
+    }
+    this.http.generation = generation
     this.authoredDepartures.clear()
     for (const path of JSON.parse(
       (await state.getMeta!('v2-authored-departures')) ?? '[]'
@@ -117,7 +130,13 @@ export class V2EngineClient implements EngineClient {
           .results
       }
     )
-    for await (const entry of state.all())
+    const members = JSON.parse((await state.getMeta(MEMBERS_KEY)) ?? '[]') as StateEntry[]
+    this.restoreAssets.clear()
+    for (const entry of members)
+      if (!entry.wirePath.toLowerCase().endsWith('.md')) this.restoreAssets.add(entry.wirePath)
+    const current: StateEntry[] = []
+    for await (const entry of state.all()) current.push(entry)
+    for (const entry of [...members, ...current])
       if (!this.departed.has(entry.wirePath)) {
         const item = {
           file_id: entry.fileId,
@@ -381,15 +400,59 @@ export class V2EngineClient implements EngineClient {
         JSON.stringify([...this.authoredDepartures])
       )
     }
-    const response = await this.http.send('POST', '/v2/commit', {
-      json: { ops },
-      ...idempotency(key),
-    })
-    const body = await this.http.decode(V2CommitResponseSchema, response, 'POST', '/v2/commit')
+    const { body, replayed } = await this.sendCommit(ops, key)
     return {
       body: { head_seq: body.cursor, results: body.results },
-      replayed: response.headers.get('idempotent-replayed') === 'true',
+      replayed,
     }
+  }
+  private async sendCommit(
+    ops: CommitOp[],
+    key: string
+  ): Promise<{ body: V2CommitResponse; replayed: boolean }> {
+    const assets =
+      this.connectionInfo?.scope.kind === 'group'
+        ? ops.filter((op) => op.op === 'create' && this.restoreAssets.has(op.path))
+        : []
+    if (assets.length === 0) {
+      const response = await this.http.send('POST', '/v2/commit', {
+        json: { ops },
+        ...idempotency(key),
+      })
+      return {
+        body: await this.http.decode(V2CommitResponseSchema, response, 'POST', '/v2/commit'),
+        replayed: response.headers.get('idempotent-replayed') === 'true',
+      }
+    }
+    // These paths were already shared under this connection, rather than discovered private
+    // attachments. Re-establish their publication explicitly in the restored namespace.
+    const regular = ops.filter((op) => !assets.includes(op))
+    const results = new Map<CommitOp, CommitOpResult>()
+    let cursor = 0
+    let replayed = false
+    if (regular.length) {
+      const sent = await this.sendCommit(regular, `${key}:files`)
+      cursor = sent.body.cursor
+      replayed = sent.replayed
+      regular.forEach((op, i) => results.set(op, sent.body.results[i]!))
+    }
+    for (const [index, op] of assets.entries()) {
+      if (op.op !== 'create') continue
+      const response = await this.http.send('POST', '/v2/group-assets', {
+        json: { path: op.path, sha: op.sha, size: op.size, mtime: op.mtime },
+        ...idempotency(`${key}:asset:${index}`),
+      })
+      const body = await this.http.decode(
+        V2CommitResponseSchema,
+        response,
+        'POST',
+        '/v2/group-assets'
+      )
+      cursor = body.cursor
+      replayed ||= response.headers.get('idempotent-replayed') === 'true'
+      results.set(op, body.results[0]!)
+    }
+    return { body: { cursor, results: ops.map((op) => results.get(op)!) }, replayed }
   }
   async commit(ops: CommitOp[], key: string) {
     return (await this.commitRaw(ops, key)).body
@@ -582,7 +645,11 @@ export class V2EngineClient implements EngineClient {
     )
     return checkedExternalVerification(fileId, expected, response)
   }
-  async restore(fileId: string, versionId: string, key?: string): Promise<CommitOpResult> {
+  async restore(
+    fileId: string,
+    versionId: string,
+    key = crypto.randomUUID()
+  ): Promise<CommitOpResult> {
     return this.http.json(
       CommitOpResultSchema,
       'POST',
@@ -593,7 +660,7 @@ export class V2EngineClient implements EngineClient {
       }
     )
   }
-  async restoreDeleted(fileId: string, key?: string): Promise<CommitOpResult> {
+  async restoreDeleted(fileId: string, key = crypto.randomUUID()): Promise<CommitOpResult> {
     return this.http.json(
       CommitOpResultSchema,
       'POST',
@@ -604,7 +671,10 @@ export class V2EngineClient implements EngineClient {
       }
     )
   }
-  async restoreDeletedMany(fileIds: string[], key?: string): Promise<CommitOpResult[]> {
+  async restoreDeletedMany(
+    fileIds: string[],
+    key = crypto.randomUUID()
+  ): Promise<CommitOpResult[]> {
     const results: CommitOpResult[] = []
     for (let at = 0, batch = 0; at < fileIds.length; at += TRASH_RESTORE_MAX, batch++) {
       const response = await this.http.json(V2CommitResponseSchema, 'POST', '/v2/trash/restore', {

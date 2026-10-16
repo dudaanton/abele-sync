@@ -48,6 +48,8 @@ export interface StateStore {
   getMeta?(key: string): Promise<string | null> | string | null
   /** Files a string under `key`, or removes the key for `null`. */
   setMeta?(key: string, value: string | null): Promise<void> | void
+  /** Enumerate durable intent keys when retiring authority after a server restore. */
+  metadataKeys?(prefix: string): string[] | Promise<string[]>
 }
 
 interface Contents {
@@ -124,6 +126,9 @@ export class MemoryStateStore implements StateStore {
 
   async getMeta(key: string): Promise<string | null> {
     return this.meta.get(key) ?? null
+  }
+  metadataKeys(prefix: string): string[] {
+    return [...this.meta.keys()].filter((key) => key.startsWith(prefix))
   }
 
   async setMeta(key: string, value: string | null): Promise<void> {

@@ -168,7 +168,7 @@ export class IgnoreRules implements PathMatcher {
     for (const raw of text.split(/\r?\n/)) {
       const line = trimTrailingSpaces(raw.replace(/\r+$/, ''))
       if (line === '' || line.startsWith('#')) continue
-      const rule = compile(line)
+      const rule = compile(line.normalize('NFC'))
       if (rule) rules.push(rule)
     }
     return new IgnoreRules(rules)
@@ -176,6 +176,7 @@ export class IgnoreRules implements PathMatcher {
 
   /** True when the wire path is ignored. The last rule that matches decides. */
   ignores(wirePath: string): boolean {
+    wirePath = wirePath.normalize('NFC')
     let ignored = false
     for (const rule of this.rules) {
       // A rule can only flip the verdict: skip the ones that would leave it where it is.

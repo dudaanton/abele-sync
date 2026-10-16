@@ -1,5 +1,7 @@
 import type { ChangeItem, CommitOpResult, ManifestItem } from '@abele/sync-protocol'
 import { describe, expect, it } from 'vitest'
+import { PendingPullWrites } from '../../src/pullWrite.js'
+import { sourcesFromOps } from '../../src/pushSources.js'
 import {
   encodeText,
   EngineError,
@@ -122,6 +124,82 @@ const pullOver = (d: Disk, client: VaultClient, log: string[]): Promise<PullRepo
   })
 
 describe('paths off the wire', () => {
+  it('holds incoming placement if a directory twin arrives during the download', async () => {
+    await shaOf()
+    const d = disk()
+    await d.fs.writeAtomic('й/local.md', encodeText('local'), 1)
+    const client = fakeClient({
+      manifest: async () => ({ items: [item(1, 'й/new.md')], next: null, head_seq: 1 }),
+      changes: async () => ({ items: [], head_seq: 1, next_since: 1 }),
+      getBlob: async () => {
+        await d.fs.writeAtomic('й'.normalize('NFD') + '/other.md', encodeText('other'), 1)
+        return bytes
+      },
+    })
+    const report = await pullOver(d, client, [])
+    expect(report.held).toHaveLength(1)
+    expect([...d.fs.snapshot().keys()]).toEqual(['й/local.md', 'й'.normalize('NFD') + '/other.md'])
+    expect(await d.state.get('й/new.md')).toBeNull()
+  })
+  it('replays upload sources through mixed-normalization parents without guessing whole-path NFD', async () => {
+    await shaOf()
+    const d = disk()
+    const local = 'й'.normalize('NFD') + '/ё-é/й.md'
+    await d.fs.writeAtomic(local, bytes, 1000)
+    const sources = await sourcesFromOps(d.fs, d.state, [
+      {
+        op: 'create',
+        path: local.normalize('NFC'),
+        sha: shaOfBytes,
+        size: bytes.length,
+        mtime: 1000,
+      },
+    ])
+    expect(await sources.bytes(shaOfBytes)).toEqual(bytes)
+  })
+  it('retains physical pull evidence for review after a normalization rename', async () => {
+    await shaOf()
+    const d = disk()
+    const path = 'й/ё.md',
+      raw = path.normalize('NFD')
+    const base = {
+      path,
+      wirePath: path,
+      fileId: 'file-2',
+      versionId: 'old',
+      sha: shaOfBytes,
+      size: bytes.length,
+      mtime: 1000,
+    }
+    await d.fs.writeAtomic(path, bytes, 1000)
+    await d.state.put(base)
+    await d.state.setCursor(1)
+    const incoming = change(2, path)
+    await new PendingPullWrites(d.state).prepare(incoming, base, path, null)
+    const evidence = await d.state.getMeta('pull-write:file-2')
+    await d.fs.move(path, raw)
+    const client = fakeClient({
+      changes: async () => ({ items: [incoming], head_seq: 2, next_since: 2 }),
+    })
+    const report = await pullOver(d, client, [])
+    expect(report.held).toHaveLength(1)
+    expect(await d.state.getMeta('pull-write:file-2')).toBe(evidence)
+    expect(await d.state.byFileId('file-2')).toEqual(base)
+    expect([...d.fs.snapshot().keys()]).toEqual([raw])
+  })
+  it('places a new remote child beneath existing mixed-normalization parents', async () => {
+    await shaOf()
+    const d = disk()
+    const parent = 'й'.normalize('NFD') + '/ё-é'
+    await d.fs.writeAtomic(parent + '/local.md', encodeText('local'), 1)
+    const path = 'й/ё-é/new.md'
+    const client = fakeClient({
+      manifest: async () => ({ items: [item(1, path)], next: null, head_seq: 1 }),
+      changes: async () => ({ items: [], head_seq: 1, next_since: 1 }),
+    })
+    await pullOver(d, client, [])
+    expect([...d.fs.snapshot().keys()]).toEqual([parent + '/local.md', parent + '/new.md'])
+  })
   it('passes over every hostile change in the feed, carrying the cursor past it', async () => {
     await shaOf()
     const d = disk()

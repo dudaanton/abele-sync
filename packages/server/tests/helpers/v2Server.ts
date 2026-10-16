@@ -13,7 +13,11 @@ import { PG_TEST_URL } from './tempDb.js'
 /** Real TCP server with durable SQLite, separate blobs, and no account/device bootstrap. */
 export async function v2Server(
   dialect: Dialect = 'sqlite',
-  options: { configurationDirectories?: readonly string[] } = {}
+  options: {
+    configurationDirectories?: readonly string[]
+    now?: () => Date
+    trustProxy?: boolean
+  } = {}
 ) {
   const scratch = resolve('.scratch')
   await mkdir(scratch, { recursive: true })
@@ -27,6 +31,7 @@ export async function v2Server(
     const config = loadConfig({
       ABELE_MASTER_KEY: 'ab'.repeat(32),
       ABELE_TOKEN_PEPPER: 'synthetic-v2',
+      ABELE_TRUST_PROXY: options.trustProxy ? 'true' : 'false',
       ABELE_BLOB_DIR: join(dir, 'blobs'),
       ...(options.configurationDirectories
         ? { ABELE_CONFIGURATION_DIRS: JSON.stringify(options.configurationDirectories) }
@@ -34,7 +39,14 @@ export async function v2Server(
     })
     const store = new BlobStore(config.blobDir, config.masterKey)
     const hub = new EventHub()
-    let app = await buildApp({ config, db: handle.db, dialect, store, hub })
+    let app = await buildApp({
+      config,
+      db: handle.db,
+      dialect,
+      store,
+      hub,
+      ...(options.now ? { now: options.now } : {}),
+    })
     let address = await app.listen({ port: 0, host: '127.0.0.1' })
     return {
       get db() {
@@ -49,14 +61,22 @@ export async function v2Server(
       get address() {
         return address
       },
-      async restart() {
+      async restart(beforeOpen?: () => Promise<void>) {
         const port = Number(new URL(address).port)
         await app.close()
         // Close only the pool, not tempDb's schema cleanup; then reopen the same durable data.
         await active.db.destroy()
+        await beforeOpen?.()
         active = createDb(databaseUrl)
         await runMigrations(active.db)
-        app = await buildApp({ config, db: active.db, dialect, store, hub })
+        app = await buildApp({
+          config,
+          db: active.db,
+          dialect,
+          store,
+          hub,
+          ...(options.now ? { now: options.now } : {}),
+        })
         address = await app.listen({ port, host: '127.0.0.1' })
       },
       async close() {

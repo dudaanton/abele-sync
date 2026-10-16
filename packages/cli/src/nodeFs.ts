@@ -138,6 +138,32 @@ export class NodeFileSystem implements FileSystem {
     yield* this.walk(this.base, '')
   }
 
+  async listChildren(
+    parent: string
+  ): Promise<Array<{ path: string; kind: 'file' | 'directory'; identity?: string }>> {
+    const directory = parent === '' ? this.base : await this.contained(parent)
+    const result: Array<{ path: string; kind: 'file' | 'directory'; identity?: string }> = []
+    try {
+      if (parent !== '') {
+        const stat = await lstat(directory)
+        if (!stat.isDirectory() || stat.isSymbolicLink())
+          throw new EngineError('conflict', `not a real directory: ${parent}`)
+      }
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        if (!entry.isFile() && !entry.isDirectory()) continue
+        const path = parent ? parent + '/' + entry.name : entry.name
+        const stat = await lstat(await this.contained(path))
+        if (stat.isSymbolicLink()) continue
+        if (stat.isDirectory())
+          result.push({ path, kind: 'directory', identity: `${stat.dev}:${stat.ino}` })
+        else if (stat.isFile()) result.push({ path, kind: 'file' })
+      }
+    } catch (error) {
+      if (!isMissing(error)) throw error
+    }
+    return result
+  }
+
   async *listDirectories(): AsyncIterable<{ path: string; identity: string; mtime: number }> {
     const walk = async function* (
       self: NodeFileSystem,
@@ -189,8 +215,14 @@ export class NodeFileSystem implements FileSystem {
     if (!stat.isDirectory() || stat.isSymbolicLink())
       throw new EngineError('io', 'not a real directory')
     try {
-      await lstat(target)
-      throw new EngineError('io', `already exists: ${to}`)
+      const there = await lstat(target)
+      if (
+        !there.isDirectory() ||
+        there.isSymbolicLink() ||
+        there.dev !== stat.dev ||
+        there.ino !== stat.ino
+      )
+        throw new EngineError('io', `already exists: ${to}`)
     } catch (error) {
       if (!isMissing(error)) throw error
     }
@@ -199,9 +231,18 @@ export class NodeFileSystem implements FileSystem {
     await rename(await this.contained(from), await this.contained(to))
   }
 
-  async removeDirectory(path: string): Promise<void> {
+  async removeDirectory(path: string, expectedIdentity?: string): Promise<void> {
     this.checkEffect()
     try {
+      if (expectedIdentity !== undefined) {
+        const stat = await lstat(await this.contained(path))
+        if (
+          !stat.isDirectory() ||
+          stat.isSymbolicLink() ||
+          `${stat.dev}:${stat.ino}` !== expectedIdentity
+        )
+          throw new EngineError('conflict', `directory identity changed: ${path}`)
+      }
       await rmdir(await this.contained(path))
     } catch (error) {
       if (!isMissing(error)) throw error

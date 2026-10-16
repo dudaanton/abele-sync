@@ -159,7 +159,7 @@ export function settingsCategory(wirePath: string): SettingsCategory | null {
 
 /** Trailing slashes off, so `Archive` and `Archive/` name the same folder. */
 function folderPrefix(folder: string): string {
-  let f = folder
+  let f = folder.normalize('NFC')
   while (f.endsWith('/')) f = f.slice(0, -1)
   return f
 }
@@ -171,6 +171,7 @@ export function isExcluded(
   s: SelectiveSettings,
   scriptsFolder: string
 ): boolean {
+  wirePath = wirePath.normalize('NFC')
   if (isEngineOwn(wirePath)) return true
   if (s.maxFileBytes !== null && size > s.maxFileBytes) return true
   for (const folder of s.excludedFolders) {

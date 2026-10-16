@@ -2,6 +2,9 @@ import { AbeleError, type CommitResponse } from '@abele/sync-protocol'
 import type { Transaction } from 'kysely'
 import type { Database } from '../db/schema.js'
 
+/** Versioned empty request identity; cannot collide with ordinary hex request digests. */
+export const DELETE_SCOPE_REQUEST_HASH = 'connection.delete:v1'
+
 /**
  * An idempotency key carried into the commit it guards (`api/idempotency.ts`). The key is looked
  * up again and the answer filed inside the commit's own transaction, under the vault's lock:

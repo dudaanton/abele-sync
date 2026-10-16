@@ -4,6 +4,14 @@ import { EngineError, ExpectedWrites } from '../../src/index.js'
 const SHA_A = 'a'.repeat(64)
 const SHA_B = 'b'.repeat(64)
 
+it('matches watcher echoes across Unicode normalization without folding case', () => {
+  const expected = new ExpectedWrites()
+  expected.expect('й/ё.md', SHA_A)
+  expect(expected.has('й/ё.md'.normalize('NFD'))).toBe(true)
+  expect(expected.consume('Й/ё.md', SHA_A)).toBe(false)
+  expect(expected.consume('й/ё.md'.normalize('NFD'), SHA_A)).toBe(true)
+})
+
 describe('ExpectedWrites', () => {
   let expected: ExpectedWrites
 

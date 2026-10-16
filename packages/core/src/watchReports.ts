@@ -1,4 +1,4 @@
-import { normalisePath } from '@abele/sync-protocol'
+import { wirePath } from './localPaths.js'
 import type { ExpectedWrites } from './echo.js'
 import type { FileSystem } from './fs.js'
 import { fingerprintFile } from './fs.js'
@@ -83,7 +83,7 @@ export class WatchReports {
 /** The wire spelling of a path the watcher reported; its own when it has none. */
 function wireOf(path: string): string {
   try {
-    return normalisePath(path)
+    return wirePath(path)
   } catch {
     return path
   }

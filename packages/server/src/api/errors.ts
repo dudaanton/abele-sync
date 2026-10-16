@@ -39,7 +39,9 @@ export function toAbeleError(error: unknown): AbeleError {
 
 /** The app's error handler: map, log what nobody may see, answer the envelope. */
 export function errorHandler(error: unknown, request: FastifyRequest, reply: FastifyReply): void {
-  const mapped = toAbeleError(error)
+  let mapped = toAbeleError(error)
+  if (request.scopeDeletionReplay && mapped.code !== 'internal')
+    mapped = new AbeleError('scope_deleted', 'Deleted on the server')
   if (mapped.code === 'internal') {
     console.error(`error handling ${request.method} ${request.url}:`, error)
   }
@@ -53,5 +55,5 @@ export function notFoundHandler(request: FastifyRequest, reply: FastifyReply): v
 
 function send(reply: FastifyReply, error: AbeleError): void {
   const body: ErrorBody = error.toBody()
-  void reply.code(error.status).send(body)
+  void reply.header('x-abele-error-code', error.code).code(error.status).send(body)
 }

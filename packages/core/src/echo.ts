@@ -11,6 +11,7 @@ export class ExpectedWrites {
   private readonly pending = new Map<string, Map<string, number>>()
 
   expect(path: string, sha: string): void {
+    path = path.normalize('NFC')
     let shas = this.pending.get(path)
     if (!shas) this.pending.set(path, (shas = new Map()))
     shas.set(sha, (shas.get(sha) ?? 0) + 1)
@@ -18,6 +19,7 @@ export class ExpectedWrites {
 
   /** True once per `expect` of the same path and sha; false for anything else. */
   consume(path: string, sha: string): boolean {
+    path = path.normalize('NFC')
     const shas = this.pending.get(path)
     const count = shas?.get(sha) ?? 0
     if (!shas || count === 0) return false
@@ -32,11 +34,13 @@ export class ExpectedWrites {
 
   /** Whether any write is still expected at a path, so a watcher need not hash what nobody announced. */
   has(path: string): boolean {
+    path = path.normalize('NFC')
     return this.pending.has(path)
   }
 
   /** Forgets every expectation at a path — the write failed, or the file went away. */
   clear(path: string): void {
+    path = path.normalize('NFC')
     this.pending.delete(path)
   }
 }

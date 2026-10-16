@@ -50,11 +50,21 @@ and token authentication; `/v2/connection` validates an actual key.
 
 ## Storage operations
 
+The [operator guide](operator.md) documents vault and connection inspection,
+creation/renaming/revocation, retained or immediate vault deletion, folder
+deletion, activity queries, JSON output and examples of every command.
+
 `abele-sync-admin gc` runs retained storage cleanup for token spaces. `backup
 --to <new-directory>` creates a SQLite database/blob snapshot, excludes partial
 uploads, and verifies every referenced blob. PostgreSQL backup requires an
 externally coordinated consistent database/blob snapshot with writers and
 collectors stopped; the local backup command refuses to claim it can do that.
+
+After any restore, keep the server stopped and run `abele-sync-admin
+restore-generation` before reconnecting upgraded clients. Preserve the durable
+checkpoint beside the blob directory. Follow the complete [restore procedure](operator.md#restoring-a-backup),
+including the matching keys and blob snapshot; copying an old database alone is not
+a supported recovery procedure.
 Keep the encryption key separately available for restoration.
 
 ## Verification

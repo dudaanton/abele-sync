@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { sql } from 'kysely'
 import { join, resolve } from 'node:path'
 import { v2Server, type V2Server } from '@abele/sync-server/tests/helpers/v2Server.js'
 import { createUser } from '@abele/sync-server/src/access/tokens.js'
@@ -47,6 +48,39 @@ afterEach(async () => {
 })
 
 describe('production CLI token connections over real HTTP', () => {
+  it('H05 bounded CLI runs recover server rollback from retained local bytes', async () => {
+    const { root, a, b, sibling } = await fixture()
+    for (const [dir, token] of [
+      [a, root.token],
+      [b, sibling.token],
+    ] as const) {
+      const connected = await invoke(['connect', '--dir', dir, '--token', token])
+      expect(connected.code, connected.err).toBe(0)
+    }
+    await writeFile(join(a, 'Keep.md'), 'keep')
+    for (const dir of [a, b]) expect((await invoke(['run', '--dir', dir, '--once'])).code).toBe(0)
+    const backup = join(scratch!, 'backup.db')
+    await sql.raw(`vacuum into '${backup.replaceAll("'", "''")}'`).execute(server!.db)
+    await writeFile(join(a, 'Lost.md'), 'new local bytes')
+    for (const dir of [a, b]) expect((await invoke(['run', '--dir', dir, '--once'])).code).toBe(0)
+    await server!.restart(async () => {
+      await cp(backup, join(server!.dir, 'server.db'))
+    })
+    for (const dir of [a, b, a, b]) {
+      const result = await invoke(['run', '--dir', dir, '--once'])
+      expect(result.code, result.err).toBe(0)
+    }
+    for (const dir of [a, b]) {
+      expect(await readFile(join(dir, 'Keep.md'), 'utf8')).toBe('keep')
+      expect(await readFile(join(dir, 'Lost.md'), 'utf8')).toBe('new local bytes')
+    }
+    expect(
+      await server!.db.selectFrom('files').select('id').where('path', '=', 'Lost.md').execute()
+    ).toHaveLength(1)
+    expect(
+      await server!.db.selectFrom('versions').select('id').where('op', '=', 'delete').execute()
+    ).toEqual([])
+  })
   it('connects, persists, restarts bounded runs, and disconnects without revoking or deleting bytes', async () => {
     const { root, a, b, owner, sibling } = await fixture()
     expect((await invoke(['connect', '--dir', a], { ABELE_TOKEN: root.token })).code).toBe(0)

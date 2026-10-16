@@ -27,6 +27,7 @@ export type EngineState = 'idle' | 'syncing' | 'offline' | 'paused' | 'error'
 export type SyncFailure = 'offline' | 'unauthorized' | 'other'
 
 export interface EngineStatus {
+  reconciliation?: import('./reconciliation.js').ReconciliationState | null
   state: EngineState
   /**
    * Ops the last scan found, from the scan until the push has recorded them; then the paths

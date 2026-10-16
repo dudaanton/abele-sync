@@ -119,6 +119,11 @@ export async function readStaged(state: StateStore): Promise<ChangeItem[]> {
 export class StagedChanges {
   private filed: Filed | null = null
 
+  /** Durable state was reconciled after a server restore. */
+  invalidate(): void {
+    this.filed = null
+  }
+
   constructor(private readonly state: StateStore) {}
 
   private async load(): Promise<Filed> {

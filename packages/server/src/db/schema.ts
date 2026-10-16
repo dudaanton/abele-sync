@@ -138,6 +138,7 @@ export interface ConflictDivergencesTable {
 }
 
 export interface Database extends AccessDatabase {
+  restore_generation: { id: number; generation: string }
   conflict_divergences: ConflictDivergencesTable
   vault_seq: VaultSeqTable
   files: FilesTable

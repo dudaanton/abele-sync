@@ -1,3 +1,4 @@
+import { deleteScope } from '../../access/deleteScope.js'
 import { createHash } from 'node:crypto'
 import {
   AbeleError,
@@ -6,12 +7,13 @@ import {
   V2CommitRequestSchema,
   TRASH_RESTORE_MAX,
   PathSchema,
+  V2DeleteScopeRequestSchema,
 } from '@abele/sync-protocol'
 import { z } from 'zod'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import type { AppDeps } from '../app.js'
 import { bearerKey, accessDeps } from './v2Tokens.js'
-import { authenticateTokenId } from '../../access/tokens.js'
+import { authenticateTokenId, requireWrite } from '../../access/tokens.js'
 import { activeScope } from '../../access/visibility.js'
 import { commitWithToken } from '../../access/commit.js'
 import {
@@ -48,6 +50,7 @@ export function registerV2SyncRoutes(app: FastifyInstance, deps: AppDeps) {
     ...deps,
     authorizeOwner: async (db, owner) => {
       const p = await authenticateTokenId({ ...access, db }, owner.deviceId)
+      requireWrite(p)
       if (p.space.id !== owner.vaultId) throw new AbeleError('not_found', 'no upload in this space')
       await activeScope({ ...access, db }, p)
     },
@@ -57,6 +60,14 @@ export function registerV2SyncRoutes(app: FastifyInstance, deps: AppDeps) {
       vaultId: p.space.id,
       deviceId: p.token.id,
     }))
+  app.post('/v2/connection/delete', async (request) => {
+    V2DeleteScopeRequestSchema.parse(request.body === undefined ? {} : request.body)
+    return deleteScope(
+      { ...deps, ...access },
+      bearerKey(request),
+      z.string().min(1).max(200).parse(request.headers['idempotency-key'])
+    )
+  })
   app.post('/v2/group-assets', async (request) => {
     const input = z
       .union([
@@ -73,6 +84,7 @@ export function registerV2SyncRoutes(app: FastifyInstance, deps: AppDeps) {
       .parse(request.body)
     if ('file_id' in input)
       return withToken(access, bearerKey(request), async (access, p) => {
+        requireWrite(p)
         if (p.scope.kind !== 'group')
           throw new AbeleError('forbidden', 'publication requires a group connection')
         await publishExisting(
@@ -190,6 +202,7 @@ export function registerV2SyncRoutes(app: FastifyInstance, deps: AppDeps) {
     if (createHash('sha256').update(body).digest('hex') !== sha)
       throw new AbeleError('hash_mismatch', 'uploaded bytes do not match their digest')
     const result = await withToken(access, bearerKey(request), async (access, p) => {
+      requireWrite(p)
       const settings = JSON.parse(p.space.settings)
       if (body.length > settings.max_file_bytes)
         throw new AbeleError('too_large', 'file exceeds the space limit')
@@ -213,6 +226,7 @@ export function registerV2SyncRoutes(app: FastifyInstance, deps: AppDeps) {
       )
       return stored
     })
+    request.transferActivity = { uploaded_files: 1, uploaded_bytes: body.length }
     return reply.code(201).send(result)
   })
   app.post<{ Params: { sha: string } }>('/v2/uploads/:sha/begin', async (request, reply) => {
@@ -238,12 +252,12 @@ export function registerV2SyncRoutes(app: FastifyInstance, deps: AppDeps) {
     '/v2/uploads/:sha/:id/complete',
     async (request, reply) => {
       ShaSchema.parse(request.params.sha)
-      return reply.code(201).send(
-        await uploads.complete(request.params.id, {
-          ...(await owner(request)),
-          sha: request.params.sha,
-        })
-      )
+      const result = await uploads.complete(request.params.id, {
+        ...(await owner(request)),
+        sha: request.params.sha,
+      })
+      request.transferActivity = { uploaded_files: 1, uploaded_bytes: result.size }
+      return reply.code(201).send(result)
     }
   )
 }

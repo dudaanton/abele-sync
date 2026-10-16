@@ -14,6 +14,52 @@ import {
 /** A filter that lets everything through: the scanner's own guards still apply. */
 const ALL: ScanFilter = { excluded: () => false }
 
+it('reports normalization twins and holds a known loser after the tracked winner disappears', async () => {
+  const fs = new MemoryFileSystem()
+  const state = new MemoryStateStore()
+  const winner = 'й.md'
+  const loser = winner.normalize('NFD')
+  await fs.writeAtomic(winner, encodeText('winner'), 1)
+  await state.put({
+    path: winner,
+    wirePath: winner,
+    fileId: 'stable',
+    versionId: 'v1',
+    sha: await sha256(encodeText('winner')),
+    size: 6,
+    mtime: 1,
+  })
+  await fs.writeAtomic(loser, encodeText('loser'), 2)
+  const first = await scan(fs, state, ALL)
+  expect(first.collisions).toContainEqual({ path: loser, wirePath: winner, with: winner })
+  await fs.remove(winner)
+  const restart = await scan(fs, state, ALL)
+  expect(restart.ops).toEqual([])
+  expect(restart.collisions).toContainEqual({ path: loser, wirePath: winner, with: winner })
+  expect(await fs.read(loser)).toEqual(encodeText('loser'))
+})
+
+it('holds all children beneath normalization-collided directories including inferred deletes', async () => {
+  const fs = new MemoryFileSystem()
+  const state = new MemoryStateStore()
+  await fs.writeAtomic('й/a.md', encodeText('one'), 1)
+  await fs.writeAtomic('й'.normalize('NFD') + '/b.md', encodeText('two'), 1)
+  await fs.writeAtomic('safe.md', encodeText('safe'), 1)
+  await state.put({
+    path: 'й/missing.md',
+    wirePath: 'й/missing.md',
+    fileId: 'missing',
+    versionId: 'v1',
+    sha: await sha256(encodeText('old')),
+    size: 3,
+    mtime: 1,
+  })
+  const found = await scan(fs, state, ALL)
+  expect(found.ops).toHaveLength(1)
+  expect(found.ops[0]).toMatchObject({ op: 'create', path: 'safe.md' })
+  expect(found.collisions.length).toBeGreaterThan(0)
+})
+
 /** A filter that excludes the listed wire paths, and nothing else. */
 function excluding(...paths: string[]): ScanFilter {
   const set = new Set(paths)

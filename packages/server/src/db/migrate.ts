@@ -1,6 +1,10 @@
 import { PostgresAdapter, sql, type Kysely } from 'kysely'
 import { Migrator, type MigrationProvider } from 'kysely/migration'
 import type { Database } from './schema.js'
+import * as activity from './migrations/016_activity.js'
+import * as generation from './migrations/017_generation.js'
+import * as readOnly from './migrations/015_read_only.js'
+import * as operator from './migrations/014_operator.js'
 import * as engine from './migrations/001_engine.js'
 import * as tokens from './migrations/011_token_access.js'
 import * as sync from './migrations/012_sync_access.js'
@@ -14,6 +18,10 @@ export const migrationChain = Object.freeze([
   '003_sync_access',
   '004_conflict_divergences',
   '005_groups',
+  '006_operator',
+  '007_read_only',
+  '008_activity',
+  '009_generation',
 ])
 const provider: MigrationProvider = {
   getMigrations: async () => ({
@@ -22,6 +30,10 @@ const provider: MigrationProvider = {
     '003_sync_access': { up: sync.up },
     '004_conflict_divergences': { up: conflictDivergences.up, down: conflictDivergences.down },
     '005_groups': { up: groups.up },
+    '006_operator': { up: operator.up },
+    '007_read_only': { up: readOnly.up },
+    '008_activity': { up: activity.up },
+    '009_generation': { up: generation.up },
   }),
 }
 export async function runMigrations(

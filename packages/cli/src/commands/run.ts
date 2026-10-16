@@ -1,9 +1,15 @@
-import { EngineError, type EngineStatus, type SyncEngine } from '@abele/sync-core'
+import {
+  EngineError,
+  requestReconciliation,
+  type EngineStatus,
+  type SyncEngine,
+} from '@abele/sync-core'
 import { acquireLock, LOCK_STALE, type Lock } from '../lock.js'
 import { EXIT_REVOKED, EXIT_LOCKED, EXIT_OK, UsageError, type CommandContext } from '../context.js'
 import { personalRevocationBinding, recordRevoked, wasRevoked } from '../revoked.js'
 import { forgetJoinOnceDone } from '../join.js'
 import { codeHeldLine } from '../pluginCode.js'
+import { collisionLine } from './status.js'
 import { openLog, type Log } from '../log.js'
 import { PROGRESS_FILE_MS, PROGRESS_LINE_MS, PushProgress, writeLive } from '../progress.js'
 import {
@@ -45,6 +51,7 @@ import {
 
 export interface RunOptions {
   dir: string
+  reconcile?: boolean
   once?: boolean
   interval?: string
 }
@@ -108,6 +115,7 @@ export async function runRun(opts: RunOptions, ctx: CommandContext): Promise<num
       ctx.io.err(REVOKED_HINT)
       return EXIT_REVOKED
     }
+    if (opts.reconcile) await requestReconciliation(vault.state)
     await recoverVault(vault, lock.held)
     // Under the lock, and only here: what a killed daemon left half-written is nobody's now.
     vault.disk.sweepTemp()
@@ -158,6 +166,8 @@ export async function runRun(opts: RunOptions, ctx: CommandContext): Promise<num
       return EXIT_LOCKED
     }
     if (!isUnauthorized(error)) throw error
+    // Startup recovery can reject authority before an engine exists to log its failure.
+    if (engine === null) openLog(dir).line(`sync failed: ${messageOf(error)}`)
     const line = 'stopping: device token was revoked or is no longer authorized'
     openLog(dir).line(line)
     ctx.io.err(line)
@@ -212,6 +222,7 @@ async function syncOnce(
   rememberScope(vault)
   // The hook has logged the line and filed it; whoever ran this wants to see it too.
   ctx.io.out(summarise(report))
+  for (const collision of report.collisions) ctx.io.out(collisionLine(collision))
   if (report.deferred > 0) ctx.io.out(codeHeldLine(report.deferred))
   // Held deletes are a question for a person, not a failure: the run still did its job, and a
   // cron line that treats non-zero as broken would only nag (GUESS-16: exit 0).

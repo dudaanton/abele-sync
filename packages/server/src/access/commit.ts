@@ -1,3 +1,4 @@
+import { addDaily } from '../history/activity.js'
 import { createHash } from 'node:crypto'
 import {
   AbeleError,
@@ -12,7 +13,7 @@ import type { Ctx } from '../oplog/commitCtx.js'
 import { commitChosen, type CommitDeps } from '../oplog/commit.js'
 import { headSeqOf } from '../oplog/changes.js'
 import { Replay, type KeyedRun } from '../oplog/keyed.js'
-import { authenticateToken, type AccessDeps, type TokenPrincipal } from './tokens.js'
+import { authenticateToken, requireWrite, type AccessDeps, type TokenPrincipal } from './tokens.js'
 import {
   activeScope,
   covers,
@@ -36,6 +37,7 @@ export async function authorizeOp(
   op: V2CommitOp,
   publication = false
 ) {
+  requireWrite(principal)
   await activeScope({ ...deps, db: ctx.trx }, principal)
   const access = { ...deps, db: ctx.trx, configurationDirectories: ctx.configurationDirectories }
   const group = principal.scope.kind === 'group'
@@ -204,6 +206,7 @@ export async function commitWithToken(
         ...(keyed ? { keyed } : {}),
         before: async (ctx) => {
           principal = await authenticateToken({ ...deps, db: ctx.trx }, key)
+          requireWrite(principal)
           await activeScope({ ...deps, db: ctx.trx }, principal)
           ctx.consumeUpload = async (sha) => {
             await ctx.trx
@@ -385,6 +388,9 @@ export async function commitWithToken(
       principal.space.id,
       { kind: 'key', id: principal.token.id, name: principal.token.label },
       async (db) => {
+        await addDaily(db, principal.space.id, principal.token.id, deps.now?.() ?? new Date(), {
+          commits: 1,
+        })
         const chosen = choose ? await choose(db, principal) : ops
         if (principal.scope.kind !== 'group' || publication) return chosen
         // A local author who removed the group can explicitly re-add it. Treat a fresh

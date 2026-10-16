@@ -1,5 +1,7 @@
 import { VaultSettingsSchema, type VaultSettings } from '@abele/sync-protocol'
 import type { Kysely, Transaction } from 'kysely'
+import { purgeAfter, purgeVault } from '../access/vaultLifecycle.js'
+import { generationPath, pruneRestoreCheckpoint } from '../restoreGeneration.js'
 import { sweepIdempotency } from './receipts.js'
 import { collectUnreferenced, hasWaitingEntitlement } from '../blobs/pending.js'
 import { releaseRef, TOMBSTONE } from '../blobs/refs.js'
@@ -95,6 +97,7 @@ export async function runRetention(deps: RetentionDeps): Promise<RetentionReport
     }
   }
 
+  await pruneRestoreCheckpoint(deps.db, generationPath(deps.store.dir))
   return {
     versions_removed: removed,
     blobs_removed: await collectBlobs(deps, new Date(now.getTime() - BLOB_GRACE_MS)),
@@ -118,6 +121,18 @@ async function sweepVault(
   now: Date,
   catalog: RetentionCatalog
 ): Promise<number> {
+  if (catalog === spaceCatalog) {
+    const space = await trx
+      .selectFrom('spaces')
+      .select(['settings', 'deleted_at'])
+      .where('id', '=', vaultId)
+      .executeTakeFirstOrThrow()
+    if (space.deleted_at !== null) {
+      if (now.getTime() >= purgeAfter(space.settings, space.deleted_at))
+        return purgeVault(trx, vaultId)
+      return 0
+    }
+  }
   const settings = await catalog.settings(trx, vaultId)
   // No legacy admission/snapshot pins. Unified authorized retention references land with history in stage 4.
   const pins = new Set<string>()

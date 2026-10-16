@@ -4,6 +4,7 @@ import { touchesDeferred } from './defer.js'
 import { fingerprintFile, type FileSystem } from './fs.js'
 import type { ResumeOptions } from './pusher.js'
 import type { StateEntry, StateStore } from './state.js'
+import { resolveLocalFile } from './localPaths.js'
 
 /**
  * The pusher's view of this disk while it takes a commit's verdicts: where a file lies now,
@@ -182,8 +183,9 @@ export class PushDisk {
    */
   async targetOf(path: string, fileId: string): Promise<string> {
     const entry = await this.state.byFileId(fileId)
-    if (entry !== null && normalisePath(entry.path) === path) return entry.path
-    return this.diskPaths.get(path) ?? this.spelling(path)
+    const preferred =
+      entry !== null && normalisePath(entry.path) === path ? entry.path : this.diskPaths.get(path)
+    return resolveLocalFile(this.fs, this.state, path, preferred)
   }
 
   /**
@@ -194,10 +196,7 @@ export class PushDisk {
    * spells it, which is what a fresh scan would then find and adopt.
    */
   private async spelling(path: string): Promise<string> {
-    if ((await this.fs.stat(path)) !== null) return path
-    const decomposed = path.normalize('NFD')
-    if (decomposed !== path && (await this.fs.stat(decomposed)) !== null) return decomposed
-    return path
+    return resolveLocalFile(this.fs, this.state, path)
   }
 
   /** Whether the file at `path` is already the bytes named. */

@@ -1,3 +1,4 @@
+import { recordUse } from '../../history/activity.js'
 import { AbeleError, type V2Event } from '@abele/sync-protocol'
 import { z } from 'zod'
 import type { FastifyInstance } from 'fastify'
@@ -22,7 +23,8 @@ export function registerV2EventRoutes(app: FastifyInstance, deps: AppDeps) {
     }
     const stop = (code: number, revoked: boolean) => {
       if (ended) return
-      if (revoked && started) send({ type: 'connection', status: 'revoked' })
+      if (revoked && started)
+        send({ type: 'connection', status: code === 4004 ? 'scope_deleted' : 'revoked' })
       ended = true
       detach()
       clearInterval(timer)
@@ -62,7 +64,8 @@ export function registerV2EventRoutes(app: FastifyInstance, deps: AppDeps) {
           }
         })
         .catch((error) => {
-          if (error instanceof AbeleError && error.code === 'unauthorized') stop(4001, true)
+          if (error instanceof AbeleError && error.code === 'scope_deleted') stop(4004, true)
+          else if (error instanceof AbeleError && error.code === 'unauthorized') stop(4001, true)
           else stop(1011, false)
         })
     }
@@ -76,7 +79,8 @@ export function registerV2EventRoutes(app: FastifyInstance, deps: AppDeps) {
       started = true
       clearTimeout(authTimeout)
       void authenticateToken(access, key)
-        .then((p) => {
+        .then(async (p) => {
+          await recordUse(deps, request, p)
           if (ended) return
           detach = deps.hub.attach(
             p.space.id,
@@ -90,7 +94,9 @@ export function registerV2EventRoutes(app: FastifyInstance, deps: AppDeps) {
           )
           check()
         })
-        .catch(() => stop(4001, true))
+        .catch((error) =>
+          stop(error instanceof AbeleError && error.code === 'scope_deleted' ? 4004 : 4001, true)
+        )
     }
     socket.on('close', () => {
       ended = true

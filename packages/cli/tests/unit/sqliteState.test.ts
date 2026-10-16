@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import SqliteDatabase from 'better-sqlite3'
 import type { Journal, StateEntry } from '@abele/sync-core'
 import { SqliteStateStore } from '../../src/sqliteState.js'
+import { MemoryFileSystem, refreshLocalPaths } from '@abele/sync-core'
 
 const entry = (over: Partial<StateEntry> = {}): StateEntry => ({
   path: 'notes/a.md',
@@ -48,6 +49,19 @@ afterEach(async () => {
 })
 
 describe('SqliteStateStore', () => {
+  it('rekeys a normalization-only local rename with exactly one SQLite file identity', async () => {
+    const fs = new MemoryFileSystem()
+    const original = entry({ path: 'й/ё.md', wirePath: 'й/ё.md' })
+    await store.put(original)
+    await fs.writeAtomic(original.path.normalize('NFD'), new Uint8Array(5), original.mtime)
+    await refreshLocalPaths(fs, store)
+    expect(await store.get(original.path)).toBeNull()
+    expect(await store.byFileId(original.fileId)).toEqual({
+      ...original,
+      path: original.path.normalize('NFD'),
+    })
+    expect(await collect(store)).toHaveLength(1)
+  })
   it('pins a read-only snapshot across writer commits without taking a writer reservation', async () => {
     await store.put(entry())
     store.setMeta('status', 'before')

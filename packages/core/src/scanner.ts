@@ -1,11 +1,4 @@
-import {
-  AbeleError,
-  caseKey,
-  normalisePath,
-  splitPath,
-  validatePath,
-  type CommitOp,
-} from '@abele/sync-protocol'
+import { AbeleError, caseKey, splitPath, validatePath, type CommitOp } from '@abele/sync-protocol'
 import type { FileInfo, FileSystem } from './fs.js'
 import { fingerprintFile } from './fs.js'
 import { MAX_TEXT_BYTES } from './streaming.js'
@@ -13,21 +6,18 @@ import { sha256 } from './hash.js'
 import { alike, comparable } from './likeness.js'
 import { isEngineOwn } from './selective.js'
 import type { StateEntry, StateStore } from './state.js'
+import { LocalPaths, rememberedCollisions, wirePath as localToWire } from './localPaths.js'
 
 /**
  * The scanner: what is on disk against what was last synced, as the ops a push commits.
  *
- * It is pure. It reads the tree and the state, hashes what it must, and returns what it
- * found; nothing is written to disk and no state entry is touched. The engine takes the
+ * It reads the tree and state, hashes what it must, and persists collision evidence unless
+ * called read-only. No file bytes or file state entries are changed. The engine takes the
  * `ScanResult`, pushes the ops and records the results, and the `hashes` it kept mean the
- * next scan hashes nothing that did not change.
+ * next scan only hashes unchanged files selected for content revalidation.
  *
- * Known limitation: a file whose content changed while its size and mtime stayed exactly
- * what was last synced reads as unchanged and is not hashed — two same-size files swapped
- * by a tool that preserves mtimes, or a restore from a backup that does. It is picked up as
- * soon as anything touches its mtime, and the puller's sha comparison catches it from the
- * other side. Hashing every file on every scan is the only alternative, and a vault is
- * scanned far too often for that.
+ * Hosts request a bounded rolling content sweep with `revalidate`, or a full scan on
+ * demand. The sweep position is durable and independent of listing order.
  */
 
 /** Which files this device syncs at all. In production, `isExcluded` over the settings. */
@@ -82,6 +72,16 @@ export interface ScanResult {
 }
 
 export interface ScanOptions {
+  /** Status can inspect collisions while another process owns the write lock. */
+  readOnly?: boolean
+  /** Extra tracked files to hash per scan; `all` forces content reconciliation. */
+  revalidate?: number | 'all'
+  /** Sweep byte budget; one oversized file still advances the sweep. Default 16 MiB. */
+  revalidateBytes?: number
+  /** Recheck paths discovered before a pull, even if their metadata still match. */
+  verifyPaths?: ReadonlySet<string>
+  /** Restored historical absence must not be inferred to authorize a move. */
+  pairMoves?: boolean
   /** The digest, `sha256` by default. Tests count its calls; hosts may cache by inode. */
   hash?: (bytes: Uint8Array) => Promise<string>
   log?: (message: string) => void
@@ -91,6 +91,38 @@ export interface ScanOptions {
    * reads them from the server. Unset, or answering null, the two are never paired.
    */
   previous?: (entry: StateEntry) => Promise<Uint8Array | null>
+}
+
+/** Select a durable bounded content sweep without enumerating the vault again. */
+export async function revalidationPaths(
+  files: ReadonlyMap<string, FileInfo>,
+  state: StateStore,
+  opts: ScanOptions
+): Promise<Set<string>> {
+  if (!opts.revalidate) return new Set()
+  const candidates = [...files.keys()].sort(byPath)
+  const after = (await state.getMeta?.('content-sweep-after')) ?? ''
+  const ordered = [
+    ...candidates.filter((path) => path > after),
+    ...candidates.filter((path) => path <= after),
+  ]
+  const selected: string[] = []
+  let bytes = 0
+  for (const path of ordered) {
+    if (
+      opts.revalidate !== 'all' &&
+      (selected.length >= (opts.revalidate ?? 0) ||
+        (selected.length > 0 &&
+          bytes + files.get(path)!.size > (opts.revalidateBytes ?? 16 * 1024 * 1024)))
+    )
+      break
+    selected.push(path)
+    bytes += files.get(path)!.size
+  }
+  if (!opts.readOnly && selected.length > 0)
+    await state.setMeta?.('content-sweep-after', selected[selected.length - 1]!)
+
+  return new Set(selected)
 }
 
 /** The `reason` an `AbeleError` carries, or whatever the failure could say for itself. */
@@ -133,7 +165,10 @@ async function walkTree(
   filter: ScanFilter,
   entries: Map<string, StateEntry>,
   present: Set<string>,
-  skip: (path: string, reason: string) => void
+  skip: (path: string, reason: string) => void,
+  collisions: CaseCollision[],
+  remembered: Map<string, { winner: string; losers: string[] }>,
+  inventory: LocalPaths
 ): Promise<Map<string, FileInfo>> {
   const candidates = new Map<string, FileInfo[]>()
   for await (const listed of fs.list()) {
@@ -142,7 +177,8 @@ async function walkTree(
     const info = listed.mtime < 0 ? { ...listed, mtime: 0 } : listed
     let wirePath: string
     try {
-      wirePath = normalisePath(info.path)
+      if (isEngineOwn(info.path)) continue
+      wirePath = localToWire(info.path)
       // Engine-owned paths are not candidates for the wire, even if the wire forbids them.
       if (isEngineOwn(wirePath)) continue
       validatePath(wirePath)
@@ -152,17 +188,40 @@ async function walkTree(
     }
     present.add(wirePath)
     // The filter owns the engine's own paths too; the guard is here so no filter can lose them.
-    if (isEngineOwn(wirePath) || filter.excluded(wirePath, info.size)) continue
+    if (isEngineOwn(wirePath)) continue
     const twins = candidates.get(wirePath)
     if (twins) twins.push(info)
     else candidates.set(wirePath, [info])
   }
   const files = new Map<string, FileInfo>()
   for (const [wirePath, twins] of candidates) {
-    const kept = chooseTwin(twins, entries.get(wirePath))
+    if (inventory.blocked(wirePath)) continue
+    const known = remembered.get(wirePath)
+    if (known && !twins.some((t) => t.path === known.winner)) {
+      const losers = twins.filter((t) => known.losers.includes(t.path))
+      if (losers.length) {
+        for (const loser of losers)
+          collisions.push({ path: loser.path, wirePath, with: known.winner })
+        continue
+      }
+    }
+    const eligible = twins.filter((t) => !filter.excluded(wirePath, t.size))
+    const entry = entries.get(wirePath)
+    const tracked = entry && twins.find((t) => t.path === entry.path)
+    const kept = tracked || chooseTwin(eligible.length ? eligible : twins, entry)
+    if (twins.length > 1)
+      remembered.set(wirePath, {
+        winner: kept.path,
+        losers: twins.filter((t) => t !== kept).map((t) => t.path),
+      })
+    else remembered.delete(wirePath)
     // Two spellings of one wire path: one is the file, the rest have nowhere on the wire to go.
-    for (const twin of twins) if (twin !== kept) skip(twin.path, 'duplicate wire path')
-    files.set(wirePath, kept)
+    for (const twin of twins)
+      if (twin !== kept) {
+        if (!filter.excluded(wirePath, twin.size)) skip(twin.path, 'duplicate wire path')
+        collisions.push({ path: twin.path, wirePath, with: kept.path })
+      }
+    if (!filter.excluded(wirePath, kept.size)) files.set(wirePath, kept)
   }
   return files
 }
@@ -273,7 +332,23 @@ export async function scan(
 
   const present = new Set<string>()
   const entries = await readState(state)
-  const files = await walkTree(fs, filter, entries, present, skip)
+  const inventory = await LocalPaths.read(fs, state)
+  if (!opts.readOnly) await inventory.rememberDirectories(state)
+  const collisions: CaseCollision[] = inventory.directoryCollisions()
+  const remembered = await rememberedCollisions(state)
+  const files = await walkTree(
+    fs,
+    filter,
+    entries,
+    present,
+    skip,
+    collisions,
+    remembered,
+    inventory
+  )
+  for (const path of remembered.keys()) if (!present.has(path)) remembered.delete(path)
+  if (!opts.readOnly)
+    await state.setMeta?.('normalization-collisions', JSON.stringify([...remembered]))
 
   // The names synced files still hold on this disk. A synced file that is gone frees its name,
   // so a case-only rename on a case-sensitive disk is still paired into a move below.
@@ -282,12 +357,19 @@ export async function scan(
     if (present.has(entry.wirePath)) synced.set(caseKey(entry.wirePath), entry.wirePath)
   }
 
+  const revalidate = opts.revalidate
+    ? await revalidationPaths(
+        new Map([...files].filter(([path]) => entries.has(path))),
+        state,
+        opts
+      )
+    : new Set<string>()
+
   const hashes = new Map<string, string>()
   const diskPaths = new Map<string, string>()
   const infos = new Map<string, FileInfo>()
   const modifies: Array<{ path: string; op: CommitOp }> = []
   const fresh: string[] = []
-  const collisions: CaseCollision[] = []
   for (const [wirePath, info] of files) {
     const entry = entries.get(wirePath)
     const twin = entry ? undefined : synced.get(caseKey(wirePath))
@@ -295,7 +377,13 @@ export async function scan(
       collisions.push({ path: info.path, wirePath, with: twin })
       continue
     }
-    if (entry && entry.size === info.size && entry.mtime === info.mtime) {
+    if (
+      entry &&
+      !revalidate.has(wirePath) &&
+      !opts.verifyPaths?.has(wirePath) &&
+      entry.size === info.size &&
+      entry.mtime === info.mtime
+    ) {
       hashes.set(wirePath, entry.sha)
       diskPaths.set(wirePath, info.path)
       infos.set(wirePath, info)
@@ -334,28 +422,34 @@ export async function scan(
   // An entry this device no longer syncs is left where it is: excluded files are not deleted
   // from the vault on the strength of a setting.
   const missing = [...entries.values()].filter(
-    (entry) => !present.has(entry.wirePath) && !filter.excluded(entry.wirePath, entry.size)
+    (entry) =>
+      !inventory.blocked(entry.wirePath) &&
+      !present.has(entry.wirePath) &&
+      !filter.excluded(entry.wirePath, entry.size)
   )
   fresh.sort(byPath)
   missing.sort((a, b) => byPath(a.wirePath, b.wirePath))
-  const moves = await pairRenames(missing, fresh, hashes, async (lost, found) => {
-    const path = diskPaths.get(found)
-    if (
-      opts.previous === undefined ||
-      path === undefined ||
-      !comparable(found) ||
-      lost.size > MAX_TEXT_BYTES ||
-      (infos.get(found)?.size ?? Infinity) > MAX_TEXT_BYTES
-    )
-      return false
-    try {
-      const before = await opts.previous(lost)
-      return before !== null && alike(before, await fs.read(path))
-    } catch {
-      // Either side unreadable: nothing to judge the likeness by, so they are not paired.
-      return false
-    }
-  })
+  const moves =
+    opts.pairMoves === false
+      ? new Map<string, string>()
+      : await pairRenames(missing, fresh, hashes, async (lost, found) => {
+          const path = diskPaths.get(found)
+          if (
+            opts.previous === undefined ||
+            path === undefined ||
+            !comparable(found) ||
+            lost.size > MAX_TEXT_BYTES ||
+            (infos.get(found)?.size ?? Infinity) > MAX_TEXT_BYTES
+          )
+            return false
+          try {
+            const before = await opts.previous(lost)
+            return before !== null && alike(before, await fs.read(path))
+          } catch {
+            // Either side unreadable: nothing to judge the likeness by, so they are not paired.
+            return false
+          }
+        })
 
   const ops: CommitOp[] = []
   const dirty = new Set<string>()

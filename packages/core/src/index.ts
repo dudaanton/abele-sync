@@ -18,6 +18,7 @@ export * from './puller.js'
 export * from './pullRecovery.js'
 export * from './pusher.js'
 export * from './scanner.js'
+export { LocalPaths, refreshLocalPaths, wirePath as localToWirePath } from './localPaths.js'
 export * from './selective.js'
 export * from './staging.js'
 export * from './state.js'
@@ -25,3 +26,10 @@ export * from './external/records.js'
 export * from './external/state.js'
 export * from './external/recovery.js'
 export * from './external/sqliteState.js'
+export { GENERATION_KEY, RECONCILING_KEY, reconcileGeneration } from './restoreGeneration.js'
+export {
+  readReconciliation,
+  requestReconciliation,
+  fenceRestoredJournal,
+  type ReconciliationState,
+} from './reconciliation.js'

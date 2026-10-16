@@ -12,7 +12,9 @@ import { loadConfig, type Config } from '../config.js'
 import { createDb, type Dialect } from '../db/connect.js'
 import { runMigrations } from '../db/migrate.js'
 import type { Database } from '../db/schema.js'
+import { registerOperator } from './operator.js'
 import { verifyBackup } from './verifyBackup.js'
+import { generationPath, restoreGeneration } from '../restoreGeneration.js'
 
 /**
  * The operator's side of the server: the handful of things that have to be done
@@ -22,7 +24,7 @@ import { verifyBackup } from './verifyBackup.js'
  * It opens its own database from `ABELE_DATABASE_URL` and migrates it first, so
  * it works on a server that has never been started. Nothing is written straight
  * to the console: everything goes through `out`, which the tests read instead of
- * printing. Only `user create` deliberately prints a newly created root token;
+ * printing. Provisioning deliberately prints each newly issued token once;
  * existing secrets, hashes and passwords are never printed.
  */
 
@@ -32,7 +34,7 @@ export interface AdminOutput {
 }
 
 /** What a command is handed once the database is open. */
-interface AdminContext {
+export interface AdminContext {
   config: Config
   db: Kysely<Database>
   dialect: Dialect
@@ -91,6 +93,20 @@ function buildProgram(out: AdminOutput, chosen: { command: AdminCommand | null }
     })
 
   program
+    .command('restore-generation')
+    .description('with the server STOPPED, bump the generation after restoring DB and blobs')
+    .action(() => {
+      chosen.command = async (ctx) => {
+        const checkpoint = await restoreGeneration(ctx.db, generationPath(ctx.config.blobDir), true)
+        out.log(
+          program.opts<{ json?: boolean }>().json
+            ? JSON.stringify({ generation: checkpoint.generation })
+            : `restore generation: ${checkpoint.generation}`
+        )
+      }
+    })
+
+  program
     .command('user')
     .description('local unified-access provisioning')
     .command('create')
@@ -103,7 +119,7 @@ function buildProgram(out: AdminOutput, chosen: { command: AdminCommand | null }
           opts.label,
           opts.address
         )
-        out.log(issued.token)
+        out.log(program.opts<{ json?: boolean }>().json ? JSON.stringify(issued) : issued.token)
       }
     })
 
@@ -125,6 +141,10 @@ function buildProgram(out: AdminOutput, chosen: { command: AdminCommand | null }
           idempotencyTtlMs: ctx.config.idempotencyTtlMs,
           now: () => new Date(),
         })
+        if (program.opts<{ json?: boolean }>().json) {
+          out.log(JSON.stringify(report))
+          return
+        }
         out.log(`versions removed: ${report.versions_removed}`)
         out.log(`blobs removed: ${report.blobs_removed}`)
         out.log(`unreferenced blobs removed: ${report.unreferenced_removed}`)
@@ -138,9 +158,24 @@ function buildProgram(out: AdminOutput, chosen: { command: AdminCommand | null }
     .description('copy the database and the blobs into a directory')
     .requiredOption('--to <dir>', 'where to write the backup')
     .action((opts: { to: string }) => {
-      chosen.command = (ctx) => backup(ctx, resolve(opts.to), out)
+      chosen.command = async (ctx) => {
+        const dir = resolve(opts.to)
+        const json = program.opts<{ json?: boolean }>().json
+        await backup(ctx, dir, json ? { log: () => {}, error: out.error } : out)
+        if (json)
+          out.log(
+            JSON.stringify({
+              database: join(dir, 'abele.db'),
+              blobs: join(dir, 'blobs'),
+              verified: true,
+            })
+          )
+      }
     })
 
+  registerOperator(program, out, (run) => {
+    chosen.command = run
+  })
   return program
 }
 

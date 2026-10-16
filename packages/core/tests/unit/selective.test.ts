@@ -11,6 +11,15 @@ import {
 
 const SCRIPTS = 'Scripts'
 
+it('compares Unicode folder operands and inputs in NFC with case and segment boundaries', () => {
+  const settings = selectiveDefaults()
+  settings.excludedFolders = ['й-folder'.normalize('NFD')]
+  expect(isExcluded('й-folder/ё.md', 1, settings, '')).toBe(true)
+  expect(isExcluded('й-folder/ё.md'.normalize('NFD'), 1, settings, '')).toBe(true)
+  expect(isExcluded('й-folder-other/ё.md', 1, settings, '')).toBe(false)
+  expect(isExcluded('Й-folder/ё.md', 1, settings, '')).toBe(false)
+})
+
 /** A fresh, mutable set of defaults with a few switches thrown. */
 function withSettings(patch: Partial<SelectiveSettings>): SelectiveSettings {
   return { ...selectiveDefaults(), ...patch }

@@ -1,5 +1,7 @@
+import { registerActivity } from '../history/activity.js'
+import { generationPath, restoreGeneration } from '../restoreGeneration.js'
 import websocket from '@fastify/websocket'
-import { AbeleError } from '@abele/sync-protocol'
+import { AbeleError, RESTORE_GENERATION_HEADER } from '@abele/sync-protocol'
 import Fastify, { type FastifyInstance } from 'fastify'
 import type { Kysely } from 'kysely'
 import type { BlobStore } from '../blobs/store.js'
@@ -24,12 +26,26 @@ export interface AppDeps {
 
 /** Public server: one token API, no legacy login/device/vault/scoped compatibility routes. */
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
+  const generation = await restoreGeneration(deps.db, generationPath(deps.config.blobDir))
   const app = Fastify({
     logger: false,
     bodyLimit: Math.max(deps.config.simpleUploadBytes, deps.config.partBytes) + 4096,
     trustProxy: deps.config.trustProxy,
   })
   await app.register(websocket, { options: { maxPayload: 4096 } })
+  app.addHook('onRequest', async (request, reply) => {
+    reply.header(RESTORE_GENERATION_HEADER, generation.generation)
+    const expected = request.headers[RESTORE_GENERATION_HEADER]
+    if (expected !== undefined && expected !== generation.generation)
+      throw new AbeleError(
+        'conflict',
+        'server generation changed; reconcile local files before retrying'
+      )
+  })
+  app.addHook('onSend', async (request, _reply, payload) => {
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) await generation.checkpoint()
+    return payload
+  })
   app.removeContentTypeParser('application/json')
   app.addContentTypeParser('application/json', { parseAs: 'string' }, (request, body, done) => {
     const raw = typeof body === 'string' ? body : body.toString('utf8')
@@ -52,6 +68,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   app.setNotFoundHandler(notFoundHandler)
   app.get('/healthz', async () => ({ ok: true }))
   app.get('/capabilities', async () => ({ protocol: 2, authentication: 'token' }))
+  registerActivity(app, deps)
   registerV2TokenRoutes(app, deps)
   registerV2SyncRoutes(app, deps)
   registerV2ExternalFilesRoutes(app, deps)
