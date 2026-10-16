@@ -36,6 +36,11 @@ export type EngineClientFactory = (
 /** Real HTTP with explicit deterministic faults. No route injection or synthetic successes. */
 export class NetworkControl {
   readonly requests: Array<{ url: string; method: string }> = []
+  private requestLimit = Infinity
+  /** Bound work rather than throughput when a facet moves many durable files. */
+  limitRequests(max: number): void {
+    this.requestLimit = max
+  }
   private readonly offline = new Set<string>()
   private next:
     | {
@@ -76,6 +81,8 @@ export class NetworkControl {
     this.next = undefined
   }
   readonly fetch: typeof fetch = async (input, init) => {
+    if (this.requests.length >= this.requestLimit)
+      throw new Error(`acceptance HTTP work exceeded ${this.requestLimit} requests`)
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     const method = init?.method ?? 'GET'
     this.requests.push({ url, method })

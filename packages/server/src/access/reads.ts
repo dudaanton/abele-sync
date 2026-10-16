@@ -48,7 +48,6 @@ export async function manifestWithToken(
 ): Promise<V2Manifest> {
   return withToken(deps, key, async (deps, p) => {
     const now = (deps.now?.() ?? new Date()).toISOString()
-    await deps.db.deleteFrom('scope_snapshots').where('expires_at', '<=', now).execute()
     let snapshotId: string,
       after = '',
       pageLimit = limit
@@ -70,32 +69,45 @@ export async function manifestWithToken(
         throw invalidPage()
       }
     } else {
-      snapshotId = randomUUID()
-      await deps.db
-        .insertInto('scope_snapshots')
-        .values({
-          id: snapshotId,
-          scope_id: p.scope.id,
-          cursor: await headSeqOf(deps.db, p.space.id),
-          expires_at: new Date(Date.parse(now) + 60 * 60 * 1000).toISOString(),
-        })
-        .execute()
-      await deps.db
-        .insertInto('scope_snapshot_items')
-        .columns(['snapshot_id', 'file_id', 'item'])
-        .expression((eb) =>
-          eb
-            .selectFrom('scope_members')
-            .select([sql<string>`${snapshotId}`.as('snapshot_id'), 'file_id', 'item'])
-            .where('scope_id', '=', p.scope.id)
-        )
-        .execute()
+      const cursor = await headSeqOf(deps.db, p.space.id)
+      const existing = await deps.db
+        .selectFrom('scope_snapshots')
+        .select('id')
+        .where('scope_id', '=', p.scope.id)
+        .where('cursor', '=', cursor)
+        .where('expires_at', '>', now)
+        .orderBy('expires_at', 'desc')
+        .executeTakeFirst()
+      snapshotId = existing?.id ?? randomUUID()
+      if (!existing) {
+        await deps.db.deleteFrom('scope_snapshots').where('expires_at', '<=', now).execute()
+        await deps.db
+          .insertInto('scope_snapshots')
+          .values({
+            id: snapshotId,
+            scope_id: p.scope.id,
+            cursor,
+            expires_at: new Date(Date.parse(now) + 60 * 60 * 1000).toISOString(),
+          })
+          .execute()
+        await deps.db
+          .insertInto('scope_snapshot_items')
+          .columns(['snapshot_id', 'file_id', 'item'])
+          .expression((eb) =>
+            eb
+              .selectFrom('scope_members')
+              .select([sql<string>`${snapshotId}`.as('snapshot_id'), 'file_id', 'item'])
+              .where('scope_id', '=', p.scope.id)
+          )
+          .execute()
+      }
     }
     const snapshot = await deps.db
       .selectFrom('scope_snapshots')
       .selectAll()
       .where('id', '=', snapshotId)
       .where('scope_id', '=', p.scope.id)
+      .where('expires_at', '>', now)
       .executeTakeFirst()
     if (!snapshot) throw invalidPage()
     const rows = await deps.db

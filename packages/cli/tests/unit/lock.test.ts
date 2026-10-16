@@ -127,6 +127,26 @@ describe('acquireLock', () => {
     ;(await acquireLock(dir))()
   })
 
+  it('takes over a copied identity held by this process for a different vault', async () => {
+    const other = await mkdtemp(join(tmpdir(), 'abele-lock-copy-'))
+    const original = await acquireLock(other)
+    let copied: Awaited<ReturnType<typeof acquireLock>> | undefined
+    try {
+      writeFileSync(lockFile(), readFileSync(join(other, '.abele-sync', 'lock')))
+      copied = await acquireLock(dir)
+      expect(copied.held()).toBe(true)
+      expect(original.held()).toBe(true)
+      expect(identity().instance).not.toBe(
+        JSON.parse(readFileSync(join(other, '.abele-sync', 'lock'), 'utf8').split('\n')[1]!)
+          .instance
+      )
+    } finally {
+      copied?.()
+      original()
+      await rm(other, { recursive: true, force: true })
+    }
+  })
+
   it('refuses a lock another live process on this machine holds, in either form', async () => {
     writeLock(process.ppid, here('theirs'))
     await expect(acquireLock(dir)).rejects.toThrow(/another abele-sync is running/)

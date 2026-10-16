@@ -71,7 +71,8 @@ it('exchanges NFD paths through the built CLI across restarts, history, restore 
   await settle()
   expect(await readFile(join(a, parent, 'й-new.md'), 'utf8')).toBe('remote\n')
   const before = await cli('history', note, '--dir', a)
-  await rename(join(a, note), join(a, note.normalize('NFC')))
+  // Rename only the leaf: on a sensitive disk the NFC parent does not exist.
+  await rename(join(a, note), join(a, parent, 'ё-note.md'))
   await settle()
   expect(await cli('history', note, '--dir', a)).toBe(before)
   const movedParent = 'Sample/ё-renamed'.normalize('NFD')

@@ -4,6 +4,7 @@ import type { FastifyRequest, FastifyInstance } from 'fastify'
 import type { Database } from '../db/schema.js'
 import type { AppDeps } from '../api/app.js'
 import type { TokenPrincipal } from '../access/tokens.js'
+import { operationalLog } from '../api/operationalLog.js'
 
 export const dailyFields = [
   'uploaded_files',
@@ -54,7 +55,7 @@ export async function recordUse(deps: AppDeps, request: FastifyRequest, p: Token
       .where((eb) => eb.or([eb('last_used_at', 'is', null), eb('last_used_at', '<=', cutoff)]))
       .execute()
   } catch (error) {
-    console.error('token use sample could not be recorded:', error)
+    operationalLog(deps.db, 'token use sample failed', error)
   }
 }
 export async function addDaily(
@@ -90,6 +91,39 @@ export async function addDaily(
     .execute()
 }
 export function registerActivity(app: FastifyInstance, deps: AppDeps) {
+  // Keep exact totals, but coalesce transfer telemetry independently of request volume.
+  // The map and each in-flight batch have a fixed bound; no per-request timer or queue.
+  const pending = new Map<string, { vaultId: string; tokenId: string; at: Date; deltas: Deltas }>()
+  // Publish the first sample immediately so a newly used connection is visible to
+  // the operator. Bound this cache too; eviction can cause another immediate sample.
+  const sampled = new Set<string>()
+  let flushing: Promise<void> | undefined
+  const flush = (): Promise<void> => {
+    if (flushing) return flushing
+    const batch = [...pending.values()]
+    pending.clear()
+    flushing = (async () => {
+      for (const item of batch) {
+        try {
+          await addDaily(deps.db, item.vaultId, item.tokenId, item.at, item.deltas)
+        } catch (error) {
+          operationalLog(deps.db, 'activity counters failed', error)
+        }
+      }
+    })().finally(() => {
+      flushing = undefined
+    })
+    return flushing
+  }
+  const timer = setInterval(() => {
+    void flush()
+  }, 250)
+  timer.unref()
+  app.addHook('onClose', async () => {
+    clearInterval(timer)
+    await flushing
+    if (pending.size) await flush()
+  })
   app.addHook('onResponse', async (request, reply) => {
     const actor = request.tokenActivity
     if (!actor || !reply.raw.writableFinished || reply.statusCode >= 300) return
@@ -105,11 +139,27 @@ export function registerActivity(app: FastifyInstance, deps: AppDeps) {
       }
     }
     if (!deltas) return
-    try {
-      await addDaily(deps.db, actor.vaultId, actor.tokenId, deps.now?.() ?? new Date(), deltas)
-    } catch (error) {
-      console.error('activity counters could not be recorded:', error)
+    const at = deps.now?.() ?? new Date()
+    const key = actor.tokenId + ':' + at.toISOString().slice(0, 10)
+    if (!sampled.has(key)) {
+      if (sampled.size >= 1024) sampled.delete(sampled.values().next().value!)
+      sampled.add(key)
+      try {
+        await addDaily(deps.db, actor.vaultId, actor.tokenId, at, deltas)
+      } catch (error) {
+        operationalLog(deps.db, 'activity counters failed', error)
+      }
+      return
     }
+    while (!pending.has(key) && pending.size >= 1024) await flush()
+    let item = pending.get(key)
+    if (!item) {
+      item = { ...actor, at, deltas: {} }
+      pending.set(key, item)
+    }
+    for (const field of dailyFields)
+      if (deltas[field] !== undefined)
+        item.deltas[field] = (item.deltas[field] ?? 0) + deltas[field]
   })
 }
 export async function listDaily(

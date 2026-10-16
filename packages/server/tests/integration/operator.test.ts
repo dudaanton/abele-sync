@@ -116,7 +116,7 @@ for (const dialect of ['sqlite', 'pg'] as const)
             })
           ).status
         ).toBe(404)
-        expect((await cli('connections', 'revoke', 'Group')).code).toBe(0)
+        expect((await cli('connections', 'revoke', 'Group', '--yes')).code).toBe(0)
         expect((await new V2SyncClient(group.token).request('/connection')).status).toBe(401)
         const listed = JSON.parse(
           (await cli('connections', 'list', '--vault', 'Work', '--json')).text

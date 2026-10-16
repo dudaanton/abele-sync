@@ -1,6 +1,7 @@
 import { AbeleError, type ErrorBody } from '@abele/sync-protocol'
 import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify'
 import { ZodError } from 'zod'
+import { operationalLog } from './operationalLog.js'
 
 /** What a client is told when the server broke: never the reason, never the stack. */
 const INTERNAL_MESSAGE = 'internal error'
@@ -43,7 +44,7 @@ export function errorHandler(error: unknown, request: FastifyRequest, reply: Fas
   if (request.scopeDeletionReplay && mapped.code !== 'internal')
     mapped = new AbeleError('scope_deleted', 'Deleted on the server')
   if (mapped.code === 'internal') {
-    console.error(`error handling ${request.method} ${request.url}:`, error)
+    operationalLog(request.server, 'request failed', error)
   }
   send(reply, mapped)
 }

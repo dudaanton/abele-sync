@@ -13,6 +13,10 @@ export const remainingServerFacets = new Set([
   ...Array.from({ length: 8 }, (_, i) => i + 83),
   ...Array.from({ length: 7 }, (_, i) => i + 101),
 ])
+// This facet performs thousands of serial durable stage/metadata fsyncs. Container
+// overlay/bind mounts can make those much slower than local APFS. Keep a generous
+// deadlock ceiling; the request budget below catches unbounded HTTP work by count.
+export const MANY_FILES_MS = 30 * 60_000
 export function facetEngineOptions(number: number): Pick<EngineOptions, 'defer'> {
   return number >= 83 && number <= 90
     ? {
@@ -173,13 +177,18 @@ export async function remainingServerFacet(number: number, f: AcceptanceFixture)
     return
   }
   if (number === 107) {
+    for (const device of f.devices) device.network.limitRequests(10_000)
     // More than one manifest page and one commit batch; no wall-clock speed assertion.
     for (let i = 0; i < 1005; i++) await a!.write(`Many/${i}.md`, `note ${i}\n`)
     await settle(f, 3)
     for (const owner of owners) {
       const seen: string[] = []
       let next: string | null = null
+      let pages = 0
       do {
+        // 1,005 files plus their directory fit in 33 pages. A repeated cursor
+        // must fail by work count, even with a generous slow-disk time budget.
+        expect(++pages).toBeLessThanOrEqual(33)
         const page = await owner.manifest(
           next ? '?next=' + encodeURIComponent(next) + '&limit=31' : '?limit=31'
         )

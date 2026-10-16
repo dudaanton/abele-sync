@@ -4,14 +4,16 @@ import {
   openSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
   writeSync,
 } from 'node:fs'
 import { hostname, uptime } from 'node:os'
 import { performance } from 'node:perf_hooks'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { EngineError } from '@abele/sync-core'
 import { ensureStateFolder, stateFolder } from './config.js'
 import { mutateLock, removeIf } from './lockMutation.js'
@@ -111,6 +113,8 @@ export async function acquireLock(dir: string, opts: LockOptions = {}): Promise<
   if (giveUpMs(every, watch) <= every) {
     throw new EngineError('io', `a lock watched for ${watch} ms cannot beat every ${every} ms`)
   }
+  // Keep the caller's name for I/O (including filesystem hooks); canonicalization
+  // belongs to ownership attribution, not to the path on which a heartbeat lands.
   const file = join(ensureStateFolder(dir), LOCK_FILE)
   for (let attempt = 0; attempt < 3; attempt++) {
     const identity: LockIdentity = {
@@ -196,8 +200,22 @@ export function lockHolder(dir: string): { here: boolean; host: string | null } 
   return { here: read.host === hostname() && sameNamespace(read.ns), host: read.host }
 }
 
-/** The instance ids of the locks this process holds. */
-const held = new Set<string>()
+interface DirectoryIdentity {
+  dev: bigint
+  ino: bigint
+}
+
+/** Both fields matter: inode numbers are only unique within one filesystem. */
+export function sameLockDirectory(a: DirectoryIdentity, b: DirectoryIdentity): boolean {
+  return a.dev === b.dev && a.ino === b.ino
+}
+
+const directoryIdentity = (file: string): DirectoryIdentity =>
+  statSync(dirname(file), { bigint: true })
+const canonicalLockFile = (file: string): string => join(realpathSync(dirname(file)), LOCK_FILE)
+
+/** Owner ids, canonical names, and directory identities (also recognize bind-mount aliases). */
+const held = new Map<string, { file: string; directory: DirectoryIdentity }>()
 
 interface LockIdentity {
   instance: string
@@ -232,7 +250,10 @@ const lockText = (pid: number, identity: LockIdentity): string =>
  * as a watcher waits, after which another process may have taken it.
  */
 function hold(file: string, identity: LockIdentity, opts: LockOptions): Lock {
-  held.add(identity.instance)
+  held.set(identity.instance, {
+    file: canonicalLockFile(file),
+    directory: directoryIdentity(file),
+  })
   const every = opts.heartbeatMs ?? HEARTBEAT_MS
   const giveUp = giveUpMs(every, opts.watchMs ?? WATCH_MS)
   let beat = identity.beat
@@ -335,7 +356,10 @@ async function liveHolder(
   if (record.host === hostname() && sameNamespace(record.ns)) {
     if (record.boot !== undefined && !sameBoot(record.boot, currentBoot())) return null
     if (pid === process.pid) {
-      return record.instance !== undefined && held.has(record.instance)
+      const owner = record.instance === undefined ? undefined : held.get(record.instance)
+      return owner !== undefined &&
+        (owner.file === canonicalLockFile(file) ||
+          sameLockDirectory(owner.directory, directoryIdentity(file)))
         ? `pid ${pid}, this process`
         : null
     }

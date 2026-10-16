@@ -111,9 +111,9 @@ describe.each(process.env.ABELE_TEST_PG_URL ? (['sqlite', 'pg'] as const) : (['s
           await f.close()
         }
       },
-      // Fixed convergence rounds across six real connections need the normal
-      // core test budget on a two-core runner, including durable fixture cleanup.
-      dialect === 'pg' ? 60_000 : 20_000
+      // This bounded six-connection workflow takes ~8.5 s alone on Linux/ext4;
+      // allow parallel-runner contention and durable cleanup without a speed assertion.
+      60 * 1_000
     )
 
     it(

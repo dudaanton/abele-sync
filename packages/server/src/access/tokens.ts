@@ -488,6 +488,8 @@ async function listedTokens(deps: AccessDeps, principal: TokenPrincipal): Promis
           (await contained(deps, principal.space.id, resolved, caller.scope)) &&
           (resolved.kind !== 'group' ||
             (await covers(deps, principal.scope, resolved.path, resolved.id)))))
+    // Direct issuers retain credential metadata for cleanup, never an escaped target's path.
+    if (!root && !visible && token.issued_by_token_id !== principal.token.id) continue
     result.push(
       info(
         token,
@@ -510,6 +512,8 @@ export async function revokeToken(deps: AccessDeps, key: string, tokenId: string
       (target.issued_by_token_id !== principal.token.id && !(await rootAuthority(deps, principal)))
     )
       throw denied()
+    // Revocation only removes access: an issuer may clean up its own direct grants
+    // even after their selectors leave its boundary. Other issuers' grants require root.
     // Direct revocation only. The immutable scope boundary is not an issuer's credential.
     await deps.db
       .updateTable('access_tokens')

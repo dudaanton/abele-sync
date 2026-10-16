@@ -401,8 +401,7 @@ export class NodeFileSystem implements FileSystem {
       await this.onlyFileOrNothing(target, path)
       this.checkEffect()
       await rename(temp, target)
-      await syncParents(target, this.base)
-      await syncParents(temp, this.base)
+      await syncParents([target, temp], this.base)
     } catch (cause) {
       this.checkEffect()
       await unlink(temp).catch(() => {})
@@ -446,8 +445,7 @@ export class NodeFileSystem implements FileSystem {
         await rename(target, temp)
         this.checkEffect()
         await rename(temp, target)
-        await syncParents(target, this.base)
-        await syncParents(temp, this.base)
+        await syncParents([target, temp], this.base)
       } catch (cause) {
         if (cause instanceof EngineError) throw cause
         throw new EngineError('io', `cannot rename ${from} to ${to}`, cause)
@@ -460,8 +458,7 @@ export class NodeFileSystem implements FileSystem {
       await this.recheck(from, to)
       this.checkEffect()
       await rename(source, target)
-      await syncParents(target, this.base)
-      await syncParents(source, this.base)
+      await syncParents([target, source], this.base)
     } catch (cause) {
       if (cause instanceof EngineError) throw cause
       throw new EngineError('io', `cannot move ${from} to ${to}`, cause)

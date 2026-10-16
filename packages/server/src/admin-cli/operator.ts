@@ -330,10 +330,14 @@ export function registerOperator(
   })
   for (const action of ['rename', 'revoke'] as const)
     bind(
-      cons.command(action + ' <connection>' + (action === 'rename' ? ' <label>' : '')),
+      cons
+        .command(action + ' <connection>' + (action === 'rename' ? ' <label>' : ''))
+        .option('--yes', 'confirm revocation'),
       async (ctx, [id, label], o) => {
         if (action === 'rename' && !label?.trim()) throw new Error('label must not be empty')
         const t = await token(ctx, id!)
+        if (action === 'revoke')
+          await confirm(out, o, { id: t.id, label: t.label, action: 'revoke connection' })
         await withVaultLock(ctx.db, ctx.dialect, t.space_id, async (db) => {
           await db
             .updateTable('access_tokens')

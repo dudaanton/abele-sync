@@ -42,8 +42,13 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         'server generation changed; reconcile local files before retrying'
       )
   })
-  app.addHook('onSend', async (request, _reply, payload) => {
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) await generation.checkpoint()
+  app.addHook('onSend', async (request, reply, payload) => {
+    if (
+      request.tokenActivity &&
+      reply.statusCode < 300 &&
+      !['GET', 'HEAD', 'OPTIONS'].includes(request.method)
+    )
+      await generation.checkpoint()
     return payload
   })
   app.removeContentTypeParser('application/json')

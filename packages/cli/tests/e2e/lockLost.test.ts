@@ -36,7 +36,9 @@ afterAll(async () => {
   }
 }, SETUP_MS)
 
-const TIMING = { heartbeatMs: 20, watchMs: 400 }
+// Detect takeover quickly, but leave startup enough stall tolerance on a busy runner.
+// Expiration itself is exercised by the clock/stall unit tests, not these takeover tests.
+const TIMING = { heartbeatMs: 20, watchMs: 10_000 }
 const THEIRS = `4242\n${JSON.stringify({ instance: 'theirs', host: 'another-machine', boot: 'b', beat: 0 })}\n`
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -47,15 +49,26 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 async function daemonLosing(
   dir: string,
   when: (method: string, url: string) => boolean,
-  flags: string[] = []
+  flags: string[] = [],
+  startupStallMs = 0
 ): Promise<{ code: number; lines: string[]; tookOver: boolean }> {
   const lines: string[] = []
   let tookOver = false
+  let firstRequest = true
   const io: CliIo = {
     out: (line) => lines.push(line),
     err: (line) => lines.push(line),
     lockTiming: TIMING,
     fetch: async (input, init) => {
+      if (firstRequest) {
+        firstRequest = false
+        // A busy runner can block startup before the first heartbeat. This test exercises
+        // takeover, so that delay must not expire the lock before the download is reached.
+        const until = performance.now() + startupStallMs
+        while (performance.now() < until) {
+          /* synchronous startup work */
+        }
+      }
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
       const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
       if (!tookOver && when(method, url)) {
@@ -87,7 +100,9 @@ describe('a daemon whose lock is taken over mid-sync', () => {
 
     const run = await daemonLosing(
       a,
-      (method, url) => method === 'GET' && url.includes('/v2/files/') && url.includes('/content')
+      (method, url) => method === 'GET' && url.includes('/v2/files/') && url.includes('/content'),
+      [],
+      500
     )
     expect(run.tookOver).toBe(true)
     expect(run.code).toBe(3)

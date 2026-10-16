@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, symlinkSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -84,6 +84,29 @@ afterEach(async () => {
 })
 
 describe('the give-up clock', () => {
+  it('does not restart after a hung heartbeat through a symlinked vault path', async () => {
+    const alias = join(dir, 'alias')
+    symlinkSync(dir, alias, 'dir')
+    const lost: string[] = []
+    const lock = await acquireLock(alias, { ...FAST, onLost: (why) => lost.push(why) })
+    try {
+      hooks.afterRename = (_from, to) => {
+        if (to !== join(alias, '.abele-sync', 'lock')) return
+        hooks.afterRename = null
+        skew.mono += LATER
+        skew.wall += LATER
+      }
+      // A bounded wait also makes a missed filesystem hook an explicit failure.
+      await vi.waitFor(() => expect(hooks.afterRename).toBeNull(), { timeout: 1000, interval: 2 })
+      expect(lock.held()).toBe(false)
+      await sleep(FAST.heartbeatMs * 3)
+      expect(lost).toHaveLength(1)
+      expect(lost[0]).toMatch(/could not be refreshed/)
+    } finally {
+      lock()
+    }
+  })
+
   it('is not set going again by a beat whose write hung past the give-up', async () => {
     const lost: string[] = []
     const lock = await acquireLock(dir, { ...FAST, onLost: (why) => lost.push(why) })

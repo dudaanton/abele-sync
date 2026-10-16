@@ -39,9 +39,17 @@ it.each(['Note.bin', 'Café/Note.bin'.normalize('NFD')])(
       items.map(async (item) => (await owner.content(item.file_id)).toString())
     )
     expect(remote.sort()).toEqual(['causally newer remote', 'restored edit'])
-    const local = await Promise.all(
-      items.map(async (item) => Buffer.from(await a.fs.read(item.path)).toString())
+    // Manifest paths are NFC identities, not physical paths on a sensitive disk.
+    const files = []
+    for await (const file of a.fs.list()) files.push(file)
+    expect(files.map((file) => file.path.normalize('NFC')).sort()).toEqual(
+      items.map((item) => item.path).sort()
     )
+    const local = await Promise.all(
+      files.map(async (file) => Buffer.from(await a.fs.read(file.path)).toString())
+    )
+    const parent = path.slice(0, path.lastIndexOf('/') + 1)
+    expect(files.every((file) => file.path.startsWith(parent))).toBe(true)
     expect(local.sort()).toEqual(['causally newer remote', 'restored edit'])
     await a.restart().sync()
     expect((await owner.manifest()).items.filter((item) => item.kind !== 'directory')).toHaveLength(

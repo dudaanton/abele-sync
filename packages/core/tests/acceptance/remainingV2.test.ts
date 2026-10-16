@@ -2,6 +2,7 @@ import { it } from 'vitest'
 import { acceptanceFixture } from './fixture.js'
 import {
   facetEngineOptions,
+  MANY_FILES_MS,
   remainingServerFacet,
   remainingServerFacets,
 } from './serverRemaining.js'
@@ -17,7 +18,5 @@ for (const number of remainingServerFacets)
         await f.close()
       }
     },
-    // The same bounded 1,005-file facet as numbered acceptance scenario 107;
-    // both copies run concurrently in the full suite on a two-core runner.
-    number === 107 ? 600_000 : 120_000
+    number === 107 ? MANY_FILES_MS : 120_000
   )

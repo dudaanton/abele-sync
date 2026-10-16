@@ -48,7 +48,7 @@ export class NodeStages {
   private relative(id: string) {
     return `.abele-sync/stages/${id}/data`
   }
-  private async persist(meta: Metadata): Promise<void> {
+  private async persist(meta: Metadata, creating = false): Promise<void> {
     this.check()
     const temp = await this.path(meta.id, 'meta.next')
     const handle = await open(
@@ -64,7 +64,11 @@ export class NodeStages {
     }
     this.check()
     await rename(await this.path(meta.id, 'meta.next'), await this.path(meta.id, 'meta.json'))
-    await syncParents(await this.path(meta.id, 'meta.json'), this.root)
+    const file = await this.path(meta.id, 'meta.json')
+    // Creation makes the entire ancestor chain durable before handing out the id.
+    // Later checkpoints (including after reopen) change only this directory's entries.
+    if (creating) await syncParents(file, this.root)
+    else await syncPath(dirname(file))
   }
   private async load(id: string): Promise<Metadata> {
     const path = await this.path(id, 'meta.json')
@@ -109,7 +113,10 @@ export class NodeStages {
       } finally {
         await handle.close()
       }
-      await this.persist({ id, target, mtime, base, offset: 0, sealed: null, phase: 'receiving' })
+      await this.persist(
+        { id, target, mtime, base, offset: 0, sealed: null, phase: 'receiving' },
+        true
+      )
       return this.reopen(id)
     })
   }
@@ -221,6 +228,9 @@ export class NodeStages {
           ) {
             if (!same(await this.host.fingerprint(current.target), current.sealed))
               throw new EngineError('conflict', 'published stage was edited')
+            // Publication may have crashed before flushing its new name. The committed
+            // checkpoint must never become durable ahead of the recovered target.
+            await syncParents(target, this.root)
             current.phase = 'committed'
             await this.persist(current)
             return
@@ -246,8 +256,7 @@ export class NodeStages {
             this.check()
             signal?.throwIfAborted()
             await rename(await containedIn(this.root, current.target), await this.path(id, 'base'))
-            await syncParents(backup, this.root)
-            await syncParents(target, this.root)
+            await syncParents([backup, target], this.root)
           }
           if (
             current.base !== null &&
@@ -293,7 +302,8 @@ export class NodeStages {
           }
           this.check()
           await rmdir(dirname(await this.path(id, 'data')))
-          await syncParents(dirname(await this.path(id, 'data')), this.root)
+          // Only the established stages directory lost an entry; its ancestors did not.
+          await syncPath(dirname(dirname(await this.path(id, 'data'))))
         }),
     }
   }

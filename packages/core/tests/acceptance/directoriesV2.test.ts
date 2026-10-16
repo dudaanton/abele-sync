@@ -106,101 +106,112 @@ it('replays a lost directory commit response after restart without a second iden
   }
 })
 
-it('preserves decomposed directory spellings while two production vaults exchange Unicode children', async () => {
-  const f = await acceptanceFixture()
-  try {
-    const [a, b] = f.devices
-    const parent = 'Sample/й-folder'.normalize('NFD')
-    const empty = parent + '/' + 'ё-empty'.normalize('NFD')
-    const note = parent + '/' + 'й-note.md'.normalize('NFD')
-    await a!.fs.mkdir(empty)
-    await a!.write(note, 'initial\n')
-    const settle = async () => {
-      for (let round = 0; round < 4; round++)
-        for (const d of f.devices) for (const id of d.connections.keys()) await d.sync(id)
+// This bounded exchange takes 11–13 s alone on Linux/ext4; leave room for
+// parallel-runner contention and durable cleanup.
+it(
+  'preserves decomposed directory spellings while two production vaults exchange Unicode children',
+  async () => {
+    const f = await acceptanceFixture()
+    try {
+      const [a, b] = f.devices
+      const parent = 'Sample/й-folder'.normalize('NFD')
+      const empty = parent + '/' + 'ё-empty'.normalize('NFD')
+      const note = parent + '/' + 'й-note.md'.normalize('NFD')
+      await a!.fs.mkdir(empty)
+      await a!.write(note, 'initial\n')
+      const settle = async () => {
+        for (let round = 0; round < 4; round++)
+          for (const d of f.devices) for (const id of d.connections.keys()) await d.sync(id)
+      }
+      await settle()
+      const wire = new V2SyncClient(f.roots[0]!.token)
+      const initial = (await wire.manifest()).items
+      expect(initial.every((item) => item.path === item.path.normalize('NFC'))).toBe(true)
+      expect(new Set(initial.map((item) => item.path)).size).toBe(initial.length)
+      const original = initial.find((item) => item.path === note.normalize('NFC'))!
+      const directory = initial.find((item) => item.path === parent.normalize('NFC'))!
+      expect(initial.some((item) => item.path === empty.normalize('NFC'))).toBe(true)
+      const rejected = await wire.commit([{ op: 'mkdir', path: 'Raw/й'.normalize('NFD') }])
+      expect(rejected.results[0]).toMatchObject({ status: 'rejected', code: 'invalid_path' })
+      expect(await b!.text(note.normalize('NFC'))).toBe('initial\n')
+      await a!.write(note, 'edited on A\n')
+      await settle()
+      expect(await b!.text(note.normalize('NFC'))).toBe('edited on A\n')
+      await b!.write(note.normalize('NFC'), 'edited on B\n')
+      await settle()
+      expect(await a!.text(note)).toBe('edited on B\n')
+      await b!.write(parent.normalize('NFC') + '/ё-new.md', 'remote\n')
+      await settle()
+      const actual: string[] = []
+      for await (const file of a!.fs.list()) actual.push(file.path)
+      expect(actual).toContain(parent + '/ё-new.md')
+      expect(await a!.text(note)).toBe('edited on B\n')
+      const renamedParent = 'Sample/ё-renamed'.normalize('NFD')
+      await a!.fs.moveDirectory(parent, renamedParent)
+      await settle()
+      const renamedNote = renamedParent + '/' + 'й-renamed.md'.normalize('NFD')
+      await a!.move(renamedParent + '/' + 'й-note.md'.normalize('NFD'), renamedNote)
+      await settle()
+      const afterMove = (await wire.manifest()).items
+      expect(afterMove.find((item) => item.path === renamedNote.normalize('NFC'))?.file_id).toBe(
+        original.file_id
+      )
+      expect(afterMove.find((item) => item.path === renamedParent.normalize('NFC'))?.file_id).toBe(
+        directory.file_id
+      )
+      const versions = await a!.connection('server-1').binding.client.versions(original.file_id)
+      await a!.fs.moveDirectory(renamedParent, renamedParent.normalize('NFC'))
+      await settle()
+      expect(await a!.connection('server-1').binding.client.versions(original.file_id)).toEqual(
+        versions
+      )
+      const first = versions.at(-1)!
+      await a!.connection('server-1').binding.client.restore(original.file_id, first.version_id)
+      await settle()
+      // Restore returns the historic content under the current identity/path.
+      expect(await b!.text(renamedNote.normalize('NFC'))).toBe('initial\n')
+      // The parent was respelled above; its child retains its physical NFD basename.
+      const localNote = renamedParent.normalize('NFC') + '/' + 'й-renamed.md'.normalize('NFD')
+      await a!.write(localNote, 'first concurrent\ntail\n')
+      await b!.write(renamedNote.normalize('NFC'), 'second concurrent\ntail\n')
+      await a!.sync('server-1')
+      await b!.sync('server-1')
+      await settle()
+      const contents: string[] = []
+      for await (const file of a!.fs.list()) contents.push(await a!.text(file.path))
+      expect(contents).toContain('first concurrent\ntail\n')
+      expect(contents).toContain('second concurrent\ntail\n')
+      await a!.delete(renamedParent.normalize('NFC') + '/ё-new.md')
+      await settle()
+      expect(await b!.fs.stat(renamedParent.normalize('NFC') + '/ё-new.md')).toBeNull()
+      await b!.delete(renamedNote.normalize('NFC'))
+      await settle()
+      expect(await a!.fs.stat(localNote)).toBeNull()
+      await a!.connection('server-1').binding.client.restoreDeleted(original.file_id)
+      await settle()
+      // Restore may create a new wire-spelled basename; inspect the physical entries.
+      const restored: string[] = []
+      for await (const file of a!.fs.list()) restored.push(file.path.normalize('NFC'))
+      expect(restored).toContain(renamedNote.normalize('NFC'))
+      await a!.fs.removeDirectory(renamedParent.normalize('NFC') + '/' + 'ё-empty'.normalize('NFD'))
+      await settle()
+      const directories: string[] = []
+      for await (const dir of b!.fs.listDirectories()) directories.push(dir.path)
+      expect(directories).not.toContain(renamedParent.normalize('NFC') + '/ё-empty')
+      const before = await Promise.all(
+        f.servers.map((s) => s.db.selectFrom('versions').select('id').execute())
+      )
+      await settle()
+      await settle()
+      expect(
+        await Promise.all(f.servers.map((s) => s.db.selectFrom('versions').select('id').execute()))
+      ).toEqual(before)
+    } finally {
+      await f.close()
     }
-    await settle()
-    const wire = new V2SyncClient(f.roots[0]!.token)
-    const initial = (await wire.manifest()).items
-    expect(initial.every((item) => item.path === item.path.normalize('NFC'))).toBe(true)
-    expect(new Set(initial.map((item) => item.path)).size).toBe(initial.length)
-    const original = initial.find((item) => item.path === note.normalize('NFC'))!
-    const directory = initial.find((item) => item.path === parent.normalize('NFC'))!
-    expect(initial.some((item) => item.path === empty.normalize('NFC'))).toBe(true)
-    const rejected = await wire.commit([{ op: 'mkdir', path: 'Raw/й'.normalize('NFD') }])
-    expect(rejected.results[0]).toMatchObject({ status: 'rejected', code: 'invalid_path' })
-    expect(await b!.text(note.normalize('NFC'))).toBe('initial\n')
-    await a!.write(note, 'edited on A\n')
-    await settle()
-    expect(await b!.text(note.normalize('NFC'))).toBe('edited on A\n')
-    await b!.write(note.normalize('NFC'), 'edited on B\n')
-    await settle()
-    expect(await a!.text(note)).toBe('edited on B\n')
-    await b!.write(parent.normalize('NFC') + '/ё-new.md', 'remote\n')
-    await settle()
-    const actual: string[] = []
-    for await (const file of a!.fs.list()) actual.push(file.path)
-    expect(actual).toContain(parent + '/ё-new.md')
-    expect(await a!.text(note)).toBe('edited on B\n')
-    const renamedParent = 'Sample/ё-renamed'.normalize('NFD')
-    await a!.fs.moveDirectory(parent, renamedParent)
-    await settle()
-    const renamedNote = renamedParent + '/' + 'й-renamed.md'.normalize('NFD')
-    await a!.move(renamedParent + '/' + 'й-note.md'.normalize('NFD'), renamedNote)
-    await settle()
-    const afterMove = (await wire.manifest()).items
-    expect(afterMove.find((item) => item.path === renamedNote.normalize('NFC'))?.file_id).toBe(
-      original.file_id
-    )
-    expect(afterMove.find((item) => item.path === renamedParent.normalize('NFC'))?.file_id).toBe(
-      directory.file_id
-    )
-    const versions = await a!.connection('server-1').binding.client.versions(original.file_id)
-    await a!.fs.moveDirectory(renamedParent, renamedParent.normalize('NFC'))
-    await settle()
-    expect(await a!.connection('server-1').binding.client.versions(original.file_id)).toEqual(
-      versions
-    )
-    const first = versions.at(-1)!
-    await a!.connection('server-1').binding.client.restore(original.file_id, first.version_id)
-    await settle()
-    // Restore returns the historic content under the current identity/path.
-    expect(await b!.text(renamedNote.normalize('NFC'))).toBe('initial\n')
-    await a!.write(renamedNote.normalize('NFC'), 'first concurrent\ntail\n')
-    await b!.write(renamedNote.normalize('NFC'), 'second concurrent\ntail\n')
-    await a!.sync('server-1')
-    await b!.sync('server-1')
-    await settle()
-    const contents: string[] = []
-    for await (const file of a!.fs.list()) contents.push(await a!.text(file.path))
-    expect(contents).toContain('first concurrent\ntail\n')
-    expect(contents).toContain('second concurrent\ntail\n')
-    await a!.delete(renamedParent.normalize('NFC') + '/ё-new.md')
-    await settle()
-    expect(await b!.fs.stat(renamedParent.normalize('NFC') + '/ё-new.md')).toBeNull()
-    await b!.delete(renamedNote.normalize('NFC'))
-    await settle()
-    expect(await a!.fs.stat(renamedNote.normalize('NFC'))).toBeNull()
-    await a!.connection('server-1').binding.client.restoreDeleted(original.file_id)
-    await settle()
-    expect(await a!.fs.stat(renamedNote.normalize('NFC'))).not.toBeNull()
-    await a!.fs.removeDirectory(renamedParent.normalize('NFC') + '/' + 'ё-empty'.normalize('NFD'))
-    await settle()
-    const directories: string[] = []
-    for await (const dir of b!.fs.listDirectories()) directories.push(dir.path)
-    expect(directories).not.toContain(renamedParent.normalize('NFC') + '/ё-empty')
-    const before = await Promise.all(
-      f.servers.map((s) => s.db.selectFrom('versions').select('id').execute())
-    )
-    await settle()
-    await settle()
-    expect(
-      await Promise.all(f.servers.map((s) => s.db.selectFrom('versions').select('id').execute()))
-    ).toEqual(before)
-  } finally {
-    await f.close()
-  }
-})
+  },
+  60 * 1_000
+)
 
 it('053/054/056 empty directory identities, moves, and deletions converge through the production engine', async () => {
   const f = await acceptanceFixture()

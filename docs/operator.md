@@ -132,7 +132,7 @@ abele-sync-admin connections create Work --label Desktop
 abele-sync-admin connections create Work --folder Projects/Client --label Contractor
 abele-sync-admin connections create Work --group Projects/Index.md --label Reading
 abele-sync-admin connections rename Laptop Travel
-abele-sync-admin connections revoke Travel
+abele-sync-admin connections revoke Travel --yes
 ```
 
 Without a scope option, create grants the whole vault (`/`). `--folder`
@@ -140,6 +140,11 @@ accepts a live directory path or ID. `--group` accepts a live note path or ID;
 it cannot be combined with `--folder`. The operator can provision replacement
 credentials even if the original root credential was revoked. Deleted vaults
 cannot receive new credentials.
+
+Revocation shows a preview and requires typing `yes` in a terminal, or an explicit
+`--yes` for unattended use. A connection's first transfer sample is published
+immediately; subsequent counters are coalesced in memory every 250 ms and drained
+on orderly shutdown. A process crash can lose pending samples.
 
 List/show include ID, vault, label, read-only status, current folder/group scope, creation time,
 revocation time and active/revoked/scope-deleted/unavailable status.
@@ -265,7 +270,7 @@ the equivalent objects/arrays without truncation.
 | `connections create Work --folder Projects/Client --label Contractor --json` | `{"token":"<new encoded token>","info":{"id":"c2","label":"Contractor","scope":{"kind":"folder","id":"d2","path":"Projects/Client"}}}`                                                                                                                                 |
 | `connections create Work --group Projects/Index.md --label Reading --json`   | `{"token":"<new encoded token>","info":{"id":"c3","label":"Reading","scope":{"kind":"group","id":"f1","path":"Projects/Index.md"}}}`                                                                                                                                   |
 | `connections rename Desktop Travel`                                          | `id: c1                                                                                                                                                                                                                                                                | status: renamed` |
-| `connections revoke Travel`                                                  | `id: c1                                                                                                                                                                                                                                                                | status: revoked` |
+| `connections revoke Travel --yes`                                            | `id: c1                                                                                                                                                                                                                                                                | status: revoked` |
 | `folders delete Work Projects/Client --yes --json`                           | `{"cursor":42,"files":3,"revoked_tokens":["c2"],"preview":{"vault":"v1","path":"Projects/Client","file_count":3}}`                                                                                                                                                     |
 | `activity --vault Work --limit 1 --json`                                     | `{"events":[{"action":"folder.delete","result":"applied","details":{"files":3,"revoked_tokens":["c2"]}}],"event_counts":{"folder.delete:applied":1},"not_recorded":["daily transfer counters record successful responses, not individual transfer event timestamps"]}` |
 | `user create --label Owner --address https://sync.example`                   | `<new encoded root token>`                                                                                                                                                                                                                                             |
