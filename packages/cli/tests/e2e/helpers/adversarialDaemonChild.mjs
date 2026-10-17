@@ -1,6 +1,6 @@
 /** Production daemon adapters in a separate process, stopped at an acknowledged cut point. */
 import { prepareVault, recoverVault, buildEngine, rememberVault } from '../../../dist/vault.js'
-import { acquireLock } from '../../../dist/lock.js'
+import { acquireLock } from '@abele/sync-node'
 const [dir, cut] = process.argv.slice(2)
 const ctx = {
   io: { out() {}, err() {} },

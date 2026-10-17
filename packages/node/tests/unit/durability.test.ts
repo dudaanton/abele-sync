@@ -2,7 +2,7 @@ import { mkdtemp, rm, readFile, writeFile, mkdir, link } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it, vi } from 'vitest'
-import { NodeFileSystem } from '../../src/index.js'
+import { NodeFileSystem } from '../../src/nodeFs.js'
 import { sha256 } from '@abele/sync-core'
 
 const trace = vi.hoisted(() => [] as string[])

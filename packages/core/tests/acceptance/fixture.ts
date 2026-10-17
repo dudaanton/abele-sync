@@ -4,8 +4,8 @@ import { decodeAccessToken, type V2Connection, type V2Selector } from '@abele/sy
 import { createUser } from '@abele/sync-server/src/access/tokens.js'
 import { v2Server, type V2Server } from '@abele/sync-server/tests/helpers/v2Server.js'
 import { type Dialect } from '@abele/sync-server/src/db/connect.js'
-import { NodeFileSystem } from 'abele-sync/dist/nodeFs.js'
-import { SqliteStateStore } from 'abele-sync/dist/sqliteState.js'
+import { NodeFileSystem } from '@abele/sync-node'
+import { SqliteStateStore } from '@abele/sync-node'
 import {
   AccessClient,
   V2EngineClient,

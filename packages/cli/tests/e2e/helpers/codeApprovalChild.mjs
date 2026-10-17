@@ -1,7 +1,7 @@
 /** A real code approval stopped before its filesystem group or SQLite transaction finishes. */
 import { runCli } from '../../../dist/cli.js'
-import { NodeFileSystem } from '../../../dist/nodeFs.js'
-import { SqliteStateStore } from '../../../dist/sqliteState.js'
+import { NodeFileSystem } from '@abele/sync-node'
+import { SqliteStateStore } from '@abele/sync-node'
 const [dir, id, fingerprint, cut] = process.argv.slice(2)
 const pause = async () => {
   // An unresolved top-level await alone lets Node exit 13; stay alive for a real SIGKILL.

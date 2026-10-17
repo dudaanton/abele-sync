@@ -10,10 +10,10 @@ import {
   type GroupStep,
   type Images,
 } from './codeDraft.js'
-import { NodeFileSystem } from '@abele/sync-node'
-import { syncParents, syncPath } from '@abele/sync-node'
-import { ownTempFolder, realTempFolder } from '@abele/sync-node'
-import type { OpenVault } from './vault.js'
+import { NodeFileSystem } from './nodeFs.js'
+import { syncParents, syncPath } from './nodeFsDurability.js'
+import { ownTempFolder, realTempFolder } from './nodeFsGuard.js'
+import type { NodeReplica as OpenVault } from './replica.js'
 
 const FOLDER = 'code-approvals'
 interface Journal {

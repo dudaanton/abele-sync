@@ -71,9 +71,4 @@ export function processExitCode(code: number, env: NodeJS.ProcessEnv): number {
  * A mistake in what was asked for, rather than a failure carrying it out: an option that was
  * not given, a vault that was set up already, a vault that never was.
  */
-export class UsageError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'UsageError'
-  }
-}
+export { NodeReplicaConfigError as UsageError } from '@abele/sync-node'

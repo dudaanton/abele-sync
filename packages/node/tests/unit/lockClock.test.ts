@@ -6,7 +6,7 @@ import { performance } from 'node:perf_hooks'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { selectiveDefaults } from '@abele/sync-core'
 import { writeConfig } from '../../src/config.js'
-import { acquireLock, removeIf } from '../../src/index.js'
+import { acquireLock, removeIf } from '../../src/lock.js'
 
 /**
  * The lock against clocks and filesystems the ordinary tests cannot produce: a beat write that hangs, a stall the timer only sees after it, a

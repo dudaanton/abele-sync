@@ -3,7 +3,7 @@ import { writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it, vi } from 'vitest'
-import { acquireLock, removeIf, type Lock } from '../../src/index.js'
+import { acquireLock, removeIf, type Lock } from '../../src/lock.js'
 
 const hooks = vi.hoisted(() => ({
   created: null as (() => void) | null,

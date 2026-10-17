@@ -14,7 +14,7 @@ import {
   lockHolder,
   pidNamespace,
   removeIf,
-} from '../../src/index.js'
+} from '../../src/lock.js'
 
 const POSIX_MODES = process.platform !== 'win32'
 

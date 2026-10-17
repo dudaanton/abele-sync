@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile, readFile, rename, link, appendFile } from 'node
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
 import { sha256, type FileSystem } from '@abele/sync-core'
-import { NodeFileSystem } from '../../src/index.js'
+import { NodeFileSystem } from '../../src/nodeFs.js'
 
 it('preserves a replacement save made after base validation but before publication', async () => {
   const root = await mkdtemp(join(process.cwd(), '.stage-late-save-'))

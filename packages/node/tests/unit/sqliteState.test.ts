@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import SqliteDatabase from 'better-sqlite3'
 import type { Journal, StateEntry } from '@abele/sync-core'
-import { SqliteStateStore } from '../../src/index.js'
+import { SqliteStateStore } from '../../src/sqliteState.js'
 import { MemoryFileSystem, refreshLocalPaths } from '@abele/sync-core'
 
 const entry = (over: Partial<StateEntry> = {}): StateEntry => ({

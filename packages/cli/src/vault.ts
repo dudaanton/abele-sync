@@ -4,47 +4,30 @@ import { join, resolve } from 'node:path'
 import {
   classifyFailure,
   EngineError,
-  DeleteHolds,
-  DEFAULT_DELETE_WINDOW_MS,
-  ExpectedWrites,
-  resumeJournal,
-  fenceRestoredJournal,
-  recoverPendingPullWrites,
-  StagedChanges,
-  IgnoreRules,
-  isExcluded,
-  isHidden,
   V2EngineClient,
-  SyncEngine,
-  type FileSystem,
   type HeldDelete,
-  type PathMatcher,
-  type ScanFilter,
   type SelectiveSettings,
-  type SyncFailure,
   type SyncReport,
-  type RecoveryBarrier,
 } from '@abele/sync-core'
 import {
   normalisePath,
   normalizeServerUrl,
   serverUrlProblem,
   validatePath,
-  decodeAccessToken,
 } from '@abele/sync-protocol'
 import { readConfig, stateFolder, type DaemonConfig } from './config.js'
-import { acquireLock, type Lock } from '@abele/sync-node'
 import {
+  acquireLock,
   assertLocalSafety,
-  assertClaim,
-  EffectFence,
-  inspectProjectionInventory,
-  personalStamp,
+  SqliteStateStore,
+  openNodeReplica,
+  prepareNodeReplica,
+  recoverNodeReplica,
+  buildNodeEngine,
+  nodeReplicaClient,
+  type NodeReplica,
+  type Lock,
 } from '@abele/sync-node'
-import { CodeGroupDisk } from './codeGroupDisk.js'
-import { anyOf, SettlingFileSystem } from '@abele/sync-node'
-import { NodeFileSystem } from '@abele/sync-node'
-import { SqliteStateStore } from '@abele/sync-node'
 import { UsageError, type CommandContext } from './context.js'
 import { codePluginId } from './pluginCode.js'
 
@@ -71,28 +54,7 @@ export const DEFAULT_INTERVAL_SECONDS = 300
 /** The shortest interval worth asking for: below this a vault is rescanned faster than it settles. */
 export const MIN_INTERVAL_SECONDS = 5
 
-export interface OpenVault {
-  dir: string
-  cfg: DaemonConfig
-  /** The disk itself, for what only the adapter knows: whether this platform can watch. */
-  disk: NodeFileSystem
-  /** The disk as the engine sees it: a file still being written is left for the next round. */
-  fs: SettlingFileSystem
-  state: SqliteStateStore
-  client: V2EngineClient
-  /** Hidden paths, the ignore file and the files still being written, as one. */
-  ignore: PathMatcher
-  /** `.abele-sync-ignore` as it reads, or null when the vault has none: part of the scope key. */
-  ignoreText: string | null
-  /** What this device syncs at all, as `scan` asks it. */
-  filter: ScanFilter
-  recovery?: RecoveryBarrier
-  fence?: EffectFence
-  close(): void
-}
-
-/** Every dot-segment path but `.obsidian/`, as the plugin ignores them (see `isHidden`). */
-const HIDDEN: PathMatcher = { ignores: isHidden }
+export type OpenVault = NodeReplica
 
 /** The vault's config, or a usage error naming what has to happen first. */
 export function requireConfig(dir: string): DaemonConfig {
@@ -104,174 +66,27 @@ export function requireConfig(dir: string): DaemonConfig {
   return cfg
 }
 
-/** Opens everything a command works through. The caller closes it, failure or not. */
-const publicationRecovery = new WeakMap<OpenVault, (disk: FileSystem) => Promise<void>>()
-const pullRecoveryClients = new WeakMap<OpenVault, ReturnType<typeof vaultClient>>()
-const inspectedVaults = new WeakSet<OpenVault>()
-
-/** Async command composition: one bounded discovery pass before any ledger bootstrap. */
 export async function prepareVault(
   dir: string,
   ctx: CommandContext,
   held?: () => boolean
 ): Promise<OpenVault> {
   requireServerUrl(requireConfig(dir).serverUrl)
-  const stamp = personalStamp(dir)
-  const guard = () => {
-    if (held) assertClaim(held)
-    if (personalStamp(dir) !== stamp)
-      throw new EngineError('lost', 'connection changed during recovery inspection')
-  }
-  guard()
-  assertLocalSafety(dir, false, true, held !== undefined, held === undefined)
-  await inspectProjectionInventory(dir, { guard, selective: requireConfig(dir).selective })
-  guard()
-  const vault = openVault(dir, ctx, held)
-  inspectedVaults.add(vault)
-  if (!held) vault.recovery?.activate()
-  return vault
+  return prepareNodeReplica(dir, ctx, held, (path) => codePluginId(path) !== null)
 }
-
 export function openVault(dir: string, ctx: CommandContext, held?: () => boolean): OpenVault {
-  if (held && !held()) throw new EngineError('lost', 'vault lock lost before recovery inspection')
-  assertLocalSafety(dir, false, true, held !== undefined, held === undefined)
-  const cfg = requireConfig(dir)
-  const fence = new EffectFence(dir, held, () => personalStamp(dir))
-  let attached = false
-  // Hidden folders are not walked or watched: the filter below would pass over all of it.
-  const disk = new NodeFileSystem(dir, {
-    skipHidden: true,
-    preserveEmptyDirectories: true,
-    effectGuard: () => {
-      if (!held) throw new EngineError('lost', 'filesystem mutation requires an owned vault lock')
-      fence.assertReady()
-    },
-    effectTracker: fence.track,
+  return openNodeReplica({
+    dir,
+    config: requireConfig(dir),
+    fetch: ctx.fetch,
+    ...(ctx.WebSocket ? { WebSocket: ctx.WebSocket } : {}),
+    ...(held ? { held } : {}),
+    defer: (path) => codePluginId(path) !== null,
   })
-  const fs = new SettlingFileSystem(disk)
-  const ignoreText = readIgnoreText(dir)
-  const rules = ignoreText === null ? null : IgnoreRules.parse(ignoreText)
-  // Hidden paths first: no ignore file can bring a `.git` or a `.DS_Store` into the vault.
-  const ignore = anyOf([HIDDEN, ...(rules === null ? [] : [rules]), fs])
-  let state: SqliteStateStore
-  try {
-    state = SqliteStateStore.open(stateDbFile(dir), {
-      effectGuard: () => {
-        if (!held && attached) fence.assertReady()
-        else fence.assertOwner()
-      },
-      effectOwner: fence.effectOwner,
-    })
-  } catch (error) {
-    fence?.close()
-    throw error
-  }
-  try {
-    fence.attach(state, stateDbFile(dir))
-    attached = true
-    const bound = state.getMeta('token-connection')
-    if (bound !== null && bound !== createHash('sha256').update(cfg.deviceToken).digest('hex'))
-      throw new UsageError('connection ledger binding mismatch')
-    const owner = statedVault(state)
-    if (owner !== null && owner !== cfg.vaultId) {
-      throw new UsageError(
-        'state.db describes another space; preserve this ledger and connect in a fresh directory'
-      )
-    }
-    const vault: OpenVault = {
-      dir,
-      cfg,
-      disk,
-      fs,
-      state,
-      client: vaultClient(cfg, { ...ctx, fetch: fence.fetch(ctx.fetch) }),
-      ignore,
-      ignoreText,
-      filter: {
-        excluded: (path, size) =>
-          isExcluded(path, size, cfg.selective, SCRIPTS_FOLDER) || ignore.ignores(path),
-      },
-      fence,
-      recovery: fence.recovery,
-      close: () => {
-        fence?.close()
-        state.close()
-      },
-    }
-    const replay = vaultClient(cfg, {
-      ...ctx,
-      fetch: (input, init) => {
-        fence.assertOwner()
-        return fence.track(() => ctx.fetch(input, init))
-      },
-    })
-    pullRecoveryClients.set(vault, replay)
-    publicationRecovery.set(vault, async (disk) => {
-      if (await state.getJournal()) {
-        await fenceRestoredJournal(state, (await replay.state()).head_seq, disk, undefined, replay)
-        const holds = new DeleteHolds(state),
-          filed = await holds.decision()
-        if (filed !== null) await holds.resetTally()
-        const confirmed = new Set(filed?.decision.kind === 'confirm' ? filed.decision.fileIds : [])
-        await resumeJournal(replay, disk, state, {
-          expected: new ExpectedWrites(),
-          filter: vault.filter,
-          defer: (path) => codePluginId(path) !== null,
-          onDefer: (items) => new StagedChanges(state).stage(items),
-          onCommitted: (ops) =>
-            holds.tally(
-              Date.now(),
-              ops.filter((op) => op.op === 'delete' && !confirmed.has(op.file_id)).length,
-              DEFAULT_DELETE_WINDOW_MS
-            ),
-        })
-      }
-    })
-    return vault
-  } catch (error) {
-    // Nothing may be left holding the database when the caller never got a handle to close.
-    fence?.close()
-    state.close()
-    throw error
-  }
 }
-
-/** Owned installation recovery and predecessor settlement precede ordinary engine effects. */
-export async function recoverVault(vault: OpenVault, held: () => boolean): Promise<void> {
-  if (!held()) throw new EngineError('lost', 'vault lock lost before recovery')
-  await vault.fence?.settlePredecessors()
-  assertLocalSafety(vault.dir, false, true, true)
-  if (!inspectedVaults.has(vault)) {
-    await inspectProjectionInventory(vault.dir, {
-      guard: vault.fence?.assertOwner ?? (() => assertClaim(held)),
-      selective: vault.cfg.selective,
-    })
-    inspectedVaults.add(vault)
-  }
-  const recoveryDisk = new NodeFileSystem(vault.dir, {
-    skipHidden: true,
-    effectGuard:
-      vault.fence?.assertOwner ??
-      (() => {
-        if (!held()) throw new EngineError('lost', 'recovery ownership lost')
-      }),
-    effectTracker: vault.fence?.track,
-  })
-  await CodeGroupDisk.recover({ ...vault, disk: recoveryDisk }, held)
-  // Local installation evidence must be checked without HTTP first. Only retained remote
-  // effects require a generation handshake here; ordinary sync prepares its client itself.
-  if ((await vault.state.getJournal()) || vault.state.metadataKeys('pull-write:').length > 0)
-    await pullRecoveryClients.get(vault)?.prepare?.(recoveryDisk, vault.state)
-  const pullIds = vault.state
-    .metadataKeys('pull-write:')
-    .map((key) => key.slice('pull-write:'.length))
-  await recoverPendingPullWrites(recoveryDisk, vault.state, pullIds, pullRecoveryClients.get(vault))
-  pullRecoveryClients.delete(vault)
-  await publicationRecovery.get(vault)?.(recoveryDisk)
-  publicationRecovery.delete(vault)
-  assertLocalSafety(vault.dir)
-  vault.recovery?.activate()
-}
+export const recoverVault = recoverNodeReplica
+export const buildEngine = buildNodeEngine
+export type { EngineHooks } from '@abele/sync-node'
 
 /**
  * The server address a command may send a token to, or a usage error saying why not: https,
@@ -310,48 +125,7 @@ export async function lockVault(
 
 /** A client on this vault's device token. */
 export function vaultClient(cfg: DaemonConfig, ctx: CommandContext): V2EngineClient {
-  requireServerUrl(cfg.serverUrl)
-  const encoded = decodeAccessToken(cfg.deviceToken)
-  if (encoded.address !== cfg.serverUrl) throw new UsageError('stored token address mismatch')
-  return new V2EngineClient(cfg.deviceToken, {
-    fetch: ctx.fetch,
-    WebSocket: ctx.WebSocket,
-    userAgent: 'abele-sync-daemon',
-  })
-}
-
-/** What a command hands the engine besides the vault: its clock, its log, and its hooks. */
-export interface EngineHooks {
-  fallbackMs: number
-  log: (line: string) => void
-  onSync?: (report: SyncReport) => void
-  onFail?: (error: unknown, kind: SyncFailure) => void
-  /** Whether the daemon still holds the vault's lock; asked before every commit and write. */
-  stillHeld?: () => boolean
-}
-
-/** The engine, on an opened vault. `log` takes the engine's own lines as well as ours. */
-export function buildEngine(
-  vault: Omit<OpenVault, 'fs'> & { fs: FileSystem },
-  opts: EngineHooks
-): SyncEngine {
-  return new SyncEngine({
-    client: vault.client,
-    fs: vault.fs,
-    state: vault.state,
-    selective: vault.cfg.selective,
-    // No daemon entry point may install another plugin's code without the code command.
-    defer: (path) => codePluginId(path) !== null,
-    ignore: vault.ignore,
-    ignoreText: vault.ignoreText,
-    fallbackMs: opts.fallbackMs,
-    ...(vault.cfg.joinPrefer === undefined ? {} : { joinPrefer: vault.cfg.joinPrefer }),
-    ...(opts.onSync === undefined ? {} : { onSync: opts.onSync }),
-    ...(opts.onFail === undefined ? {} : { onFail: opts.onFail }),
-    ...(opts.stillHeld === undefined ? {} : { stillHeld: opts.stillHeld }),
-    ...(vault.recovery ? { recovery: vault.recovery } : {}),
-    log: opts.log,
-  })
+  return nodeReplicaClient(cfg, ctx)
 }
 
 /** What to do about a token the server no longer takes, in the words every command uses. */

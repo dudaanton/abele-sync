@@ -7,8 +7,8 @@ import {
 } from '@abele/sync-core'
 import { caseKey } from '@abele/sync-protocol'
 import { localCodeChanges } from './codeCheck.js'
-import { CodeDraft } from './codeDraft.js'
-import { CodeGroupDisk } from './codeGroupDisk.js'
+import { CodeDraft } from '@abele/sync-node'
+import { CodeGroupDisk } from '@abele/sync-node'
 import { codePluginId, type CodeGroup } from './pluginCode.js'
 import { buildEngine, DEFAULT_INTERVAL_SECONDS, type OpenVault } from './vault.js'
 

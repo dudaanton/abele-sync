@@ -5,8 +5,9 @@ import type { CommandContext } from '../../src/context.js'
 
 const held = vi.hoisted(() => ({ value: true }))
 const recover = vi.hoisted(() => vi.fn(async () => {}))
-vi.mock('../../src/codeGroupDisk.js', () => ({ CodeGroupDisk: { recover } }))
-vi.mock('@abele/sync-node', () => ({
+vi.mock('@abele/sync-node', async (original) => ({
+  ...(await original<typeof import('@abele/sync-node')>()),
+  CodeGroupDisk: { recover },
   acquireLock: async () => Object.assign(() => {}, { held: () => held.value }),
 }))
 vi.mock('../../src/log.js', () => ({ openLog: () => ({ line: () => {} }) }))
