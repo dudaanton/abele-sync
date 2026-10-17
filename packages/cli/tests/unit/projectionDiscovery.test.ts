@@ -4,13 +4,13 @@ import { join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { scan, selectiveDefaults } from '@abele/sync-core'
-import { NodeFileSystem } from '../../src/nodeFs.js'
-import { SqliteStateStore } from '../../src/sqliteState.js'
-import { PROJECTION_SIZE_CAP } from '../../src/externalDiscovery.js'
+import { NodeFileSystem } from '@abele/sync-node'
+import { SqliteStateStore } from '@abele/sync-node'
+import { PROJECTION_SIZE_CAP } from '@abele/sync-node'
 import { writeConfig, stateFolder } from '../../src/config.js'
 import { runRun } from '../../src/commands/run.js'
-import { acquireLock } from '../../src/lock.js'
-import * as Safety from '../../src/externalSafety.js'
+import { acquireLock } from '@abele/sync-node'
+import * as Safety from '@abele/sync-node'
 vi.mock('node:fs', async (load) => ({ ...(await load<typeof import('node:fs')>()) }))
 vi.mock('node:fs/promises', async (load) => ({
   ...(await load<typeof import('node:fs/promises')>()),

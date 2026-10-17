@@ -7,8 +7,8 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { EngineError } from '@abele/sync-core'
 import { runCli } from '../../src/cli.js'
-import { NodeFileSystem } from '../../src/nodeFs.js'
-import { SqliteStateStore } from '../../src/sqliteState.js'
+import { NodeFileSystem } from '@abele/sync-node'
+import { SqliteStateStore } from '@abele/sync-node'
 import { stateDbFile } from '../../src/vault.js'
 import {
   cleanupFolders,

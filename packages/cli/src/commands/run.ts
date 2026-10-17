@@ -4,7 +4,7 @@ import {
   type EngineStatus,
   type SyncEngine,
 } from '@abele/sync-core'
-import { acquireLock, LOCK_STALE, type Lock } from '../lock.js'
+import { acquireLock, LOCK_STALE, type Lock } from '@abele/sync-node'
 import { EXIT_REVOKED, EXIT_LOCKED, EXIT_OK, UsageError, type CommandContext } from '../context.js'
 import { personalRevocationBinding, recordRevoked, wasRevoked } from '../revoked.js'
 import { forgetJoinOnceDone } from '../join.js'

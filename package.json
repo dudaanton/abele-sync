@@ -10,8 +10,8 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -b packages/protocol packages/server packages/core packages/cli",
-    "types": "tsc -b packages/protocol packages/server packages/core packages/cli && tsc -p packages/protocol/tsconfig.test.json --noEmit && tsc -p packages/server/tsconfig.test.json --noEmit && tsc -p packages/core/tsconfig.test.json --noEmit && tsc -p packages/cli/tsconfig.test.json --noEmit",
+    "build": "tsc -b packages/protocol packages/server packages/core packages/node packages/cli",
+    "types": "tsc -b packages/protocol packages/server packages/core packages/node packages/cli && tsc -p packages/protocol/tsconfig.test.json --noEmit && tsc -p packages/server/tsconfig.test.json --noEmit && tsc -p packages/core/tsconfig.test.json --noEmit && tsc -p packages/cli/tsconfig.test.json --noEmit && tsc -p packages/node/tsconfig.test.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:sql": "node scripts/test-sql.mjs",

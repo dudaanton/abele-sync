@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MemoryStateStore, scan } from '@abele/sync-core'
-import { NodeFileSystem } from '../../src/nodeFs.js'
+import { NodeFileSystem } from '../../src/index.js'
 
 const fault = vi.hoisted(() => ({ path: '', code: '' }))
 vi.mock('node:fs/promises', async (importOriginal) => {

@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest'
 import { runCli } from '../../src/cli.js'
 import { writeConfig } from '../../src/config.js'
 import { codeArg, codeFingerprint, codeGroups, codePluginId } from '../../src/pluginCode.js'
-import { SqliteStateStore } from '../../src/sqliteState.js'
+import { SqliteStateStore } from '@abele/sync-node'
 import { tokenFor } from '../helpers/token.js'
 import { stateDbFile } from '../../src/vault.js'
 

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { encodeText } from '@abele/sync-core'
-import { NodeFileSystem } from '../../src/nodeFs.js'
+import { NodeFileSystem } from '../../src/index.js'
 
 /**
  * Links where the adapter works, and folders swapped for links while it works.

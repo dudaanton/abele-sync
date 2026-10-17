@@ -6,7 +6,7 @@ import {
   type HeldDelete,
 } from '@abele/sync-core'
 import { EXIT_LOCKED, EXIT_OK, UsageError, type CommandContext } from '../context.js'
-import { acquireLock, localDaemon, lockHolder, type Lock } from '../lock.js'
+import { acquireLock, localDaemon, lockHolder, type Lock } from '@abele/sync-node'
 import { promptLine } from '../prompt.js'
 import { openLog } from '../log.js'
 import { heldFingerprint, prepareVault, recoverVault, requireConfig, vaultDir } from '../vault.js'

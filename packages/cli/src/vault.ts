@@ -33,18 +33,18 @@ import {
   decodeAccessToken,
 } from '@abele/sync-protocol'
 import { readConfig, stateFolder, type DaemonConfig } from './config.js'
-import { acquireLock, type Lock } from './lock.js'
+import { acquireLock, type Lock } from '@abele/sync-node'
 import {
   assertLocalSafety,
   assertClaim,
   EffectFence,
   inspectProjectionInventory,
   personalStamp,
-} from './externalSafety.js'
+} from '@abele/sync-node'
 import { CodeGroupDisk } from './codeGroupDisk.js'
-import { anyOf, SettlingFileSystem } from './growing.js'
-import { NodeFileSystem } from './nodeFs.js'
-import { SqliteStateStore } from './sqliteState.js'
+import { anyOf, SettlingFileSystem } from '@abele/sync-node'
+import { NodeFileSystem } from '@abele/sync-node'
+import { SqliteStateStore } from '@abele/sync-node'
 import { UsageError, type CommandContext } from './context.js'
 import { codePluginId } from './pluginCode.js'
 

@@ -7,7 +7,7 @@ import { decodeAccessToken } from '@abele/sync-protocol'
 import { afterAll, beforeAll, expect, it } from 'vitest'
 import { cleanupFolders, folder, SETUP_MS } from './helpers/folders.js'
 import { spawnServer, type SpawnedServer } from './helpers/spawnServer.js'
-import { SqliteStateStore } from '../../src/sqliteState.js'
+import { SqliteStateStore } from '@abele/sync-node'
 import { stateDbFile } from '../../src/vault.js'
 
 const execute = promisify(execFile)

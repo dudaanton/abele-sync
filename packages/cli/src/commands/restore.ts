@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { CommitOpResult } from '@abele/sync-protocol'
 import { EngineError, type SyncEngine } from '@abele/sync-core'
-import { acquireLock, type Lock } from '../lock.js'
+import { acquireLock, type Lock } from '@abele/sync-node'
 import { EXIT_OK, UsageError, type CommandContext } from '../context.js'
 import { openLog } from '../log.js'
 import { runRestoreSince } from './restoreSince.js'

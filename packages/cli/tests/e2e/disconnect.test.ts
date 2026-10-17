@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { afterAll, beforeAll, expect, it } from 'vitest'
 import { readConfig, stateFolder, writeConfig } from '../../src/config.js'
-import { acquireLock } from '../../src/lock.js'
+import { acquireLock } from '@abele/sync-node'
 import { runCli } from '../../src/cli.js'
 import { AccessClient } from '@abele/sync-core'
 import { cleanupFolders, cli, folder, SETUP_MS, write, read } from './helpers/folders.js'

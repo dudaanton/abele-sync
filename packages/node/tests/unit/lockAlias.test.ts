@@ -3,7 +3,7 @@ import { symlinkSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { expect, it, vi } from 'vitest'
-import { acquireLock, sameLockDirectory, type Lock } from '../../src/lock.js'
+import { acquireLock, sameLockDirectory, type Lock } from '../../src/index.js'
 
 vi.mock('node:fs', async (original) => {
   const fs = await original<typeof import('node:fs')>()

@@ -11,12 +11,14 @@ COPY packages/protocol/package.json packages/protocol/package.json
 COPY packages/server/package.json packages/server/package.json
 COPY packages/core/package.json packages/core/package.json
 COPY packages/cli/package.json packages/cli/package.json
+COPY packages/node/package.json packages/node/package.json
 RUN npm ci
 COPY tsconfig.base.json ./
 COPY packages/protocol packages/protocol
 COPY packages/server packages/server
 COPY packages/core packages/core
 COPY packages/cli packages/cli
+COPY packages/node packages/node
 RUN npm run build -- --force \
     && chmod +x packages/cli/dist/index.js packages/server/dist/index.js packages/server/dist/admin-cli/index.js \
     && npm prune --omit=dev && npm cache clean --force
@@ -29,6 +31,8 @@ COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/packages/protocol/package.json ./packages/protocol/package.json
 COPY --from=build /app/packages/server/package.json ./packages/server/package.json
 COPY --from=build /app/packages/core/package.json ./packages/core/package.json
+COPY --from=build /app/packages/node/package.json ./packages/node/package.json
+COPY --from=build /app/packages/node/dist ./packages/node/dist
 COPY --from=build /app/packages/cli/package.json ./packages/cli/package.json
 COPY --from=build /app/packages/protocol/dist ./packages/protocol/dist
 COPY --from=build /app/packages/server/dist ./packages/server/dist

@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { rename, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { acquireLock } from '../../src/lock.js'
+import { acquireLock } from '@abele/sync-node'
 import {
   cleanupFolders,
   cli,

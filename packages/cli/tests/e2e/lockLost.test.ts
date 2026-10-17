@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { runCli } from '../../src/cli.js'
 import { stateFolder } from '../../src/config.js'
 import type { CliIo } from '../../src/context.js'
-import { SqliteStateStore } from '../../src/sqliteState.js'
+import { SqliteStateStore } from '@abele/sync-node'
 import { stateDbFile } from '../../src/vault.js'
 import {
   cleanupFolders,

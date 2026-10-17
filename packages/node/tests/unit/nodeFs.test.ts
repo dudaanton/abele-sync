@@ -17,7 +17,7 @@ import { basename, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EngineError, encodeText, type FileInfo } from '@abele/sync-core'
 import { normalisePath } from '@abele/sync-protocol'
-import { NodeFileSystem } from '../../src/nodeFs.js'
+import { NodeFileSystem } from '../../src/index.js'
 
 /**
  * The listener each `fs.watch` was handed, newest last. The watcher stays real; this is so the

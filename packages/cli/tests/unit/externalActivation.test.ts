@@ -10,9 +10,9 @@ import {
   assertLocalSafety,
   ACTIVATION_FILE,
   SWITCH_FILE,
-} from '../../src/externalSafety.js'
-import { SqliteStateStore } from '../../src/sqliteState.js'
-import { acquireLock } from '../../src/lock.js'
+} from '@abele/sync-node'
+import { SqliteStateStore } from '@abele/sync-node'
+import { acquireLock } from '@abele/sync-node'
 import { tokenFor } from '../helpers/token.js'
 
 let dir: string

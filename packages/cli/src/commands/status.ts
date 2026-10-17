@@ -11,7 +11,7 @@ import {
 import { codeGroups, codeHeldLine, codeText } from '../pluginCode.js'
 import { stateFolder } from '../config.js'
 import { EXIT_FAILED, EXIT_OK, type CommandContext } from '../context.js'
-import { localDaemon } from '../lock.js'
+import { localDaemon } from '@abele/sync-node'
 import { liveCount } from '../progress.js'
 import { personalRevocationBinding, wasRevoked } from '../revoked.js'
 import {

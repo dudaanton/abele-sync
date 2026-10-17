@@ -3,13 +3,13 @@ import { join, resolve } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
 import { selectiveDefaults } from '@abele/sync-core'
 import { writeConfig, stateFolder, readConfig } from '../../src/config.js'
-import { activateExternalFiles, assertLocalSafety } from '../../src/externalSafety.js'
+import { activateExternalFiles, assertLocalSafety } from '@abele/sync-node'
 import { materializeForDisconnect } from '../../src/externalMaterialization.js'
 import {
   retirePreparedConnection,
   resumeConnectionRetirement,
 } from '../../src/connectionRetirement.js'
-import { SqliteStateStore } from '../../src/sqliteState.js'
+import { SqliteStateStore } from '@abele/sync-node'
 import { tokenFor } from '../helpers/token.js'
 const roots: string[] = []
 afterEach(() => {

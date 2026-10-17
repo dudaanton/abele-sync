@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { DaemonConfig } from './config.js'
-import type { SqliteStateStore } from './sqliteState.js'
+import type { SqliteStateStore } from '@abele/sync-node'
 
 const KEY = 'revoked-binding'
 

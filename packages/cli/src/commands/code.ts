@@ -3,7 +3,7 @@ import { approveCodeGroup } from '../codeApproval.js'
 import { localCodeChanges } from '../codeCheck.js'
 import { EXIT_FAILED, EXIT_LOCKED, EXIT_OK, UsageError, type CommandContext } from '../context.js'
 import { codeArg, codeFingerprint, codeGroups, codeText, type CodeGroup } from '../pluginCode.js'
-import { acquireLock, type Lock } from '../lock.js'
+import { acquireLock, type Lock } from '@abele/sync-node'
 import { openLog } from '../log.js'
 import {
   buildEngine,

@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { EngineError, type FileInfo } from '@abele/sync-core'
-import { anyOf, SettlingFileSystem, type SettleableFileSystem } from '../../src/growing.js'
-import { NodeFileSystem } from '../../src/nodeFs.js'
+import { anyOf, SettlingFileSystem, type SettleableFileSystem } from '../../src/index.js'
+import { NodeFileSystem } from '../../src/index.js'
 
 let root: string
 

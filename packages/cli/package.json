@@ -18,11 +18,8 @@
   "dependencies": {
     "@abele/sync-core": "0.3.3",
     "@abele/sync-protocol": "0.3.3",
-    "better-sqlite3": "11.10.0",
     "commander": "13.1.0",
-    "ignore": "7.0.8"
-  },
-  "devDependencies": {
-    "@types/better-sqlite3": "7.6.13"
+    "ignore": "7.0.8",
+    "@abele/sync-node": "0.3.3"
   }
 }

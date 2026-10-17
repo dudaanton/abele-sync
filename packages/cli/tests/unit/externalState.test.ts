@@ -3,7 +3,7 @@ import { resolve, join } from 'node:path'
 import SqliteDatabase, { type Database } from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as Core from '@abele/sync-core'
-import { SqliteStateStore } from '../../src/sqliteState.js'
+import { SqliteStateStore } from '@abele/sync-node'
 
 const binding = {
   endpoint: 'https://sync.example.invalid',

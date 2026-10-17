@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { runCli } from '../../src/cli.js'
 import type { CliIo } from '../../src/context.js'
-import { acquireLock } from '../../src/lock.js'
+import { acquireLock } from '@abele/sync-node'
 import { writeLive } from '../../src/progress.js'
 import {
   cleanupFolders,

@@ -3,9 +3,9 @@ import { decodeAccessToken } from '@abele/sync-protocol'
 import { mkdirSync, existsSync } from 'node:fs'
 import { readConfig, writeConfig } from '../config.js'
 import { EXIT_LOCKED, EXIT_OK, UsageError, type CommandContext } from '../context.js'
-import { assertLocalSafety } from '../externalSafety.js'
+import { assertLocalSafety } from '@abele/sync-node'
 import { lockVault, vaultDir, stateDbFile } from '../vault.js'
-import { SqliteStateStore } from '../sqliteState.js'
+import { SqliteStateStore } from '@abele/sync-node'
 import { createHash } from 'node:crypto'
 
 export interface ConnectOptions {

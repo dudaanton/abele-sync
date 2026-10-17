@@ -5,7 +5,7 @@ import { v2Server, type V2Server } from '@abele/sync-server/tests/helpers/v2Serv
 import { createUser } from '@abele/sync-server/src/access/tokens.js'
 import { runCli } from '../../src/cli.js'
 import { V2SyncClient } from '@abele/sync-server/tests/helpers/v2SyncClient.js'
-import { SqliteStateStore } from '../../src/sqliteState.js'
+import { SqliteStateStore } from '@abele/sync-node'
 import { randomUUID } from 'node:crypto'
 import { sql } from 'kysely'
 

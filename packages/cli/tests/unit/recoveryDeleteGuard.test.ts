@@ -7,8 +7,8 @@ import type { CommitOpResult } from '@abele/sync-protocol'
 import { v2Server } from '@abele/sync-server/tests/helpers/v2Server.js'
 import { createUser } from '@abele/sync-server/src/access/tokens.js'
 import { writeConfig, stateFolder } from '../../src/config.js'
-import { NodeFileSystem } from '../../src/nodeFs.js'
-import { SqliteStateStore } from '../../src/sqliteState.js'
+import { NodeFileSystem } from '@abele/sync-node'
+import { SqliteStateStore } from '@abele/sync-node'
 import { runRun } from '../../src/commands/run.js'
 
 it('BUG: nine recovered deletes plus one new delete in a 40-file vault trip the shipped 15-minute guard', async () => {

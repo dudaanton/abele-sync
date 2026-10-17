@@ -11,7 +11,7 @@ import {
   type ExternalDocument,
 } from '@abele/sync-core'
 import { stateFolder, writeOwnedJson } from './config.js'
-import { ACTIVATION_FILE, assertLocalSafety } from './externalSafety.js'
+import { ACTIVATION_FILE, assertLocalSafety } from '@abele/sync-node'
 import {
   assertDisconnectReady,
   assertPreparedInventory,

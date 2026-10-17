@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import SqliteDatabase from 'better-sqlite3'
 import { decodeExternalDocument, V2EngineClient, type ConnectionBinding } from '@abele/sync-core'
 import { personalBinding, readConfigDescriptor, stateFolder, type DaemonConfig } from './config.js'
-import { assertLocalSafety, guardedFetch } from './externalSafety.js'
+import { assertLocalSafety, guardedFetch } from '@abele/sync-node'
 import { assertPreparedInventory, materializeForDisconnect } from './externalMaterialization.js'
 import type { CommandContext } from './context.js'
 

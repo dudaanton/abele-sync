@@ -3,7 +3,7 @@ import { join, resolve } from 'node:path'
 import { expect, it } from 'vitest'
 import { selectiveDefaults } from '@abele/sync-core'
 import { writeConfig, stateFolder } from '../../src/config.js'
-import { assertLocalSafety } from '../../src/externalSafety.js'
+import { assertLocalSafety } from '@abele/sync-node'
 
 it('BUG: empty scoped staging directories are not retained bytes, while real files remain a retirement hold', async () => {
   const scratch = resolve(import.meta.dirname, '../../../../.scratch')

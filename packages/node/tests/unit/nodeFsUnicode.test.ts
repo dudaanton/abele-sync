@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import { LocalPaths } from '@abele/sync-core'
-import { NodeFileSystem } from '../../src/nodeFs.js'
+import { NodeFileSystem } from '../../src/index.js'
 
 let root: string
 let fs: NodeFileSystem

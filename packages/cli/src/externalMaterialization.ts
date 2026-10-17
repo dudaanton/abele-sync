@@ -21,10 +21,10 @@ import {
   inspectProjectionInventory,
   ACTIVATION_FILE,
   type LifecycleInventory,
-} from './externalSafety.js'
-import { containedIn, absoluteIn, isMissing } from './nodeFsGuard.js'
-import { NodeFileSystem } from './nodeFs.js'
-import { SqliteStateStore } from './sqliteState.js'
+} from '@abele/sync-node'
+import { containedIn, absoluteIn, isMissing } from '@abele/sync-node'
+import { NodeFileSystem } from '@abele/sync-node'
+import { SqliteStateStore } from '@abele/sync-node'
 
 const digest = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex')
 const identity = (stat: { dev: number; ino: number }) => `${stat.dev}:${stat.ino}`

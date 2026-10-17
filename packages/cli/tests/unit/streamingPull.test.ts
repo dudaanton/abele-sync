@@ -12,7 +12,7 @@ import {
   type EngineClient,
 } from '@abele/sync-core'
 import type { ChangeItem } from '@abele/sync-protocol'
-import { NodeFileSystem } from '../../src/nodeFs.js'
+import { NodeFileSystem } from '@abele/sync-node'
 
 it('normal hydration streams an immutable version directly to a durable stage', async () => {
   const root = await mkdtemp(join(process.cwd(), '.stream-pull-'))

@@ -15,7 +15,7 @@ import { v2Server, type V2Server } from '@abele/sync-server/tests/helpers/v2Serv
 import { V2SyncClient } from '@abele/sync-server/tests/helpers/v2SyncClient.js'
 import { localCodeChanges } from '../../src/codeCheck.js'
 import { codeGroups } from '../../src/pluginCode.js'
-import { NodeFileSystem } from '../../src/nodeFs.js'
+import { NodeFileSystem } from '@abele/sync-node'
 
 let server: V2Server | undefined
 let scratch: string | undefined

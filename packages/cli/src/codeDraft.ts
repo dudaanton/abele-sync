@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { EngineError, sha256, type FileInfo, type FileSystem } from '@abele/sync-core'
-import { NodeFileSystem, type NodeFileSystemOptions } from './nodeFs.js'
+import { NodeFileSystem, type NodeFileSystemOptions } from '@abele/sync-node'
 
 export interface Image {
   sha: string

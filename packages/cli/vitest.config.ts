@@ -4,6 +4,10 @@ export default defineConfig({
   resolve: {
     alias: [
       {
+        find: '@abele/sync-node',
+        replacement: fileURLToPath(new URL('../node/src/index.ts', import.meta.url)),
+      },
+      {
         find: '@abele/sync-core',
         replacement: fileURLToPath(new URL('../core/src/index.ts', import.meta.url)),
       },

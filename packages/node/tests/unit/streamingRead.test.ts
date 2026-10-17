@@ -1,8 +1,8 @@
 import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
-import { NodeFileSystem } from '../../src/nodeFs.js'
-import { SettlingFileSystem } from '../../src/growing.js'
+import { NodeFileSystem } from '../../src/index.js'
+import { SettlingFileSystem } from '../../src/index.js'
 import { fingerprintFile, sha256 } from '@abele/sync-core'
 
 it('retains native streaming capabilities through the CLI settling wrapper', async () => {
