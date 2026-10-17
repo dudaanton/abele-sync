@@ -1,7 +1,6 @@
 {
   "name": "@abele/sync-protocol",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.3.3",
   "license": "GPL-3.0-only",
   "type": "module",
   "exports": {
@@ -20,5 +19,9 @@
   "dependencies": {
     "zod": "3.25.76",
     "yaml": "2.9.0"
+  },
+  "types": "./dist/index.d.ts",
+  "publishConfig": {
+    "access": "public"
   }
 }
