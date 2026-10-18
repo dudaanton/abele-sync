@@ -4,7 +4,27 @@ import { readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-for (const name of ['protocol', 'core', 'node']) {
+const version = '0.4.0'
+const publicNames = ['protocol', 'core', 'node']
+const publicPackages = new Set(publicNames.map((name) => `@abele/sync-${name}`))
+
+test('workspace graph and lockfile agree on exact release pins', () => {
+  const lock = JSON.parse(readFileSync('package-lock.json'))
+  for (const name of [...publicNames, 'cli', 'server']) {
+    const path = `packages/${name}`
+    const manifest = JSON.parse(readFileSync(`${path}/package.json`))
+    assert.equal(manifest.version, publicNames.includes(name) ? version : '0.0.0')
+    assert.equal(lock.packages[path].version, manifest.version)
+    for (const field of ['dependencies', 'devDependencies']) {
+      assert.deepEqual(lock.packages[path][field], manifest[field])
+      for (const [dependency, pin] of Object.entries(manifest[field] ?? {})) {
+        if (publicPackages.has(dependency)) assert.equal(pin, version, `${path}: ${dependency}`)
+      }
+    }
+    assert.deepEqual(lock.packages[`node_modules/${manifest.name}`], { resolved: path, link: true })
+  }
+})
+for (const name of publicNames) {
   test(`${name} is publishable`, () => {
     const p = JSON.parse(readFileSync(`packages/${name}/package.json`))
     assert.notEqual(p.private, true)
@@ -13,7 +33,7 @@ for (const name of ['protocol', 'core', 'node']) {
       url: 'git+https://github.com/dudaanton/abele-sync.git',
       directory: `packages/${name}`,
     })
-    assert.equal(p.version, '0.3.3')
+    assert.equal(p.version, version)
     assert.equal(p.types, './dist/index.d.ts')
     assert.equal(p.license, 'GPL-3.0-only')
     assert.ok(existsSync(`packages/${name}/LICENSE`))
@@ -32,6 +52,13 @@ for (const name of ['protocol', 'core', 'node']) {
       const manifest = JSON.parse(
         execFileSync('tar', ['-xOf', archive, 'package/package.json'], { encoding: 'utf8' })
       )
+      assert.equal(manifest.version, version)
+      for (const field of ['dependencies', 'devDependencies']) {
+        for (const [dependency, pin] of Object.entries(manifest[field] ?? {})) {
+          if (publicPackages.has(dependency)) assert.equal(pin, version, dependency)
+        }
+      }
+      assert.equal(manifest.types, './dist/index.d.ts')
       assert.deepEqual(
         manifest.repository,
         JSON.parse(readFileSync(`packages/${name}/package.json`)).repository

@@ -4,6 +4,10 @@
 and composition used by the command line client. Requires Node 22 or later.
 Licensed GPL-3.0-only; see LICENSE.
 
+The 0.4.0 shared-package release introduces this public Node client package and
+host callbacks after applied changes. Protocol, core and Node packages use the
+same release version.
+
 ```ts
 import { openNodeReplica } from '@abele/sync-node'
 
@@ -37,6 +41,11 @@ Temporary installation files and stages stay under `<dir>/.abele-sync` because
 atomic renames into the synced tree require the same filesystem. Scanning and
 watching continue to skip that folder.
 
+Code approval journals are bound to the ledger that created them. Recovery with
+a different ledger, or an older journal without ownership evidence, stops with
+`recovery-required` and preserves installed files and backups. Reopen with the
+original ledger to recover a journal whose ownership can be verified.
+
 For applications that already own a lock, the synchronous form is
 `openNodeReplica({ dir, stateDir?, config, held: lock.held, fetch?, WebSocket?, defer? })`.
 `config` is a `NodeReplicaConfig` (also exported as `DaemonConfig` for existing
@@ -58,7 +67,9 @@ policy. The key form also accepts `selective` for initial configuration and
 The returned `NodeReplica` exposes `dir`, `cfg`, `disk`, settling `fs`, `state`,
 `client`, `ignore`, `ignoreText`, `filter`, `fence`, `recovery`, `recover()`,
 `buildEngine()` and `close()`. Engine hooks are `fallbackMs`, `log`, optional
-`onSync`, `onFail`, and `stillHeld`. `prepareNodeReplica`, `recoverNodeReplica`,
+`onSync`, `onFail`, `onApplied`, and `stillHeld`. `onApplied` receives the change's
+path, kind and origin after application; deferred changes notify only when
+applied. `prepareNodeReplica`, `recoverNodeReplica`,
 `buildNodeEngine`, and `nodeReplicaClient` are also exported for hosts composing
 these steps explicitly.
 
