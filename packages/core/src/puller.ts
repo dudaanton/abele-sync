@@ -26,6 +26,7 @@ import type { StateStore } from './state.js'
  */
 
 export interface PullOptions {
+  onApplied?: import('./applied.js').AppliedOptions['onApplied']
   transferBudget?: import('./streaming.js').TransferBudget
   /** Personal note deliveries keep automatic reactions enabled, including shared edits.
    * Persist this exact-version event for delayed native cache acknowledgement. */

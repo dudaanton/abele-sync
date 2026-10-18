@@ -1,4 +1,5 @@
 import { caseKey, normalisePath, type ChangeItem } from '@abele/sync-protocol'
+import { notifyApplied } from './applied.js'
 import { bytesFor, settledStat, writeExpected } from './apply.js'
 import type { EngineClient } from './engineClient.js'
 import { EngineError } from './errors.js'
@@ -39,7 +40,14 @@ export class PullPlacer {
     private readonly state: StateStore,
     private readonly opts: Pick<
       PullOptions,
-      'dirty' | 'expected' | 'filter' | 'onAside' | 'log' | 'preserveMissing' | 'transferBudget'
+      | 'dirty'
+      | 'expected'
+      | 'filter'
+      | 'onAside'
+      | 'log'
+      | 'preserveMissing'
+      | 'transferBudget'
+      | 'onApplied'
     >,
     private readonly hash: (bytes: Uint8Array) => Promise<string>
   ) {
@@ -158,6 +166,12 @@ export class PullPlacer {
     await this.state.transaction(async () => {
       await this.state.delete(entry.path)
       await this.pending.clear(entry.fileId)
+    })
+    await notifyApplied(this.opts, {
+      path: entry.wirePath,
+      kind: 'delete',
+      origin: 'remote',
+      fileId: entry.fileId,
     })
     return true
   }
@@ -482,6 +496,14 @@ export class PullPlacer {
         mtime: have.mtime,
       })
       await this.pending.clear(change.file_id)
+    })
+    const source = change.prev_path ?? (from === null ? undefined : from.normalize('NFC'))
+    await notifyApplied(this.opts, {
+      path: change.path,
+      kind: source !== undefined && source !== change.path ? 'move' : 'upsert',
+      ...(source !== undefined && source !== change.path ? { from: source } : {}),
+      origin: 'remote',
+      fileId: change.file_id,
     })
   }
 

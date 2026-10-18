@@ -81,6 +81,13 @@ export interface EngineOptions {
   fallbackMs?: number
   /** The clock `lastSyncAt` reads; `Date.now` by default. */
   now?: () => number
+  /**
+   * Called after a change is durably applied (remote disk/ledger or accepted local op).
+   * Held, deferred and refused changes are excluded. Hook failures are logged.
+   * Once per change in normal flow; crash replay may deliver a change again.
+   * Delivery is not a durable queue: a crash after commit may interrupt notification.
+   */
+  onApplied?: import('./applied.js').AppliedOptions['onApplied']
   /** Called with every sync that got through, however it was prompted. */
   onSync?: (report: SyncReport) => void
   /** Called with every sync that did not, and what kind of failure it was. */

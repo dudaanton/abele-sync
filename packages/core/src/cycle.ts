@@ -128,6 +128,7 @@ export class SyncCycle {
       state: opts.state,
       filter: this.filter,
       expected: ctx.expected,
+      onApplied: opts.onApplied,
       defer: opts.defer,
       log: (line) => ctx.log(line),
     })
@@ -225,6 +226,7 @@ export class SyncCycle {
         ? {}
         : { transferBudget: this.ctx.opts.transferBudget }),
       expected: this.ctx.expected,
+      onApplied: this.ctx.opts.onApplied,
       refused: this.refused,
       filter: this.filter,
       // A push answered with the server's bytes for a staged path stages them, as a pull would
@@ -535,6 +537,7 @@ export class SyncCycle {
       ...(recheck === undefined || recheck.size === 0 ? {} : { recheck }),
       ...(noted === undefined || noted.size === 0 ? {} : { noted }),
       expected: this.ctx.expected,
+      onApplied: this.ctx.opts.onApplied,
       // Filed as each one is passed, before the pull saves a cursor past it.
       onAside: (path, wirePath) => this.asides.add(new Map([[path, wirePath]])),
       // Filed the same way, before the cursor moves past them.

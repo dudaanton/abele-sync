@@ -5,6 +5,7 @@ import {
   type ErrorCode,
   type JoinPrefer,
 } from '@abele/sync-protocol'
+import { notifyApplied, type AppliedChange } from './applied.js'
 import { pool } from './apply.js'
 import type { CommitOutcome } from './engineClient.js'
 import type { EngineClient } from './engineClient.js'
@@ -13,7 +14,7 @@ import { EngineError } from './errors.js'
 import type { FileSystem } from './fs.js'
 import { sha256 } from './hash.js'
 import type { ScanFilter, ScanResult } from './scanner.js'
-import type { Staged } from './defer.js'
+import { touchesDeferred, type Staged } from './defer.js'
 import { batches, preferring } from './pushBatches.js'
 import { PushDisk } from './pushDisk.js'
 import { FINAL_REFUSALS, VerdictRecorder } from './pushRecord.js'
@@ -100,6 +101,7 @@ export interface PushReport {
 
 /** What a replay needs: everything but the keys, which the journal already holds. */
 export interface ResumeOptions {
+  onApplied?: import('./applied.js').AppliedOptions['onApplied']
   transferBudget?: import('./streaming.js').TransferBudget
   /** The registry the host's watcher checks, so the engine does not push its own writes back. */
   expected: ExpectedWrites
@@ -424,17 +426,55 @@ class Pusher {
       this.report.deferred =
         (this.report.deferred ?? 0) + (typeof fresh === 'number' ? fresh : heads.length)
     }
+    const applied: AppliedChange[] = []
     await this.state.transaction(async () => {
       for (const [k, run] of verdicts.runs.entries()) {
         if (k > 0) await this.planner.fetchRun(run, verdicts)
         for (const at of run) {
           const op = sending[at]
-          if (op !== undefined) await this.recorder.take(op, results[at], at, verdicts)
+          if (op !== undefined) {
+            const previous =
+              this.opts.onApplied === undefined || op.op === 'create'
+                ? null
+                : await this.state.byFileId(op.file_id)
+            const keptBefore = this.report.kept.length
+            await this.recorder.take(op, results[at], at, verdicts)
+            const result = results[at]!
+            if (
+              this.opts.onApplied !== undefined &&
+              result.status !== 'rejected' &&
+              !verdicts.bad.has(at) &&
+              !verdicts.staged.has(at) &&
+              !verdicts.stale.has(at) &&
+              !touchesDeferred(
+                this.opts.defer,
+                result.path,
+                previous?.wirePath,
+                result.status === 'conflict' ? result.conflict_path : null
+              ) &&
+              !verdicts.aside.has(at) &&
+              this.report.kept.length === keptBefore
+            ) {
+              applied.push({
+                path: result.path,
+                kind:
+                  op.op === 'delete' && result.status === 'applied'
+                    ? 'delete'
+                    : op.op === 'move'
+                      ? 'move'
+                      : 'upsert',
+                ...(op.op === 'move' && previous !== null ? { from: previous.wirePath } : {}),
+                origin: 'local',
+                fileId: result.file_id,
+              })
+            }
+          }
         }
       }
       await this.opts.onCommitted?.(sending)
       await this.state.setJournal(null)
     })
+    for (const change of applied) await notifyApplied(this.opts, change)
   }
 
   /**

@@ -82,6 +82,7 @@ function supersededLine(change: ChangeItem, entry: StateEntry | null, ours: bool
 
 /** The engine's adapters and settings, as staging needs them. */
 export interface StagingContext {
+  onApplied?: import('./applied.js').AppliedOptions['onApplied']
   client: EngineClient
   fs: FileSystem
   state: StateStore
@@ -346,7 +347,7 @@ export class Staging {
       fs,
       state,
       list.map((one) => one.change),
-      { filter, dirty, expected, log, preserveMissing }
+      { filter, dirty, expected, log, preserveMissing, onApplied: this.ctx.onApplied }
     )
     return new Set(report.held.map((change) => change.file_id))
   }
