@@ -82,10 +82,32 @@ it('resumes an external ledger without downloading already installed bytes', asy
     const options = { dir: join(dir, 'target'), stateDir: join(dir, 'state'), key: root.token }
     const target = await openNodeReplica(options)
     replicas.push(target)
-    const b = target.buildEngine({ fallbackMs: 300_000, log() {} })
+    const installed: string[] = []
+    const applied = vi.fn(async (change: import('@abele/sync-core').AppliedChange) => {
+      installed.push(await readFile(join(target.dir, change.path), 'utf8'))
+    })
+    const synced = vi.fn()
+    const b = target.buildEngine({
+      fallbackMs: 300_000,
+      log() {},
+      onApplied: applied,
+      onSync: synced,
+    })
     engines.push(b)
     await b.sync()
     expect(await readFile(join(target.dir, 'example.txt'), 'utf8')).toBe('hello')
+    expect(applied).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        path: 'example.txt',
+        kind: 'upsert',
+        origin: 'remote',
+        fileId: expect.any(String),
+      })
+    )
+    expect(installed).toEqual(['hello'])
+    await b.sync()
+    expect(applied).toHaveBeenCalledTimes(1)
+    expect(synced).toHaveBeenCalled()
     const cursor = await target.state.getCursor()
     await b.stop()
     target.close()
@@ -132,17 +154,29 @@ it.each([false, true])(
       replicas.push(first, second)
       const a = first.buildEngine({ fallbackMs: 300_000, log() {} })
       // CLI code approvals replace fs with a draft using this same composition pattern.
-      const b = buildNodeEngine({ ...second, fs: second.fs }, { fallbackMs: 300_000, log() {} })
+      const applied = vi.fn()
+      const b = buildNodeEngine(
+        { ...second, fs: second.fs },
+        { fallbackMs: 300_000, log() {}, onApplied: applied }
+      )
       engines.push(a, b)
       await first.fs.writeAtomic('example.txt', new TextEncoder().encode('hello'), 1000)
       await a.sync()
       await b.sync()
       expect((await b.deferred()).map((item) => item.path)).toEqual(['example.txt'])
+      expect(applied).not.toHaveBeenCalled()
       await expect(readFile(join(second.dir, 'example.txt'))).rejects.toMatchObject({
         code: 'ENOENT',
       })
       await b.applyDeferred()
       expect(await readFile(join(second.dir, 'example.txt'), 'utf8')).toBe('hello')
+      expect(applied).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          path: 'example.txt',
+          kind: 'upsert',
+          origin: 'remote',
+        })
+      )
       const file = (await first.client.manifest(null)).items.find(
         (item) => item.path === 'example.txt'
       )!

@@ -24,6 +24,7 @@ import {
   type SyncFailure,
   type SyncReport,
   type RecoveryBarrier,
+  type AppliedChange,
 } from '@abele/sync-core'
 import { normalizeServerUrl, serverUrlProblem, decodeAccessToken } from '@abele/sync-protocol'
 import { readConfig, writeConfig, stateFolder, type DaemonConfig } from './config.js'
@@ -334,6 +335,8 @@ export interface EngineHooks {
   log: (line: string) => void
   onSync?: (report: SyncReport) => void
   onFail?: (error: unknown, kind: SyncFailure) => void
+  /** Called after an applied change, with the core engine's path and origin context. */
+  onApplied?: (change: AppliedChange) => void | Promise<void>
   /** Whether the daemon still holds the vault's lock; asked before every commit and write. */
   stillHeld?: () => boolean
 }
@@ -355,6 +358,7 @@ export function buildNodeEngine(
     ...(vault.cfg.joinPrefer === undefined ? {} : { joinPrefer: vault.cfg.joinPrefer }),
     ...(opts.onSync === undefined ? {} : { onSync: opts.onSync }),
     ...(opts.onFail === undefined ? {} : { onFail: opts.onFail }),
+    ...(opts.onApplied === undefined ? {} : { onApplied: opts.onApplied }),
     ...(opts.stillHeld === undefined ? {} : { stillHeld: opts.stillHeld }),
     ...(vault.recovery ? { recovery: vault.recovery } : {}),
     log: opts.log,
