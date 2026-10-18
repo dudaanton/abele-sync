@@ -101,9 +101,10 @@ export function assertLocalSafety(
   allowPullRecovery = false,
   observer = false,
   recoveringSwitch = false,
-  lifecycle?: LifecycleInventory
+  lifecycle?: LifecycleInventory,
+  stateDir?: string
 ): void {
-  const folder = stateFolder(dir)
+  const folder = stateFolder(dir, stateDir)
   try {
     if (
       existsSync(folder) &&
@@ -164,7 +165,7 @@ export function assertLocalSafety(
                   '; use explicit disconnect preparation with the bound connection; force cannot skip these dependencies'
               )
             if (!lifecycle && name === 'state.db' && existsSync(join(folder, 'config.json'))) {
-              const cfg = readConfig(dir)
+              const cfg = readConfig(dir, stateDir)
               if (cfg && !sameConnection(doc.binding, personalBinding(cfg)))
                 hold('foreign external binding')
             }
@@ -220,7 +221,7 @@ export function assertLocalSafety(
         db.close()
       }
     }
-    const disconnectStaging = join(folder, 'disconnect-staging')
+    const disconnectStaging = join(stateFolder(dir), 'disconnect-staging')
     if (existsSync(disconnectStaging)) {
       const stat = lstatSync(disconnectStaging)
       if (!stat.isDirectory() || stat.isSymbolicLink()) hold('unsafe disconnect staging')
@@ -233,7 +234,10 @@ export function assertLocalSafety(
     }
     if (retirement)
       for (const name of ['tmp', 'code-approvals', 'external', 'recovery', 'scoped-outbox']) {
-        const path = join(folder, name)
+        const path = join(
+          name === 'tmp' || name === 'code-approvals' ? stateFolder(dir) : folder,
+          name
+        )
         if (
           existsSync(path) &&
           (name === 'scoped-outbox'
@@ -242,7 +246,7 @@ export function assertLocalSafety(
         )
           hold(`retained ${name} artifacts`)
       }
-    assertIndexedProjectionSafety(dir, lifecycle?.projections)
+    assertIndexedProjectionSafety(dir, lifecycle?.projections, stateDir)
   } catch (cause) {
     if (cause instanceof ExternalStateError) throw cause
     hold('unreadable ledger or local recovery evidence')
@@ -275,7 +279,8 @@ export class EffectFence {
   constructor(
     readonly dir: string,
     private readonly held: (() => boolean) | undefined,
-    private readonly stamp: () => string
+    private readonly stamp: () => string,
+    private readonly stateDir?: string
   ) {
     this.initialStamp = stamp()
     this.key = realpathSync(dir)
@@ -287,7 +292,7 @@ export class EffectFence {
     }
     this.recovery = new RecoveryBarrier(() => {
       this.assertOwner()
-      assertLocalSafety(dir, false, false, false, !this.held)
+      assertLocalSafety(dir, false, false, false, !this.held, false, undefined, this.stateDir)
     })
   }
   private readonly initialStamp: string
@@ -367,10 +372,10 @@ export class EffectFence {
     })
   }
 }
-export function personalStamp(dir: string): string {
-  const cfg = readConfig(dir)
+export function personalStamp(dir: string, stateDir?: string): string {
+  const cfg = readConfig(dir, stateDir)
   if (!cfg) throw new EngineError('lost', 'connection configuration disappeared')
-  const descriptor = readConfigDescriptor(dir)
+  const descriptor = readConfigDescriptor(dir, stateDir)
   return JSON.stringify({
     binding: personalBinding(cfg, descriptor?.binding.generation),
     descriptor,

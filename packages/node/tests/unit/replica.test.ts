@@ -1,4 +1,4 @@
-import { mkdtemp, rm, readFile } from 'node:fs/promises'
+import { mkdtemp, rm, readFile, readdir, symlink, unlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it, vi } from 'vitest'
@@ -33,6 +33,124 @@ const connection = {
   status: 'active',
   limits: { max_file_bytes: 200 * 1024 * 1024, quota_bytes: null },
 }
+
+it('keeps durable state outside the folder and resumes on restart', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'abele-state-'))
+  const dir = join(root, 'vault'),
+    stateDir = join(root, 'state')
+  const transport = vi.fn(async () => Response.json(connection))
+  try {
+    const replica = await openNodeReplica({ dir, stateDir, key, fetch: transport })
+    try {
+      await replica.state.setCursor(41)
+      await replica.fs.writeAtomic('example.md', new TextEncoder().encode('hello'), 1000)
+      expect(await readdir(stateDir)).toEqual(
+        expect.arrayContaining(['config.json', 'state.db', 'lock'])
+      )
+      await expect(
+        openNodeReplica({ dir, stateDir: join(root, 'other'), key, fetch: transport })
+      ).rejects.toThrow(/another abele-sync/)
+      await expect(
+        openNodeReplica({ dir: join(root, 'second'), stateDir, key, fetch: transport })
+      ).rejects.toThrow()
+    } finally {
+      replica.close()
+    }
+    expect(
+      (await readdir(join(dir, '.abele-sync'))).filter(
+        (name) => !['tmp', 'stages', 'code-approvals'].includes(name)
+      )
+    ).toEqual([])
+    const reopened = await openNodeReplica({ dir, stateDir, key, fetch: transport })
+    try {
+      expect(await reopened.state.getCursor()).toBe(41)
+      expect(transport).toHaveBeenCalledTimes(1)
+    } finally {
+      reopened.close()
+    }
+    await expect(
+      openNodeReplica({ dir: join(root, 'second'), stateDir, key, fetch: transport })
+    ).rejects.toThrow(/another directory/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('refuses state directories inside the folder except the default', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'abele-nested-state-'))
+  try {
+    await expect(openNodeReplica({ dir, stateDir: join(dir, 'private'), key })).rejects.toThrow(
+      /inside/
+    )
+    const replica = await openNodeReplica({
+      dir,
+      stateDir: join(dir, '.abele-sync'),
+      key,
+      fetch: async () => Response.json(connection),
+    })
+    replica.close()
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+it('refuses a nested state directory reached through a symlink', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'abele-state-alias-'))
+  try {
+    await symlink(root, join(root, 'alias'))
+    await expect(
+      openNodeReplica({ dir: root, stateDir: join(root, 'alias', 'private'), key })
+    ).rejects.toThrow(/inside/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('fences writes when the external state lock is lost', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'abele-state-claim-'))
+  const stateDir = join(root, 'state')
+  try {
+    const replica = await openNodeReplica({
+      dir: join(root, 'vault'),
+      stateDir,
+      key,
+      fetch: async () => Response.json(connection),
+    })
+    try {
+      await unlink(join(stateDir, 'lock'))
+      await expect(async () =>
+        replica.fs.writeAtomic('example.md', new Uint8Array(), 1000)
+      ).rejects.toThrow(/claim/)
+    } finally {
+      replica.close()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('inspects recovery evidence in the external ledger before requesting or writing', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'abele-state-safety-'))
+  const options = { dir: join(root, 'vault'), stateDir: join(root, 'state'), key }
+  try {
+    const replica = await openNodeReplica({
+      ...options,
+      fetch: async () => Response.json(connection),
+    })
+    try {
+      replica.state.setMeta('deferred-changes', JSON.stringify({ staged: [{}] }))
+    } finally {
+      replica.close()
+    }
+    const fetch = vi.fn(async () => {
+      throw new Error('unexpected request')
+    })
+    await expect(openNodeReplica({ ...options, fetch })).rejects.toThrow(/malformed deferred queue/)
+    expect(fetch).not.toHaveBeenCalled()
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 it('opens a configured replica and builds an engine without CLI context', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'abele-replica-'))

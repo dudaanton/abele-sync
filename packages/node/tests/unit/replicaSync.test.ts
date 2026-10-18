@@ -11,8 +11,8 @@ vi.mock('node:os', async (original) => ({
   uptime: () => 1000,
 }))
 
-it('syncs two Node replicas and recovers an accepted publication after reopening', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'abele-node-sync-'))
+it('resumes an external ledger without downloading already installed bytes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'abele-state-resume-'))
   const server = await v2Server()
   const replicas: NodeReplica[] = []
   const engines: ReturnType<NodeReplica['buildEngine']>[] = []
@@ -22,49 +22,34 @@ it('syncs two Node replicas and recovers an accepted publication after reopening
       'Example',
       server.address
     )
-    const first = await openNodeReplica({ dir: join(dir, 'first'), key: root.token })
-    const second = await openNodeReplica({
-      dir: join(dir, 'second'),
-      key: root.token,
-      defer: (path) => path === 'example.txt',
-    })
-    replicas.push(first, second)
-    const a = first.buildEngine({ fallbackMs: 300_000, log() {} })
-    // CLI code approvals replace fs with a draft using this same composition pattern.
-    const b = buildNodeEngine({ ...second, fs: second.fs }, { fallbackMs: 300_000, log() {} })
-    engines.push(a, b)
-    await first.fs.writeAtomic('example.txt', new TextEncoder().encode('hello'), 1000)
+    const source = await openNodeReplica({ dir: join(dir, 'source'), key: root.token })
+    replicas.push(source)
+    const a = source.buildEngine({ fallbackMs: 300_000, log() {} })
+    engines.push(a)
+    await source.fs.writeAtomic('example.txt', new TextEncoder().encode('hello'), 1000)
     await a.sync()
+    const options = { dir: join(dir, 'target'), stateDir: join(dir, 'state'), key: root.token }
+    const target = await openNodeReplica(options)
+    replicas.push(target)
+    const b = target.buildEngine({ fallbackMs: 300_000, log() {} })
+    engines.push(b)
     await b.sync()
-    expect((await b.deferred()).map((item) => item.path)).toEqual(['example.txt'])
-    await expect(readFile(join(second.dir, 'example.txt'))).rejects.toMatchObject({
-      code: 'ENOENT',
+    expect(await readFile(join(target.dir, 'example.txt'), 'utf8')).toBe('hello')
+    const cursor = await target.state.getCursor()
+    await b.stop()
+    target.close()
+    const fetch = vi.fn<typeof globalThis.fetch>((input, init) => {
+      if (String(input).includes('/content')) throw new Error('unexpected download')
+      return globalThis.fetch(input, init)
     })
-    await b.applyDeferred()
-    expect(await readFile(join(second.dir, 'example.txt'), 'utf8')).toBe('hello')
-    const file = (await first.client.manifest(null)).items.find(
-      (item) => item.path === 'example.txt'
-    )!
-    const ops = [{ op: 'delete' as const, file_id: file.file_id, base_version_id: file.version_id }]
-    await unlink(join(first.dir, 'example.txt'))
-    await first.state.setJournal({
-      batchId: 'interrupted',
-      ops,
-      idempotencyKey: 'interrupted',
-      startedAt: new Date().toISOString(),
-    })
-    await first.client.commit(ops, 'interrupted')
-    await a.stop()
-    first.close()
-    const reopened = await openNodeReplica({ dir: first.dir, key: root.token })
-    replicas[0] = reopened
-    expect(await reopened.state.getJournal()).toBeNull()
-    expect((await reopened.client.manifest(null)).items).toHaveLength(0)
-    await b.sync()
-    await b.applyDeferred()
-    await expect(readFile(join(second.dir, 'example.txt'))).rejects.toMatchObject({
-      code: 'ENOENT',
-    })
+    const reopened = await openNodeReplica({ ...options, fetch })
+    replicas[1] = reopened
+    expect(await reopened.state.getCursor()).toBe(cursor)
+    const c = reopened.buildEngine({ fallbackMs: 300_000, log() {} })
+    engines.push(c)
+    await c.sync()
+    expect(fetch.mock.calls.some(([input]) => String(input).includes('/content'))).toBe(false)
+    expect(await readFile(join(target.dir, 'example.txt'), 'utf8')).toBe('hello')
   } finally {
     for (const engine of engines) await engine.stop()
     for (const replica of replicas) replica.close()
@@ -72,3 +57,71 @@ it('syncs two Node replicas and recovers an accepted publication after reopening
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+it.each([false, true])(
+  'syncs and recovers an accepted publication (external state: %s)',
+  async (external) => {
+    const dir = await mkdtemp(join(tmpdir(), 'abele-node-sync-'))
+    const server = await v2Server()
+    const replicas: NodeReplica[] = []
+    const engines: ReturnType<NodeReplica['buildEngine']>[] = []
+    try {
+      const root = await createUser(
+        { db: server.db, pepper: server.config.tokenPepper },
+        'Example',
+        server.address
+      )
+      const stateDir = external ? join(dir, 'first-state') : undefined
+      const first = await openNodeReplica({ dir: join(dir, 'first'), stateDir, key: root.token })
+      const second = await openNodeReplica({
+        dir: join(dir, 'second'),
+        key: root.token,
+        defer: (path) => path === 'example.txt',
+      })
+      replicas.push(first, second)
+      const a = first.buildEngine({ fallbackMs: 300_000, log() {} })
+      // CLI code approvals replace fs with a draft using this same composition pattern.
+      const b = buildNodeEngine({ ...second, fs: second.fs }, { fallbackMs: 300_000, log() {} })
+      engines.push(a, b)
+      await first.fs.writeAtomic('example.txt', new TextEncoder().encode('hello'), 1000)
+      await a.sync()
+      await b.sync()
+      expect((await b.deferred()).map((item) => item.path)).toEqual(['example.txt'])
+      await expect(readFile(join(second.dir, 'example.txt'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      })
+      await b.applyDeferred()
+      expect(await readFile(join(second.dir, 'example.txt'), 'utf8')).toBe('hello')
+      const file = (await first.client.manifest(null)).items.find(
+        (item) => item.path === 'example.txt'
+      )!
+      const ops = [
+        { op: 'delete' as const, file_id: file.file_id, base_version_id: file.version_id },
+      ]
+      await unlink(join(first.dir, 'example.txt'))
+      await first.state.setJournal({
+        batchId: 'interrupted',
+        ops,
+        idempotencyKey: 'interrupted',
+        startedAt: new Date().toISOString(),
+      })
+      await first.client.commit(ops, 'interrupted')
+      await a.stop()
+      first.close()
+      const reopened = await openNodeReplica({ dir: first.dir, stateDir, key: root.token })
+      replicas[0] = reopened
+      expect(await reopened.state.getJournal()).toBeNull()
+      expect((await reopened.client.manifest(null)).items).toHaveLength(0)
+      await b.sync()
+      await b.applyDeferred()
+      await expect(readFile(join(second.dir, 'example.txt'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      })
+    } finally {
+      for (const engine of engines) await engine.stop()
+      for (const replica of replicas) replica.close()
+      await server.close()
+      await rm(dir, { recursive: true, force: true })
+    }
+  }
+)

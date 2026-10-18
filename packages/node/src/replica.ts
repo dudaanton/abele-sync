@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util'
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, readFileSync, mkdirSync, realpathSync } from 'node:fs'
+import { join, resolve, relative, isAbsolute, dirname, basename } from 'node:path'
 import {
   selectiveDefaults,
   EngineError,
@@ -42,7 +42,8 @@ import { SqliteStateStore } from './sqliteState.js'
 import { NodeReplicaConfigError as UsageError } from './replicaError.js'
 
 /** Where the daemon keeps what it has synced. */
-export const stateDbFile = (dir: string): string => join(stateFolder(dir), 'state.db')
+export const stateDbFile = (dir: string, stateDir?: string): string =>
+  join(stateFolder(dir, stateDir), 'state.db')
 
 /** The vault's ignore file, beside the state folder rather than inside it. */
 export const ignoreFile = (dir: string): string => join(dir, '.abele-sync-ignore')
@@ -56,6 +57,7 @@ export const DEFAULT_INTERVAL_SECONDS = 300
 export const MIN_INTERVAL_SECONDS = 5
 
 export interface NodeReplica {
+  stateDir?: string
   dir: string
   cfg: DaemonConfig
   /** The disk itself, for what only the adapter knows: whether this platform can watch. */
@@ -133,12 +135,22 @@ function openConfiguredReplica(
   ctx: NodeTransport,
   held?: () => boolean,
   config?: DaemonConfig,
-  defer?: (path: string) => boolean
+  defer?: (path: string) => boolean,
+  stateDir?: string
 ): NodeReplica {
   if (held && !held()) throw new EngineError('lost', 'vault lock lost before recovery inspection')
-  assertLocalSafety(dir, false, true, held !== undefined, held === undefined)
+  assertLocalSafety(
+    dir,
+    false,
+    true,
+    held !== undefined,
+    held === undefined,
+    false,
+    undefined,
+    stateDir
+  )
   const cfg = config ?? requireConfig(dir)
-  const fence = new EffectFence(dir, held, () => personalStamp(dir))
+  const fence = new EffectFence(dir, held, () => personalStamp(dir, stateDir), stateDir)
   let attached = false
   // Hidden folders are not walked or watched: the filter below would pass over all of it.
   const disk = new NodeFileSystem(dir, {
@@ -157,7 +169,7 @@ function openConfiguredReplica(
   const ignore = anyOf([HIDDEN, ...(rules === null ? [] : [rules]), fs])
   let state: SqliteStateStore
   try {
-    state = SqliteStateStore.open(stateDbFile(dir), {
+    state = SqliteStateStore.open(stateDbFile(dir, stateDir), {
       effectGuard: () => {
         if (!held && attached) fence.assertReady()
         else fence.assertOwner()
@@ -169,8 +181,17 @@ function openConfiguredReplica(
     throw error
   }
   try {
-    fence.attach(state, stateDbFile(dir))
+    fence.attach(state, stateDbFile(dir, stateDir))
     attached = true
+    if (stateDir) {
+      const boundDir = state.getMeta('node:bound-dir')
+      if (boundDir !== null && boundDir !== realpathSync(dir))
+        throw new UsageError('stateDir belongs to another directory')
+      if (boundDir === null) {
+        if (!held?.()) throw new UsageError('binding stateDir requires an owned vault lock')
+        state.setMeta('node:bound-dir', realpathSync(dir))
+      }
+    }
     const bound = state.getMeta('token-connection')
     if (bound !== null && bound !== createHash('sha256').update(cfg.deviceToken).digest('hex'))
       throw new UsageError('connection ledger binding mismatch')
@@ -181,6 +202,7 @@ function openConfiguredReplica(
       )
     }
     const vault: NodeReplica = {
+      ...(stateDir ? { stateDir } : {}),
       dir,
       cfg,
       ...(defer ? { defer } : {}),
@@ -248,11 +270,12 @@ function openConfiguredReplica(
 export async function recoverNodeReplica(vault: NodeReplica, held: () => boolean): Promise<void> {
   if (!held()) throw new EngineError('lost', 'vault lock lost before recovery')
   await vault.fence?.settlePredecessors()
-  assertLocalSafety(vault.dir, false, true, true)
+  assertLocalSafety(vault.dir, false, true, true, false, false, undefined, vault.stateDir)
   if (!inspectedVaults.has(vault)) {
     await inspectProjectionInventory(vault.dir, {
       guard: vault.fence?.assertOwner ?? (() => assertClaim(held)),
       selective: vault.cfg.selective,
+      stateDir: vault.stateDir,
     })
     inspectedVaults.add(vault)
   }
@@ -277,7 +300,7 @@ export async function recoverNodeReplica(vault: NodeReplica, held: () => boolean
   pullRecoveryClients.delete(vault)
   await publicationRecovery.get(vault)?.(recoveryDisk)
   publicationRecovery.delete(vault)
-  assertLocalSafety(vault.dir)
+  assertLocalSafety(vault.dir, false, true, false, false, false, undefined, vault.stateDir)
   vault.recovery?.activate()
 }
 
@@ -345,6 +368,8 @@ export interface NodeTransport {
   WebSocket?: typeof globalThis.WebSocket
 }
 export interface NodeReplicaOptions {
+  /** Durable ledger and credentials. Atomic installation temps remain inside dir. */
+  stateDir?: string
   dir: string
   config: DaemonConfig
   fetch?: typeof globalThis.fetch
@@ -365,33 +390,47 @@ export function openNodeReplica(
   options: NodeReplicaOptions | NodeKeyOptions
 ): NodeReplica | Promise<NodeReplica> {
   if ('key' in options) return openKeyReplica(options)
+  const stateDir = resolveStateDir(options.dir, options.stateDir)
   const transport: NodeTransport = {
     fetch: options.fetch ?? globalThis.fetch,
     ...(options.WebSocket ? { WebSocket: options.WebSocket } : {}),
   }
   validateConfig(options.config)
-  const stored = readConfig(options.dir)
+  assertDirectoryBinding(options.dir, stateDir)
+  const stored = readConfig(options.dir, stateDir)
   if (!stored) {
     if (!options.held?.())
       throw new UsageError('initializing a replica requires an owned vault lock')
-    assertLocalSafety(options.dir)
-    assertLedgerBinding(options.dir, options.config.deviceToken)
-    writeConfig(options.dir, options.config)
+    assertLocalSafety(options.dir, false, true, false, false, false, undefined, stateDir)
+    assertLedgerBinding(options.dir, options.config.deviceToken, stateDir)
+    writeConfig(options.dir, options.config, stateDir)
   } else if (!isDeepStrictEqual(stored, options.config)) {
     throw new UsageError('connection configuration mismatch')
   }
-  return openConfiguredReplica(options.dir, transport, options.held, options.config, options.defer)
+  return openConfiguredReplica(
+    options.dir,
+    transport,
+    options.held,
+    options.config,
+    options.defer,
+    stateDir
+  )
 }
 async function openKeyReplica(options: NodeKeyOptions): Promise<NodeReplica> {
+  const stateDir = resolveStateDir(options.dir, options.stateDir)
   const decoded = decodeAccessToken(options.key)
   requireServerUrl(decoded.address)
-  const { mkdirSync } = await import('node:fs')
   mkdirSync(options.dir, { recursive: true })
   const lock = await acquireLock(options.dir, options.lockTiming)
   let replica: NodeReplica | undefined
+  let stateLock: Awaited<ReturnType<typeof acquireLock>> | undefined
   try {
-    assertLocalSafety(options.dir, false, true, true)
-    let config = readConfig(options.dir)
+    // The transient directory claim is shared with CLI/default opens. The second
+    // claim protects external state even when another directory tries to use it.
+    if (stateDir) stateLock = await acquireLock(options.dir, { ...options.lockTiming, stateDir })
+    assertDirectoryBinding(options.dir, stateDir)
+    assertLocalSafety(options.dir, false, true, true, false, false, undefined, stateDir)
+    let config = readConfig(options.dir, stateDir)
     if (config && config.deviceToken !== options.key)
       throw new UsageError('connection configuration mismatch')
     if (!config) {
@@ -401,8 +440,8 @@ async function openKeyReplica(options: NodeKeyOptions): Promise<NodeReplica> {
       }
       const info = await new V2EngineClient(options.key, transport).connection()
       assertClaim(lock.held)
-      assertLocalSafety(options.dir)
-      assertLedgerBinding(options.dir, options.key)
+      assertLocalSafety(options.dir, false, true, false, false, false, undefined, stateDir)
+      assertLedgerBinding(options.dir, options.key, stateDir)
       config = {
         serverUrl: decoded.address,
         deviceToken: options.key,
@@ -413,7 +452,11 @@ async function openKeyReplica(options: NodeKeyOptions): Promise<NodeReplica> {
       }
     }
     const { key: _key, ...configured } = options
-    replica = openNodeReplica({ ...configured, config, held: lock.held })
+    replica = openNodeReplica({
+      ...configured,
+      config,
+      held: () => lock.held() && (stateLock?.held() ?? true),
+    })
     await replica.recover()
     const close = replica.close
     let closed = false
@@ -423,12 +466,14 @@ async function openKeyReplica(options: NodeKeyOptions): Promise<NodeReplica> {
       try {
         close()
       } finally {
+        stateLock?.()
         lock()
       }
     }
     return replica
   } catch (error) {
     replica?.close()
+    stateLock?.()
     lock()
     throw error
   }
@@ -442,9 +487,9 @@ export function readIgnoreText(dir: string): string | null {
   }
 }
 
-function assertLedgerBinding(dir: string, key: string): void {
-  if (!existsSync(stateDbFile(dir))) return
-  const state = SqliteStateStore.openReadOnlySnapshot(stateDbFile(dir))
+function assertLedgerBinding(dir: string, key: string, stateDir?: string): void {
+  if (!existsSync(stateDbFile(dir, stateDir))) return
+  const state = SqliteStateStore.openReadOnlySnapshot(stateDbFile(dir, stateDir))
   try {
     if (state.getMeta('token-connection') !== createHash('sha256').update(key).digest('hex'))
       throw new UsageError(
@@ -452,5 +497,39 @@ function assertLedgerBinding(dir: string, key: string): void {
       )
   } finally {
     state.close()
+  }
+}
+
+// Resolve existing ancestors too, so symlink aliases cannot hide a nested stateDir.
+function canonicalPath(path: string): string {
+  const absolute = resolve(path)
+  if (existsSync(absolute)) return realpathSync(absolute)
+  return join(canonicalPath(dirname(absolute)), basename(absolute))
+}
+function resolveStateDir(dir: string, requested?: string): string | undefined {
+  if (requested === undefined) return undefined
+  const root = canonicalPath(dir),
+    folder = canonicalPath(requested)
+  if (folder === canonicalPath(stateFolder(dir))) return undefined
+  const child = relative(root, folder)
+  if (!child || (!child.startsWith('..' + '/') && child !== '..' && !isAbsolute(child)))
+    throw new UsageError('stateDir must not be inside the synced directory')
+  // Installation temp/stage/code-group files deliberately keep using dir/.abele-sync:
+  // rename into the synced tree must stay on the same filesystem to be atomic.
+  mkdirSync(folder, { recursive: true, mode: 0o700 })
+  return folder
+}
+
+function assertDirectoryBinding(dir: string, stateDir?: string): void {
+  if (!stateDir || !existsSync(stateDbFile(dir, stateDir))) return
+  const snapshot = SqliteStateStore.openReadOnlySnapshot(stateDbFile(dir, stateDir))
+  try {
+    const bound = snapshot.getMeta('node:bound-dir')
+    if (bound === null)
+      throw new UsageError('stateDir has an unbound ledger; use a fresh state directory')
+    if (bound !== null && bound !== realpathSync(dir))
+      throw new UsageError('stateDir belongs to another directory')
+  } finally {
+    snapshot.close()
   }
 }

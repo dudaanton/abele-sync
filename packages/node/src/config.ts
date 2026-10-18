@@ -45,11 +45,12 @@ const FOLDER_MODE = 0o700
 const FILE_MODE = 0o600
 
 /** `<dir>/.abele-sync`, where everything the daemon owns lives. */
-export const stateFolder = (dir: string): string => join(dir, STATE_DIR)
+export const stateFolder = (dir: string, stateDir?: string): string =>
+  stateDir ?? join(dir, STATE_DIR)
 
 /** The state folder, created at `0700` if it is not there yet. */
-export function ensureStateFolder(dir: string): string {
-  const folder = stateFolder(dir)
+export function ensureStateFolder(dir: string, stateDir?: string): string {
+  const folder = stateFolder(dir, stateDir)
   try {
     // mkdir's mode is masked by the umask and says nothing about a folder that already exists,
     // so the mode is set again either way.
@@ -68,8 +69,8 @@ export function ensureStateFolder(dir: string): string {
  * `null`: a daemon that treated a damaged config as "not set up" would ask for a fresh login and
  * write over the token that is still in the file.
  */
-export function readConfig(dir: string): DaemonConfig | null {
-  const file = join(stateFolder(dir), CONFIG_FILE)
+export function readConfig(dir: string, stateDir?: string): DaemonConfig | null {
+  const file = join(stateFolder(dir, stateDir), CONFIG_FILE)
   let text: string
   try {
     text = readFileSync(file, 'utf8')
@@ -127,25 +128,26 @@ function readJoinPrefer(value: unknown, file: string): { joinPrefer?: JoinPrefer
 }
 
 /** Writes the config through a temp file, so a crash never leaves half a token behind. */
-export function writeConfig(dir: string, cfg: DaemonConfig): void {
-  const descriptor = readConfigDescriptor(dir)
+export function writeConfig(dir: string, cfg: DaemonConfig, stateDir?: string): void {
+  const descriptor = readConfigDescriptor(dir, stateDir)
   if (descriptor) {
-    writeVersionedConfig(dir, cfg, descriptor)
+    writeVersionedConfig(dir, cfg, descriptor, undefined, stateDir)
     return
   }
-  writeOwnedJson(dir, CONFIG_FILE, cfg)
+  writeOwnedJson(dir, CONFIG_FILE, cfg, undefined, stateDir)
 }
 
 export function writeOwnedJson(
   dir: string,
   name: string,
   value: unknown,
-  guard: () => void = () => {}
+  guard: () => void = () => {},
+  stateDir?: string
 ): void {
   guard()
   if (!/^[a-z0-9.-]+$/.test(name) || name.includes('..'))
     throw new EngineError('io', 'invalid local descriptor name')
-  const folder = ensureStateFolder(dir)
+  const folder = ensureStateFolder(dir, stateDir)
   const temp = join(folder, `${name}.${randomBytes(6).toString('hex')}`)
   try {
     writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: FILE_MODE })
@@ -196,8 +198,8 @@ export function personalBinding(cfg: DaemonConfig, generation = 1): ConnectionBi
     credentialAssociation: createHash('sha256').update(cfg.deviceToken).digest('hex'),
   })
 }
-export function readConfigDescriptor(dir: string): LocalDescriptor | null {
-  const file = join(stateFolder(dir), CONFIG_FILE)
+export function readConfigDescriptor(dir: string, stateDir?: string): LocalDescriptor | null {
+  const file = join(stateFolder(dir, stateDir), CONFIG_FILE)
   if (!existsSync(file)) return null
   let value: unknown
   try {
@@ -216,7 +218,8 @@ export function writeVersionedConfig(
   dir: string,
   cfg: DaemonConfig,
   descriptor: LocalDescriptor,
-  guard?: () => void
+  guard?: () => void,
+  stateDir?: string
 ): void {
   const checked = parseLocalDescriptor(descriptor)
   if (!sameConnection(checked.binding, personalBinding(cfg, checked.binding.generation)))
@@ -225,7 +228,8 @@ export function writeVersionedConfig(
     dir,
     CONFIG_FILE,
     { format: 'abele.cli', schema: 2, connection: cfg, descriptor: checked },
-    guard
+    guard,
+    stateDir
   )
 }
 

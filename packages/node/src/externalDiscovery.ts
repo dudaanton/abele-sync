@@ -21,6 +21,7 @@ interface Entry {
   marker: boolean
 }
 export interface ProjectionInventoryOptions {
+  stateDir?: string
   guard?: () => void
   selective?: SelectiveSettings
   /** Validated owned paths only; the lifecycle host checks their recorded digest. */
@@ -31,9 +32,9 @@ function held(path: string): never {
   error.message = `external files require recovery: unowned projection at ${path}; connection and recovery data were preserved`
   throw error
 }
-function entries(dir: string): Entry[] {
+function entries(dir: string, stateDir?: string): Entry[] {
   try {
-    const data = JSON.parse(readFileSync(join(stateFolder(dir), INDEX_FILE), 'utf8')) as {
+    const data = JSON.parse(readFileSync(join(stateFolder(dir, stateDir), INDEX_FILE), 'utf8')) as {
       schema?: unknown
       entries?: unknown
     }
@@ -52,8 +53,12 @@ function entries(dir: string): Entry[] {
     return []
   } // An index is an optimization, never permission to skip an invalid record.
 }
-export function assertIndexedProjectionSafety(dir: string, owned?: ReadonlySet<string>): void {
-  const marker = entries(dir).find((entry) => entry.marker && !owned?.has(entry.path))
+export function assertIndexedProjectionSafety(
+  dir: string,
+  owned?: ReadonlySet<string>,
+  stateDir?: string
+): void {
+  const marker = entries(dir, stateDir).find((entry) => entry.marker && !owned?.has(entry.path))
   if (marker) held(marker.path)
 }
 /** Root marker only; no adoption/schema/placement permission is inferred. */
@@ -105,9 +110,11 @@ function marker(bytes: Uint8Array): boolean {
     return false
   }
 }
-function configuredSelective(dir: string): SelectiveSettings {
+function configuredSelective(dir: string, stateDir?: string): SelectiveSettings {
   try {
-    const raw = JSON.parse(readFileSync(join(stateFolder(dir), 'config.json'), 'utf8')) as {
+    const raw = JSON.parse(
+      readFileSync(join(stateFolder(dir, stateDir), 'config.json'), 'utf8')
+    ) as {
       selective?: SelectiveSettings
       connection?: { selective?: SelectiveSettings }
     }
@@ -125,13 +132,14 @@ export async function inspectProjectionInventory(
   dir: string,
   options: ProjectionInventoryOptions = {}
 ): Promise<void> {
+  const stateDir = options.stateDir
   const guard = options.guard ?? (() => {}),
-    file = join(stateFolder(dir), INDEX_FILE)
+    file = join(stateFolder(dir, stateDir), INDEX_FILE)
   guard()
-  assertIndexedProjectionSafety(dir, options.ownedProjections)
-  const previous = new Map(entries(dir).map((entry) => [entry.path, entry])),
+  assertIndexedProjectionSafety(dir, options.ownedProjections, stateDir)
+  const previous = new Map(entries(dir, stateDir).map((entry) => [entry.path, entry])),
     next: Entry[] = []
-  const selective = options.selective ?? configuredSelective(dir)
+  const selective = options.selective ?? configuredSelective(dir, stateDir)
   let ignoreText = ''
   try {
     ignoreText = await readFile(join(dir, '.abele-sync-ignore'), 'utf8')

@@ -62,6 +62,7 @@ export const giveUpMs = (heartbeatMs: number, watchMs: number): number => watchM
 export const LOCK_STALE = 'the lock could not be refreshed'
 
 export interface LockOptions {
+  stateDir?: string
   /**
    * Called once when the lock stops being this process's: another process took it over, or no
    * beat could be written into it for as long as a watcher waits. The daemon stops syncing.
@@ -115,7 +116,7 @@ export async function acquireLock(dir: string, opts: LockOptions = {}): Promise<
   }
   // Keep the caller's name for I/O (including filesystem hooks); canonicalization
   // belongs to ownership attribution, not to the path on which a heartbeat lands.
-  const file = join(ensureStateFolder(dir), LOCK_FILE)
+  const file = join(ensureStateFolder(dir, opts.stateDir), LOCK_FILE)
   for (let attempt = 0; attempt < 3; attempt++) {
     const identity: LockIdentity = {
       instance: randomBytes(12).toString('hex'),
