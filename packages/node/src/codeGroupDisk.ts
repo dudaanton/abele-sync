@@ -19,6 +19,7 @@ const FOLDER = 'code-approvals'
 interface Journal {
   version: 1
   vault: string
+  ledger: string
   attempted: number
   steps: GroupStep[]
 }
@@ -38,6 +39,9 @@ export class CodeGroupDisk {
       vault.fence?.assertOwner()
       if (!held()) throw new EngineError('lost', 'code approval lost ownership')
     }
+    check()
+    // Persist outside the approval transaction: a rollback must not erase ownership.
+    vault.state.getExternalInstanceId()
     const folder = await ownTempFolder(resolve(vault.dir), '.abele-sync', FOLDER, check)
     check()
     const work = await mkdtemp(join(folder, 'group-'))
@@ -69,7 +73,15 @@ export class CodeGroupDisk {
   }
   async place(draft: CodeDraft): Promise<void> {
     this.check()
-    this.journal = { version: 1, vault: this.vault.cfg.vaultId, attempted: -1, steps: draft.steps }
+    const ledger = this.vault.state.readExternalInstanceId()
+    if (ledger === null) throw new ExternalStateError('recovery-required')
+    this.journal = {
+      version: 1,
+      vault: this.vault.cfg.vaultId,
+      ledger,
+      attempted: -1,
+      steps: draft.steps,
+    }
     await this.save()
     if (!(await draft.validate()))
       throw new EngineError('conflict', 'code changed before group placement')
@@ -97,6 +109,7 @@ export class CodeGroupDisk {
     this.vault.state.setMeta(this.marker, 'committed')
   }
   async rollback(): Promise<void> {
+    this.assertOwningLedger()
     if (this.journal === null || this.vault.state.getMeta(this.marker) === 'committed') return
     const blobs = new GroupBlobs(new NodeFileSystem(join(this.work, 'blobs')))
     let conflicted = false
@@ -134,12 +147,24 @@ export class CodeGroupDisk {
   }
   async discard(): Promise<void> {
     this.check()
+    this.assertOwningLedger()
     const remove = () => rm(this.work, { recursive: true, force: true })
     await (this.vault.fence ? this.vault.fence.track(remove) : remove())
     // Never durably forget the commit marker while the journal's directory could reappear.
     await syncPath(dirname(this.work))
     this.check()
     this.vault.state.setMeta(this.marker, null)
+  }
+
+  private assertOwningLedger(): void {
+    if (
+      this.journal !== null &&
+      (typeof this.journal.ledger !== 'string' ||
+        this.journal.ledger !== this.vault.state.readExternalInstanceId())
+    )
+      throw new ExternalStateError('recovery-required', {
+        cause: 'code approval requires its owning ledger; recovery files left untouched',
+      })
   }
 
   /** Called only while owning the vault, before a new sync or approval can see a partial group. */
@@ -159,6 +184,7 @@ export class CodeGroupDisk {
           JSON.parse(new TextDecoder().decode(await files.read('journal.json'))),
           vault.cfg.vaultId
         )
+        disk.assertOwningLedger()
         if (vault.state.getMeta(disk.marker) !== 'committed') await disk.rollback()
       } else if ((await readdir(disk.work)).length) {
         throw new ExternalStateError('recovery-required', {

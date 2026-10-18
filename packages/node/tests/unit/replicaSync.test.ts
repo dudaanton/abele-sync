@@ -1,15 +1,66 @@
-import { mkdtemp, rm, readFile, unlink } from 'node:fs/promises'
+import { mkdtemp, rm, readFile, unlink, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it, vi } from 'vitest'
 import { createUser } from '@abele/sync-server/src/access/tokens.js'
 import { v2Server } from '@abele/sync-server/tests/helpers/v2Server.js'
-import { openNodeReplica, buildNodeEngine, type NodeReplica } from '../../src/index.js'
+import {
+  openNodeReplica,
+  buildNodeEngine,
+  CodeGroupDisk,
+  CodeDraft,
+  type NodeReplica,
+} from '../../src/index.js'
 
 vi.mock('node:os', async (original) => ({
   ...(await original<typeof import('node:os')>()),
   uptime: () => 1000,
 }))
+
+it('retains committed approval evidence when reopened with a fresh stateDir', async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'abele-ledger-owner-'))
+  const server = await v2Server()
+  let replica: NodeReplica | undefined
+  try {
+    const root = await createUser(
+      { db: server.db, pepper: server.config.tokenPepper },
+      'Example',
+      server.address
+    )
+    const options = {
+      dir: join(rootDir, 'files'),
+      stateDir: join(rootDir, 'ledger-a'),
+      key: root.token,
+    }
+    replica = await openNodeReplica(options)
+    const group = await CodeGroupDisk.create(replica, () => true)
+    const draft = await CodeDraft.create(replica.disk, group.work)
+    await draft.preload(['example.txt'])
+    await draft.writeAtomic('example.txt', new TextEncoder().encode('approved'), 1000)
+    await replica.state.transaction(() => group.place(draft))
+    const journal = await readFile(join(group.work, 'journal.json'))
+    replica.close()
+    replica = undefined
+    await expect(
+      openNodeReplica({ ...options, stateDir: join(rootDir, 'ledger-b') })
+    ).rejects.toMatchObject({
+      reason: 'recovery-required',
+      cause: expect.stringMatching(/owning ledger/),
+    })
+    expect(await readFile(join(options.dir, 'example.txt'), 'utf8')).toBe('approved')
+    expect(await readFile(join(group.work, 'journal.json'))).toEqual(journal)
+    expect(await readdir(group.work)).toContain('blobs')
+    replica = await openNodeReplica(options)
+    expect(await readFile(join(options.dir, 'example.txt'), 'utf8')).toBe('approved')
+    await expect(readFile(join(group.work, 'journal.json'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
+  } finally {
+    replica?.close()
+    await server.close()
+    await rm(rootDir, { recursive: true, force: true })
+  }
+})
 
 it('resumes an external ledger without downloading already installed bytes', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'abele-state-resume-'))

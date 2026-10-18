@@ -44,6 +44,50 @@ async function prepared() {
 }
 
 describe('grouped code placement recovery', () => {
+  it('retains legacy journals without ledger ownership evidence', async () => {
+    const { group, draft } = await prepared()
+    await state.transaction(() => group.place(draft))
+    const files = new NodeFileSystem(group.work)
+    const journal = JSON.parse(new TextDecoder().decode(await files.read('journal.json')))
+    delete journal.ledger
+    await files.writeAtomic('journal.json', encodeText(JSON.stringify(journal)), 0)
+    await expect(CodeGroupDisk.recover(vault(), () => true)).rejects.toMatchObject({
+      reason: 'recovery-required',
+      cause: expect.stringMatching(/owning ledger/),
+    })
+    expect(await text(MAIN)).toBe('approved()')
+    expect(await readdir(group.work)).toContain('journal.json')
+  })
+
+  it.each([true, false])('requires the owning ledger (committed: %s)', async (committed) => {
+    const { group, draft } = await prepared()
+    if (committed) await state.transaction(() => group.place(draft))
+    else
+      await expect(
+        state.transaction(async () => {
+          await group.place(draft)
+          throw new Error('interrupted')
+        })
+      ).rejects.toThrow('interrupted')
+    const journal = await new NodeFileSystem(group.work).read('journal.json')
+    const other = SqliteStateStore.open(join(dir, 'other-state/state.db'))
+    try {
+      await expect(
+        CodeGroupDisk.recover({ ...vault(), state: other }, () => true)
+      ).rejects.toMatchObject({
+        reason: 'recovery-required',
+        cause: expect.stringMatching(/owning ledger/),
+      })
+      expect(await text(MAIN)).toBe('approved()')
+      expect(await new NodeFileSystem(group.work).read('journal.json')).toEqual(journal)
+      expect(await readdir(group.work)).toContain('blobs')
+    } finally {
+      other.close()
+    }
+    await CodeGroupDisk.recover(vault(), () => true)
+    expect(await text(MAIN)).toBe(committed ? 'approved()' : 'original()')
+  })
+
   it('clears an orphan commit marker before using a newly allocated workspace', async () => {
     // A cleanup can remove its directory before it manages to delete the old marker.
     const get = state.getMeta.bind(state),
