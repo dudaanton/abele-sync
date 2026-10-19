@@ -1,6 +1,7 @@
 {
   "name": "@abele/sync-core",
   "version": "0.4.0",
+  "private": true,
   "license": "GPL-3.0-only",
   "type": "module",
   "exports": {
@@ -28,9 +29,6 @@
     "ws": "8.21.3"
   },
   "types": "./dist/index.d.ts",
-  "publishConfig": {
-    "access": "public"
-  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/dudaanton/abele-sync.git",

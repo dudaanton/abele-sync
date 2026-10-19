@@ -39,32 +39,3 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-  npm:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-          cache: npm
-      - run: npm ci
-      - name: Set release versions
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          npm version "$VERSION" --workspace @abele/sync-protocol --workspace @abele/sync-core --workspace @abele/sync-node --no-git-tag-version --allow-same-version
-          npm pkg set "dependencies.@abele/sync-protocol=$VERSION" --workspace @abele/sync-core
-      - run: npm pkg set "dependencies.@abele/sync-protocol=${GITHUB_REF_NAME#v}" "dependencies.@abele/sync-core=${GITHUB_REF_NAME#v}" --workspace @abele/sync-node
-      - run: npm run build
-      - run: npm publish --workspace @abele/sync-protocol --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish --workspace @abele/sync-core --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish --workspace @abele/sync-node --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
