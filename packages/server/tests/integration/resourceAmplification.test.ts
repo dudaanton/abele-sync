@@ -32,21 +32,27 @@ for (const dialect of ['sqlite', 'pg'] as const)
     })
 
     it('coalesces download counter writes while keeping exact transfer totals', async () => {
-      const f = await tokenFixture(dialect)
+      // Hold the periodic flush: correctness must depend on draining the server,
+      // not on how quickly a runner schedules the 250 ms timer.
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+      let f: Awaited<ReturnType<typeof tokenFixture>> | undefined
       try {
+        f = await tokenFixture(dialect)
         const file = success(await f.root.create('Agents/a.md', 'hello'))
         const writes = vi.spyOn(f.t.db, 'insertInto')
         try {
           for (let i = 0; i < 20; i++) await f.guest.content(file.file_id)
-          await expect
-            .poll(async () =>
-              f.t.db
-                .selectFrom('activity_daily')
-                .selectAll()
-                .where('token_id', '=', f.share.info.id)
-                .executeTakeFirst()
-            )
-            .toMatchObject({ downloaded_files: 20, downloaded_bytes: 100 })
+          // Only the first sample has been submitted; the remaining transfers
+          // must be persisted by onClose, even if the timer never runs.
+          expect(writes.mock.calls.filter(([table]) => table === 'activity_daily').length).toBe(1)
+          await f.t.stop()
+          expect(
+            await f.t.db
+              .selectFrom('activity_daily')
+              .selectAll()
+              .where('token_id', '=', f.share.info.id)
+              .executeTakeFirst()
+          ).toMatchObject({ downloaded_files: 20, downloaded_bytes: 100 })
           expect(
             writes.mock.calls.filter(([table]) => table === 'activity_daily').length
           ).toBeLessThan(20)
@@ -54,7 +60,11 @@ for (const dialect of ['sqlite', 'pg'] as const)
           writes.mockRestore()
         }
       } finally {
-        await f.close()
+        try {
+          await f?.close()
+        } finally {
+          vi.useRealTimers()
+        }
       }
     })
 

@@ -82,15 +82,6 @@ for (const dialect of ['sqlite', 'pg'] as const)
         await error.arrayBuffer()
         const good = await fetch(address + '/v2/files/file/content')
         expect(await good.text()).toBe('hello')
-        await expect
-          .poll(() =>
-            f.t.db
-              .selectFrom('activity_daily')
-              .selectAll()
-              .where('token_id', '=', f.share.info.id)
-              .executeTakeFirst()
-          )
-          .toMatchObject({ downloaded_files: 1, downloaded_bytes: 5 })
         // Closing also drains the counter queue, so a late duplicate would be observable.
         await app.close()
         expect(
@@ -151,15 +142,14 @@ for (const dialect of ['sqlite', 'pg'] as const)
         }
         expect(finishes).toBe(20)
         expect(delayedFlags).toBe(3)
-        await expect
-          .poll(() =>
-            f.t.db
-              .selectFrom('activity_daily')
-              .selectAll()
-              .where('token_id', '=', f.share.info.id)
-              .executeTakeFirst()
-          )
-          .toMatchObject({ downloaded_files: 20, downloaded_bytes: 100 })
+        await app.close()
+        expect(
+          await f.t.db
+            .selectFrom('activity_daily')
+            .selectAll()
+            .where('token_id', '=', f.share.info.id)
+            .executeTakeFirst()
+        ).toMatchObject({ downloaded_files: 20, downloaded_bytes: 100 })
         expect(
           writes.mock.calls.filter(([table]) => table === 'activity_daily').length
         ).toBeLessThan(20)

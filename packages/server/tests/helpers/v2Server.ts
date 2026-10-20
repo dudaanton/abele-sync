@@ -80,6 +80,8 @@ export async function v2Server(
       get address() {
         return address
       },
+      // Drain application hooks while retaining the database for durable-state assertions.
+      stop: stopApp,
       async restart(beforeOpen?: () => Promise<void>) {
         const port = Number(new URL(address).port)
         await stopApp()
