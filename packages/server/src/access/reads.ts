@@ -20,7 +20,7 @@ import {
   member,
   versionVisible,
   covers,
-  folderWasDeleted,
+  selectorWasDeleted,
   historyAuthority,
 } from './visibility.js'
 
@@ -28,13 +28,13 @@ export async function withToken<T>(
   deps: AccessDeps,
   key: string,
   run: (deps: AccessDeps, principal: TokenPrincipal) => Promise<T>,
-  allowFinalFolderDeletes = false
+  allowFinalSelectorDeletes = false
 ): Promise<T> {
   const initial = await authenticateToken(deps, key)
   return withVaultLock(deps.db, deps.dialect ?? 'sqlite', initial.space.id, async (db) => {
     const tx = { ...deps, db }
     const principal = await authenticateToken(tx, key)
-    if (!(allowFinalFolderDeletes && (await folderWasDeleted(tx, principal.scope))))
+    if (!(allowFinalSelectorDeletes && (await selectorWasDeleted(tx, principal.scope))))
       await activeScope(tx, principal)
     return run(tx, principal)
   })
@@ -149,7 +149,7 @@ export async function changesWithToken(
         .selectAll()
         .where('scope_id', '=', p.scope.id)
         .where('cursor', '>', since)
-      // A deleted folder's credential can drain genuine final deletes, not read
+      // A deleted selector's credential can drain genuine final deletes, not read
       // content, old content events, private destinations or new replacement folders.
       if (!active) query = query.where('type', '=', 'delete')
       const rows = await query

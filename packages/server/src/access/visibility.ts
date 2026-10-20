@@ -11,10 +11,20 @@ import { effectiveScope, type AccessDeps, type TokenPrincipal } from './tokens.j
 import { isConfigurationPath } from '../configurationDirectories.js'
 import { closure, initializeGroup, deletedGroupContains } from './groups/graph.js'
 
-export async function folderWasDeleted(
+export async function selectorWasDeleted(
   deps: AccessDeps,
   scope: AccessScopesTable
 ): Promise<boolean> {
+  if (scope.kind === 'file')
+    return (
+      (await deps.db
+        .selectFrom('files')
+        .select('id')
+        .where('vault_id', '=', scope.space_id)
+        .where('id', '=', scope.target_id)
+        .where('deleted_at', 'is not', null)
+        .executeTakeFirst()) !== undefined
+    )
   if (scope.kind !== 'folder') return false
   return (
     (await deps.db
@@ -41,6 +51,17 @@ export async function covers(
 ): Promise<boolean> {
   const resolved = await effectiveScope(deps, { scope, space: { id: scope.space_id } })
   if (!resolved.active) return false
+  if (resolved.scope.kind === 'file') {
+    if (fileId !== undefined) return fileId === scope.target_id
+    const file = await deps.db
+      .selectFrom('files')
+      .select('id')
+      .where('vault_id', '=', scope.space_id)
+      .where('path', '=', path)
+      .where('deleted_at', 'is', null)
+      .executeTakeFirst()
+    return file?.id === scope.target_id
+  }
   if (resolved.scope.kind === 'group') {
     if (!(await groupPathAllowed(deps, scope, path))) return false
     let query = deps.db
@@ -96,6 +117,17 @@ export async function groupPathAllowed(
   path: string
 ): Promise<boolean> {
   if (isConfigurationPath(path, deps.configurationDirectories)) return false
+  if (!scope.boundary_scope_id) return true
+  const boundary = await deps.db
+    .selectFrom('access_scopes')
+    .selectAll()
+    .where('id', '=', scope.boundary_scope_id)
+    .executeTakeFirstOrThrow()
+  return boundary.kind === 'group'
+    ? groupPathAllowed(deps, boundary, path)
+    : covers(deps, boundary, path)
+}
+export async function filePathAllowed(deps: AccessDeps, scope: AccessScopesTable, path: string) {
   if (!scope.boundary_scope_id) return true
   const boundary = await deps.db
     .selectFrom('access_scopes')
@@ -199,7 +231,7 @@ export async function initializeScope(deps: AccessDeps, scope: AccessScopesTable
     .where('files.deleted_at', 'is', null)
     .execute()
   for (const file of files)
-    if (file.blob_sha && (await covers(deps, scope, file.path)))
+    if (file.blob_sha && (await covers(deps, scope, file.path, file.id)))
       await remember(deps.db, scope.id, {
         file_id: file.id,
         version_id: file.version_id,
@@ -246,10 +278,10 @@ export async function recordItem(
     // deletion. A genuinely deleted directory is different: its formerly visible
     // items produce final delete events, without authorizing any new content.
     const resolved = await effectiveScope(deps, { scope, space: { id: spaceId } })
-    if (resolved.scope.kind !== 'folder') continue
-    if (!resolved.active && !(deleted && (await folderWasDeleted(deps, scope)))) continue
+    if (resolved.scope.kind === 'group') continue
+    if (!resolved.active && !(deleted && (await selectorWasDeleted(deps, scope)))) continue
     const old = await member(deps.db, scope.id, item.file_id)
-    const visible = item.path !== '/' && (await covers(deps, scope, item.path))
+    const visible = item.path !== '/' && (await covers(deps, scope, item.path, item.file_id))
     let event: V2Change | undefined
     if (deleted && old) {
       event = {

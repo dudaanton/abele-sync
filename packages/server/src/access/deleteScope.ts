@@ -1,3 +1,4 @@
+import { resolveTokenItem, requireOwnerForItemServerDelete, detachItem } from './items.js'
 import { addDaily } from '../history/activity.js'
 import { randomUUID } from 'node:crypto'
 import {
@@ -24,10 +25,15 @@ const under = (path: string, root: string) =>
 export async function deleteScope(
   deps: CommitDeps & AccessDeps,
   key: string,
-  idempotencyKey: string
+  idempotencyKey: string,
+  itemId = deps.itemId
 ): Promise<V2DeleteScopeResponse> {
+  if (deps.itemId !== undefined && itemId !== deps.itemId)
+    throw new AbeleError('forbidden', 'scope_removed', { reason: 'scope_removed' })
   if (!idempotencyKey || idempotencyKey.length > 200)
     throw new AbeleError('invalid_request', 'invalid idempotency key')
+  const requestHash =
+    itemId === undefined ? DELETE_SCOPE_REQUEST_HASH : DELETE_SCOPE_REQUEST_HASH + ':item:' + itemId
   const initial = await findTokenByKey(deps, key)
   const outcome = await withVaultLock(deps.db, deps.dialect, initial.space_id, async (db) => {
     const access = { ...deps, db }
@@ -38,13 +44,32 @@ export async function deleteScope(
       .where('actor_id', '=', token.id)
       .where('key', '=', idempotencyKey)
       .executeTakeFirst()
-    if (receipt?.request_hash === DELETE_SCOPE_REQUEST_HASH) {
+    if (receipt?.request_hash === requestHash) {
       return {
         replayed: true,
         response: V2DeleteScopeResponseSchema.parse(JSON.parse(receipt.response)),
       }
     }
-    const p = await authenticateToken(access, key)
+    let p = await authenticateToken(access, key)
+    let itemToken = p.token
+    if (itemId !== undefined) {
+      const row = await db
+        .selectFrom('access_token_items')
+        .select('token_id')
+        .where('id', '=', itemId)
+        .executeTakeFirst()
+      const targetId =
+        row?.token_id ?? (itemId.startsWith('primary:') ? itemId.slice(8) : p.token.id)
+      itemToken = await requireOwnerForItemServerDelete(access, p, targetId)
+      const item = await resolveTokenItem(access, itemToken, itemId)
+      const scope = await db
+        .selectFrom('access_scopes')
+        .selectAll()
+        .where('id', '=', item.scope_id)
+        .where('space_id', '=', p.space.id)
+        .executeTakeFirstOrThrow()
+      p = { ...p, scope }
+    }
     requireWrite(p)
     const scope = await activeScope(access, p)
     if (receipt)
@@ -164,12 +189,29 @@ export async function deleteScope(
         .updateTable('access_tokens')
         .set({ revoked_at: at.toISOString(), scope_deleted_at: at.toISOString() })
         .where('space_id', '=', p.space.id)
-        .where('scope_id', '=', s)
+        .where((eb) =>
+          eb.or([
+            eb('scope_id', '=', s),
+            eb(
+              'id',
+              'in',
+              db
+                .selectFrom('access_token_items')
+                .select('token_id')
+                .where('scope_id', '=', s)
+                .where('removed_at', 'is', null)
+            ),
+          ])
+        )
         .where('revoked_at', 'is', null)
+        .$if(itemId !== undefined, (q) =>
+          q.where('id', '!=', p.token.id).where('id', '!=', itemToken.id)
+        )
         .returning('id')
         .execute()
       revoked.push(...rows.map((t) => t.id))
     }
+    if (itemId !== undefined) await detachItem(access, itemToken, itemId)
     const cursor = (
       await db
         .selectFrom('vault_seq')
@@ -203,7 +245,7 @@ export async function deleteScope(
       .values({
         actor_id: p.token.id,
         key: idempotencyKey,
-        request_hash: DELETE_SCOPE_REQUEST_HASH,
+        request_hash: requestHash,
         status: 200,
         response: JSON.stringify(response),
         created_at: at.toISOString(),

@@ -21,6 +21,7 @@ import {
   versionVisible,
   recordFileVersion,
   groupPathAllowed,
+  filePathAllowed,
 } from './visibility.js'
 import { indexVersion, qualifies, refreshGroups, ancestors } from './groups/graph.js'
 import {
@@ -40,6 +41,11 @@ export async function authorizeOp(
   requireWrite(principal)
   await activeScope({ ...deps, db: ctx.trx }, principal)
   const access = { ...deps, db: ctx.trx, configurationDirectories: ctx.configurationDirectories }
+  if (
+    principal.scope.kind === 'file' &&
+    ['create', 'mkdir', 'move_directory', 'delete_directory'].includes(op.op)
+  )
+    throw new AbeleError('forbidden', 'file items authorize only their existing file')
   const group = principal.scope.kind === 'group'
   if (group && (op.op === 'mkdir' || op.op === 'move_directory' || op.op === 'delete_directory'))
     throw new AbeleError('forbidden', 'groups do not authorize directory operations')
@@ -78,7 +84,11 @@ export async function authorizeOp(
   if (path !== undefined) {
     const allowed = group
       ? await groupPathAllowed(access, principal.scope, path)
-      : await covers(access, principal.scope, path)
+      : principal.scope.kind === 'file'
+        ? 'file_id' in op &&
+          op.file_id === principal.scope.target_id &&
+          (await filePathAllowed(access, principal.scope, path))
+        : await covers(access, principal.scope, path)
     if (!allowed) throw new AbeleError('forbidden', 'destination is outside this scope')
     if (op.op === 'create' || op.op === 'move') await validateDestination(ctx, path, false)
   }
@@ -193,7 +203,15 @@ export async function commitWithToken(
     keyed = {
       actorId: principal.token.id,
       key: idempotencyKey,
-      hash: createHash('sha256').update(JSON.stringify(requestIdentity)).digest('hex'),
+      hash: createHash('sha256')
+        .update(
+          JSON.stringify(
+            deps.itemId === undefined
+              ? requestIdentity
+              : { item: deps.itemId, request: requestIdentity }
+          )
+        )
+        .digest('hex'),
       ttlMs: 0,
       answer: (response) => ({ cursor: response.head_seq, results: response.results }),
       filed: false,
@@ -228,7 +246,10 @@ export async function commitWithToken(
             if (
               !(principal.scope.kind === 'group'
                 ? await groupPathAllowed(access, principal.scope, version.path)
-                : await covers(access, principal.scope, version.path))
+                : principal.scope.kind === 'file'
+                  ? version.fileId === principal.scope.target_id &&
+                    (await filePathAllowed(access, principal.scope, version.path))
+                  : await covers(access, principal.scope, version.path))
             )
               throw new Error('engine output escaped the authorized scope; roll back the batch')
           }

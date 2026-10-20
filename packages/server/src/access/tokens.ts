@@ -3,7 +3,7 @@ import {
   AbeleError,
   encodeAccessToken,
   V2IssueTokenRequestSchema,
-  V2AccessTokenSchema,
+  V1AccessTokenSchema,
   VaultSettingsSchema,
   type V2Connection,
   type V2IssueTokenRequest,
@@ -21,6 +21,7 @@ import { initializeScope, covers } from './visibility.js'
 import { groupContains } from './groups/graph.js'
 
 export interface AccessDeps {
+  itemId?: string
   db: Kysely<Database>
   pepper: string
   dialect?: Dialect
@@ -48,7 +49,7 @@ export async function createUser(
     spaceId = randomUUID(),
     rootId = randomUUID(),
     scopeId = randomUUID()
-  const value = V2AccessTokenSchema.parse({
+  const value = V1AccessTokenSchema.parse({
     v: 1,
     address,
     key,
@@ -133,6 +134,16 @@ export async function authenticateToken(deps: AccessDeps, key: string): Promise<
   return principalForToken(deps, await findTokenByKey(deps, key))
 }
 
+/** Token inventory only: a detached primary must not hide remaining/new items.
+ * Never use this principal to authorize content or grants. An explicit item is
+ * still checked normally, and revoked/disabled keys are always refused. */
+export async function authenticateTokenForInventory(
+  deps: AccessDeps,
+  key: string
+): Promise<TokenPrincipal> {
+  return principalForToken(deps, await findTokenByKey(deps, key), true)
+}
+
 /** Secret proof only. Never authorizes content: scope-delete receipts are its sole exception. */
 export async function findTokenByKey(
   deps: AccessDeps,
@@ -177,7 +188,8 @@ export async function authenticateTokenId(
 }
 async function principalForToken(
   deps: AccessDeps,
-  token: Selectable<AccessTokensTable>
+  token: Selectable<AccessTokensTable>,
+  inventory = false
 ): Promise<TokenPrincipal> {
   if (token.scope_deleted_at !== null)
     throw new AbeleError('scope_deleted', 'Deleted on the server')
@@ -197,17 +209,22 @@ async function principalForToken(
     .executeTakeFirst()
   if (space === undefined || space.disabled_at !== null || space.deleted_at !== null)
     throw new AbeleError('unauthorized', 'access is disabled')
+  const { resolveTokenItem } = await import('./items.js')
+  const scopeId =
+    inventory && deps.itemId === undefined
+      ? token.scope_id
+      : (await resolveTokenItem(deps, token, deps.itemId)).scope_id
   const scope = await deps.db
     .selectFrom('access_scopes')
     .selectAll()
-    .where('id', '=', token.scope_id)
+    .where('id', '=', scopeId)
     .where('space_id', '=', token.space_id)
     .executeTakeFirst()
   if (scope === undefined) throw new AbeleError('unauthorized', 'access token has no scope')
   return { token, space, scope }
 }
 
-async function selector(
+export async function selector(
   deps: AccessDeps,
   spaceId: string,
   requested: V2Selector
@@ -224,25 +241,41 @@ async function selector(
   }
   const note = await deps.db
     .selectFrom('files')
-    .select(['id', 'path'])
+    .select(['id', 'path', 'kind'])
     .where('id', '=', requested.id)
     .where('vault_id', '=', spaceId)
-    .where('kind', '=', 'note')
     .where('deleted_at', 'is', null)
     .executeTakeFirst()
-  return note === undefined ? null : { kind: 'group', id: note.id, path: note.path }
+  return note === undefined || (requested.kind === 'group' && note.kind !== 'note')
+    ? null
+    : { kind: requested.kind, id: note.id, path: note.path }
 }
 
 /** Stable directory ancestry and indexed group reachability, not a credential chain. */
-async function contained(
+export async function contained(
   deps: AccessDeps,
   space: string,
   child: V2Scope,
   parent: V2Scope
 ): Promise<boolean> {
   if (child.kind === parent.kind && child.id === parent.id) return true
+  if (parent.kind === 'file') return false
   if (parent.kind === 'group')
-    return child.kind === 'group' && (await groupContains(deps, space, parent.id, child.id))
+    return child.kind === 'file'
+      ? await covers(
+          deps,
+          {
+            id: 'containment',
+            space_id: space,
+            kind: 'group',
+            target_id: parent.id,
+            boundary_scope_id: null,
+            effective_key: 'containment',
+          },
+          child.path,
+          child.id
+        )
+      : child.kind === 'group' && (await groupContains(deps, space, parent.id, child.id))
   let nodeId: string | undefined
   if (child.kind === 'folder') nodeId = child.id
   else {
@@ -342,12 +375,13 @@ export async function rootAuthority(deps: AccessDeps, principal: TokenPrincipal)
 }
 
 /** Serialize management writes per space on PG, then reauthenticate under that lock. */
-async function mutation<T>(
+export async function mutation<T>(
   deps: AccessDeps,
   key: string,
-  run: (deps: AccessDeps, principal: TokenPrincipal) => Promise<T>
+  run: (deps: AccessDeps, principal: TokenPrincipal) => Promise<T>,
+  authenticate = authenticateToken
 ): Promise<T> {
-  const initial = await authenticateToken(deps, key)
+  const initial = await authenticate(deps, key)
   return withVaultLock(deps.db, deps.dialect ?? 'sqlite', initial.space.id, async (db) => {
     if (deps.dialect === 'pg')
       await db
@@ -357,7 +391,7 @@ async function mutation<T>(
         .forUpdate()
         .executeTakeFirstOrThrow()
     const transactional = { ...deps, db }
-    return run(transactional, await authenticateToken(transactional, key))
+    return run(transactional, await authenticate(transactional, key))
   })
 }
 export async function issueToken(
@@ -376,57 +410,7 @@ export async function issueFromPrincipal(
   input: V2IssueTokenRequest
 ): Promise<V2IssueTokenResponse> {
   const request = V2IssueTokenRequestSchema.parse(input)
-  const current = await effectiveScope(deps, principal)
-  if (!current.active)
-    throw new AbeleError('scope_unavailable', 'this scope or its inherited boundary is unavailable')
-  const requested = await selector(deps, principal.space.id, request.scope)
-  if (requested === null || !(await contained(deps, principal.space.id, requested, current.scope)))
-    throw denied()
-  const same = requested.kind === current.scope.kind && requested.id === current.scope.id
-  const proposed = same
-    ? principal.scope
-    : {
-        id: randomUUID(),
-        space_id: principal.space.id,
-        kind: requested.kind,
-        target_id: requested.id,
-        boundary_scope_id: principal.scope.id,
-        effective_key: '(proposed)',
-      }
-  // Validate all inherited selectors before writing cache/token rows or returning
-  // the display path. Immediate group reachability alone may include private notes.
-  if (
-    !(await effectiveScope(deps, { scope: proposed, space: principal.space })).active ||
-    (requested.kind === 'group' &&
-      !(await covers(deps, principal.scope, requested.path, requested.id)))
-  )
-    throw denied()
-  let scope = principal.scope
-  let freshScope = false
-  if (requested.kind !== current.scope.kind || requested.id !== current.scope.id) {
-    const effectiveKey = `${requested.kind}:${requested.id}:${principal.scope.id}`
-    const inserted = await deps.db
-      .insertInto('access_scopes')
-      .values({
-        id: randomUUID(),
-        space_id: principal.space.id,
-        kind: requested.kind,
-        target_id: requested.id,
-        boundary_scope_id: principal.scope.id,
-        effective_key: effectiveKey,
-      })
-      .onConflict((oc) => oc.columns(['space_id', 'effective_key']).doNothing())
-      .returning('id')
-      .executeTakeFirst()
-    freshScope = inserted !== undefined
-    scope = await deps.db
-      .selectFrom('access_scopes')
-      .selectAll()
-      .where('space_id', '=', principal.space.id)
-      .where('effective_key', '=', effectiveKey)
-      .executeTakeFirstOrThrow()
-  }
-  if (freshScope) await initializeScope(deps, scope)
+  const { scope, requested } = await grantScope(deps, principal, request.scope)
   const secret = randomBytes(32).toString('base64url')
   const token: Selectable<AccessTokensTable> = {
     id: randomUUID(),
@@ -445,12 +429,23 @@ export async function issueFromPrincipal(
   }
   await deps.db.insertInto('access_tokens').values(token).execute()
   return {
-    token: encodeAccessToken({
-      v: 1,
-      address: principal.space.address,
-      key: secret,
-      scope: requested,
-    }),
+    token: encodeAccessToken(
+      requested.kind === 'file'
+        ? {
+            v: 2,
+            address: principal.space.address,
+            key: secret,
+            items: [
+              { id: 'primary:' + token.id, kind: 'file', scope_id: scope.id, path: requested.path },
+            ],
+          }
+        : {
+            v: 1,
+            address: principal.space.address,
+            key: secret,
+            scope: { ...requested, kind: requested.kind },
+          }
+    ),
     info: info(token, requested),
   }
 }
@@ -533,4 +528,65 @@ function info(token: Selectable<AccessTokensTable>, scope: V2Scope): V2TokenInfo
     revoked_at: token.revoked_at,
     read_only: token.read_only === 1,
   }
+}
+
+/** Same containment and inherited visibility checks for issuance and item additions. */
+export async function grantScope(
+  deps: AccessDeps,
+  principal: TokenPrincipal,
+  requestedSelector: V2Selector
+) {
+  const current = await effectiveScope(deps, principal)
+  if (!current.active)
+    throw new AbeleError('scope_unavailable', 'this scope or its inherited boundary is unavailable')
+  const requested = await selector(deps, principal.space.id, requestedSelector)
+  if (requested === null || !(await contained(deps, principal.space.id, requested, current.scope)))
+    throw denied()
+  const same = requested.kind === current.scope.kind && requested.id === current.scope.id
+  const proposed = same
+    ? principal.scope
+    : {
+        id: randomUUID(),
+        space_id: principal.space.id,
+        kind: requested.kind,
+        target_id: requested.id,
+        boundary_scope_id: principal.scope.id,
+        effective_key: '(proposed)',
+      }
+  // Validate all inherited selectors before writing cache/token rows or returning
+  // the display path. Immediate group reachability alone may include private notes.
+  if (
+    !(await effectiveScope(deps, { scope: proposed, space: principal.space })).active ||
+    (requested.kind !== 'folder' &&
+      !(await covers(deps, principal.scope, requested.path, requested.id)))
+  )
+    throw denied()
+  let scope = principal.scope
+  let freshScope = false
+  if (requested.kind !== current.scope.kind || requested.id !== current.scope.id) {
+    const effectiveKey = `${requested.kind}:${requested.id}:${principal.scope.id}`
+    const inserted = await deps.db
+      .insertInto('access_scopes')
+      .values({
+        id: randomUUID(),
+        space_id: principal.space.id,
+        kind: requested.kind,
+        target_id: requested.id,
+        boundary_scope_id: principal.scope.id,
+        effective_key: effectiveKey,
+      })
+      .onConflict((oc) => oc.columns(['space_id', 'effective_key']).doNothing())
+      .returning('id')
+      .executeTakeFirst()
+    freshScope = inserted !== undefined
+    scope = await deps.db
+      .selectFrom('access_scopes')
+      .selectAll()
+      .where('space_id', '=', principal.space.id)
+      .where('effective_key', '=', effectiveKey)
+      .executeTakeFirstOrThrow()
+  }
+  if (freshScope) await initializeScope(deps, scope)
+
+  return { scope, requested }
 }
