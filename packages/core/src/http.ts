@@ -22,6 +22,7 @@ export interface ClientOptions {
   WebSocket?: typeof WebSocket
   /** The bearer key of this token connection. The transport never infers access from it. */
   token: string
+  item?: string
   userAgent?: string
   /** Above this, `putBlob` uploads in parts rather than in one request. */
   simpleUploadBytes?: number
@@ -156,6 +157,7 @@ export class Http {
     tolerate: readonly number[] = []
   ): Promise<Response> {
     const headers: Record<string, string> = { ...init.headers }
+    if (this.opts.item !== undefined) headers['abele-scope-item'] = this.opts.item
     headers[V2_CAPABILITIES_HEADER] = V2_READ_ONLY_CAPABILITY
     if (this.generation !== undefined) headers[RESTORE_GENERATION_HEADER] = this.generation
     if (this.opts.token !== '') headers['authorization'] = `Bearer ${this.opts.token}`

@@ -15,11 +15,11 @@ export const V2_READ_ONLY_CAPABILITY = 'read-only'
 const id = z.string().min(1).max(200)
 const integer = z.number().int().nonnegative().safe()
 const timestamp = z.string().datetime({ offset: true })
-export const V2SelectorSchema = z.object({ kind: z.enum(['folder', 'group']), id }).strict()
+export const V2SelectorSchema = z.object({ kind: z.enum(['folder', 'group', 'file']), id }).strict()
 export type V2Selector = z.infer<typeof V2SelectorSchema>
 export const V2ScopeSchema = V2SelectorSchema.extend({ path: PathSchema }).strict()
 export type V2Scope = z.infer<typeof V2ScopeSchema>
-export const V2AccessTokenSchema = z
+export const V1AccessTokenSchema = z
   .object({
     v: z.literal(1),
     address: z
@@ -31,9 +31,31 @@ export const V2AccessTokenSchema = z
       })
       .transform((value) => normalizeServerUrl(value)!),
     key: z.string().regex(/^[A-Za-z0-9_-]{43}$/, 'token key must be a 256-bit base64url secret'),
-    scope: V2ScopeSchema,
+    scope: V2ScopeSchema.extend({ kind: z.enum(['folder', 'group']) }).strict(),
   })
   .strict()
+export const V2ScopeItemPreviewSchema = z
+  .object({ id, kind: z.enum(['folder', 'group', 'file']), scope_id: id, path: PathSchema })
+  .strict()
+export const V2SetAccessTokenSchema = V1AccessTokenSchema.omit({ v: true, scope: true })
+  .extend({
+    v: z.literal(2),
+    items: z.array(V2ScopeItemPreviewSchema).min(1),
+  })
+  .strict()
+export const V2AccessTokenSchema = z.union([V1AccessTokenSchema, V2SetAccessTokenSchema])
+export const V2ScopeItemSchema = z
+  .object({
+    id,
+    scope_id: id,
+    scope: V2ScopeSchema,
+    added_at: timestamp,
+    removed_at: timestamp.nullable(),
+  })
+  .strict()
+export const V2ScopeItemsResponseSchema = z.object({ items: z.array(V2ScopeItemSchema) }).strict()
+export const V2AddScopeItemRequestSchema = z.object({ scope: V2SelectorSchema }).strict()
+export const V2RemoveScopeItemResponseSchema = z.object({ removed: z.literal(true) }).strict()
 export type V2AccessToken = z.infer<typeof V2AccessTokenSchema>
 
 /** Portable to the plugin/mobile host; no Node Buffer dependency. QR carries this exact text. */

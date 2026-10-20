@@ -29,6 +29,7 @@ it('001 local user create prints a root token usable without account/device regi
   expect(errors).toEqual([])
   expect(lines).toHaveLength(1)
   const token = decodeAccessToken(lines[0]!)
+  if (token.v !== 1) throw new Error('root provisioning must retain the legacy payload')
   expect(token.address).toBe('https://sync.example')
   expect(token.scope.path).toBe('/')
   const db = createDb(env.ABELE_DATABASE_URL)

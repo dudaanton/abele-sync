@@ -66,9 +66,11 @@ export class V2EngineClient implements EngineClient {
     string,
     { size: number; mtime: number; sha: string; links: string[] }
   >()
+  private readonly item: string | undefined
   readonly token: V2AccessToken
   constructor(encoded: string, options: Omit<ClientOptions, 'baseUrl' | 'token'>) {
     this.token = decodeAccessToken(encoded)
+    this.item = options.item
     this.http = new Http({ ...options, baseUrl: this.token.address, token: this.token.key })
   }
   async connection() {
@@ -80,8 +82,12 @@ export class V2EngineClient implements EngineClient {
   }
   includes(path: string) {
     path = path.normalize('NFC')
-    const scope = this.connectionInfo?.scope ?? this.token.scope
-    if (scope.kind === 'group')
+    const preview =
+      this.token.v === 1
+        ? this.token.scope
+        : (this.token.items.find((i) => i.id === this.item) ?? this.token.items[0]!)
+    const scope = this.connectionInfo?.scope ?? preview
+    if (scope.kind !== 'folder')
       return (
         !path.startsWith('.obsidian/') &&
         (this.localGroupPaths.has(path) || (!this.departed.has(path) && this.files.has(path)))
@@ -688,7 +694,14 @@ export class V2EngineClient implements EngineClient {
   subscribe(onSeq: (seq: number) => void, onClose: (reason: string) => void) {
     const Socket = this.http.socketClass()
     const socket = new Socket(this.http.socketUrl('/v2/events'))
-    socket.addEventListener('open', () => socket.send(JSON.stringify({ token: this.token.key })))
+    socket.addEventListener('open', () =>
+      socket.send(
+        JSON.stringify({
+          token: this.token.key,
+          ...(this.item === undefined ? {} : { item: this.item }),
+        })
+      )
+    )
     socket.addEventListener('message', (event) => {
       let raw: unknown
       try {
