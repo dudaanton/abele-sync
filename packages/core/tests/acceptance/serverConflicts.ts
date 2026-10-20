@@ -1,4 +1,6 @@
 import { expect } from 'vitest'
+import { isDeepStrictEqual } from 'node:util'
+import { sha256 } from '../../src/hash.js'
 import { V2SyncClient } from '@abele/sync-server/tests/helpers/v2SyncClient.js'
 import type { AcceptanceFixture } from './fixture.js'
 
@@ -7,6 +9,81 @@ export const conflictServerFacets = new Set(Array.from({ length: 10 }, (_, i) =>
 export async function settle(f: AcceptanceFixture, rounds = 5) {
   for (let round = 0; round < rounds; round++)
     for (const d of f.devices) for (const id of d.connections.keys()) await d.sync(id)
+}
+
+/** Drive completed syncs until every replica and ledger has the expected note.
+ * Bound work by rounds, not a polling clock; an unchanged wrong merge still fails.
+ */
+async function settleMerged(
+  f: AcceptanceFixture,
+  owners: V2SyncClient[],
+  path: string,
+  text: string,
+  rounds: number
+) {
+  const sha = await sha256(new TextEncoder().encode(text))
+  const expected = {
+    servers: owners.map(() => [{ path, sha }]),
+    devices: f.devices.map((device) => ({
+      paths: [path],
+      text,
+      connections: [...device.connections].map(() => ({
+        sha,
+        currentVersion: true,
+        pending: 0,
+        status: 'idle',
+        journal: null,
+      })),
+    })),
+  }
+  let observed: unknown
+  for (let round = 0; round < rounds; round++) {
+    await settle(f, 1)
+    const heads = await Promise.all(
+      owners.map(async (owner) =>
+        (await owner.manifest()).items.filter((item) => item.path.startsWith('Notes/'))
+      )
+    )
+    const devices = []
+    for (const device of f.devices) {
+      const paths = []
+      for await (const item of device.fs.list())
+        if (item.path.startsWith('Notes/')) paths.push(item.path)
+      const connections = []
+      for (const connection of device.connections.values()) {
+        const { state, engine } = connection.binding
+        const entry = await state.get(path)
+        const server = f.servers.findIndex(
+          (server) => server.address === connection.access.token.address
+        )
+        connections.push({
+          sha: entry?.sha ?? null,
+          currentVersion:
+            entry !== null &&
+            entry.versionId === heads[server]?.find((item) => item.path === path)?.version_id,
+          pending: engine.status.pending,
+          status: engine.status.state,
+          journal: await state.getJournal(),
+        })
+      }
+      devices.push({
+        paths: paths.sort(),
+        text: (await device.fs.stat(path)) === null ? null : await device.text(path),
+        connections,
+      })
+    }
+    observed = {
+      servers: heads.map((items) =>
+        items.map((item) => ({ path: item.path, sha: 'sha' in item ? item.sha : null }))
+      ),
+      devices,
+    }
+    if (isDeepStrictEqual(observed, expected)) return
+  }
+  expect(
+    observed,
+    `note replicas and ledgers did not converge after ${rounds} completed rounds`
+  ).toEqual(expected)
 }
 
 export async function counts(f: AcceptanceFixture) {
@@ -52,7 +129,8 @@ export async function conflictServerFacet(number: number, f: AcceptanceFixture) 
     prefix = '---\ngroups: ["[[Groups/One]]", "[[Groups/Two]]"]\ncustom: kept\n---\n'
   }
   await a!.write(path, prefix + 'base\ntail\n')
-  await settle(f)
+  if (number === 91) await settleMerged(f, owners, path, 'base\ntail\n', 5)
+  else await settle(f)
   const first = prefix + (number === 94 ? 'first\nFIRST\n' : 'first\ntail\n')
   const second =
     prefix +
@@ -94,7 +172,8 @@ export async function conflictServerFacet(number: number, f: AcceptanceFixture) 
   // This measures forwarding one resolved conflict, not independent resolutions
   // on both servers (whose first-arrival winners can legitimately differ).
   await c!.sync('server-2')
-  await settle(f, 7)
+  if (number === 91) await settleMerged(f, owners, path, 'first\nTAIL\n', 7)
+  else await settle(f, 7)
   const snapshots = await Promise.all(owners.map(async (o) => (await o.manifest()).items))
   const notes = snapshots.map((items) => items.filter((i) => i.path.startsWith('Notes/')))
   const merged = number === 91 || number === 93
@@ -141,7 +220,8 @@ export async function conflictServerFacet(number: number, f: AcceptanceFixture) 
   }
   const before = await counts(f)
   await c!.restart()
-  await settle(f, 3)
+  if (number === 91) await settleMerged(f, owners, path, 'first\nTAIL\n', 3)
+  else await settle(f, 3)
   expect(await counts(f)).toEqual(before)
   for (const d of f.devices)
     expect((await Promise.all(paths.map((p) => d.text(p)))).sort()).toEqual(expected)

@@ -16,10 +16,11 @@ describe.each(process.env.ABELE_TEST_PG_URL ? (['sqlite', 'pg'] as const) : (['s
             await f.close()
           }
         },
-        // Facet 99 also provisions and verifies three groups on each server.
+        // Facet 91 waits for replica/ledger convergence; facet 99 also provisions
+        // and verifies three groups on each server.
         // Scheduling delays under load must not consume its ordinary 20s budget;
         // all variant, privacy, forwarding and post-restart idle assertions stay exact.
-        dialect === 'pg' || number === 99 ? 60_000 : 20_000
+        dialect === 'pg' || number === 91 || number === 99 ? 60_000 : 20_000
       )
   }
 )

@@ -59,7 +59,14 @@ for (const dialect of process.env.ABELE_TEST_PG_URL
               await conflictServerFacet(scenario.number, fixture)
             else await remainingServerFacet(scenario.number, fixture)
           },
-          scenario.number === 107 ? MANY_FILES_MS : dialect === 'pg' ? 60_000 : 20_000
+          // 091 provisions two servers and six ledgers. Its condition-driven
+          // convergence must not share the ordinary 20s infrastructure budget
+          // when other workers compete for CPU; merge assertions stay exact.
+          scenario.number === 107
+            ? MANY_FILES_MS
+            : dialect === 'pg' || scenario.number === 91
+              ? 60_000
+              : 20_000
         )
       } else {
         // 117–124 are physical-iPhone/plugin UI obligations, not missing SQL/core facets.
