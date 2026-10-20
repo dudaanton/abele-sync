@@ -122,6 +122,32 @@ implicit primary item, and removed items remain listed with `removed_at`.
 `abele-client-capabilities: token-item-count`. It counts non-removed items,
 including an attached implicit primary; scope availability and token revocation
 do not change that count. Without the capability the strict legacy shape is preserved.
+
+Owner confirmation dialogs can use `GET /v2/tokens/:id/items/:item/preview` and
+`GET /v2/tokens/:id/preview`, with the same issuer/whole-vault authorization as
+the item inventory. These read-only routes resolve the target independently of
+the caller's item header; they do not grant content or deletion authority.
+The item response extends the inventory item with `status` (`active`,
+`scope_unavailable` or `removed`), `file_count`, `total_bytes`, and `files`.
+Each file is `{file_id,path,bytes,overlap_count,overlaps}`. Totals cover all live
+file heads currently covered by the item, including inherited boundaries;
+directories, deleted files and retained history are excluded. Removed or
+unavailable items have empty coverage. Whole-token responses contain
+`{token_id,file_count,total_bytes,items}`; their totals deduplicate file identities
+across items. Each item's totals remain independent.
+
+`?limit=100` controls the path list **per item** (default 100, maximum 500).
+Files are ordered by current path and identity. `file_count` always gives the
+uncapped total. For group items, each returned file's `overlaps` lists up to 20
+other live grants as `{token_id,item_id,scope_id,scope:{kind,id,path}}`, enough
+to identify another group by its current path. `overlap_count` gives the full
+number of such grants. Folder and file item previews have empty overlap lists.
+Overlap includes implicit primaries and items of any non-revoked key in the same
+vault, excluding the exact target token/item pair, detached items, unavailable
+scopes and orphan scopes. Different tokens sharing the same scope remain
+different grants. Totals and overlap use one vault-serialized snapshot; group
+membership, renames or content may change before a subsequent deletion, which
+still performs its own authorization and coverage checks.
 Addition uses the same containment and inherited `covers` checks as issuance;
 read-only access cannot become writable. Duplicates and folders/files already
 covered by a live folder item are refused with `forbidden`. A broader folder

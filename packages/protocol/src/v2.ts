@@ -58,6 +58,45 @@ export const V2ScopeItemsResponseSchema = z.object({ items: z.array(V2ScopeItemS
 /** Owner inventory uses the identical item/state representation as holder inventory. */
 export const V2TokenItemsResponseSchema = V2ScopeItemsResponseSchema
 export type V2TokenItemsResponse = z.infer<typeof V2TokenItemsResponseSchema>
+export const V2_PREVIEW_FILE_LIMIT = 500
+export const V2_PREVIEW_OVERLAP_LIMIT = 20
+export const V2ContentPreviewQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().positive().max(V2_PREVIEW_FILE_LIMIT).default(100),
+  })
+  .strict()
+export const V2ItemContentPreviewSchema = V2ScopeItemSchema.extend({
+  status: z.enum(['active', 'scope_unavailable', 'removed']),
+  file_count: integer,
+  total_bytes: integer,
+  files: z
+    .array(
+      z
+        .object({
+          file_id: id,
+          path: PathSchema,
+          bytes: integer,
+          overlap_count: integer,
+          overlaps: z
+            .array(
+              z.object({ token_id: id, item_id: id, scope_id: id, scope: V2ScopeSchema }).strict()
+            )
+            .max(V2_PREVIEW_OVERLAP_LIMIT),
+        })
+        .strict()
+    )
+    .max(V2_PREVIEW_FILE_LIMIT),
+}).strict()
+export const V2TokenContentPreviewSchema = z
+  .object({
+    token_id: id,
+    file_count: integer,
+    total_bytes: integer,
+    items: z.array(V2ItemContentPreviewSchema),
+  })
+  .strict()
+export type V2TokenContentPreview = z.infer<typeof V2TokenContentPreviewSchema>
+export type V2ItemContentPreview = z.infer<typeof V2ItemContentPreviewSchema>
 export const V2AddScopeItemRequestSchema = z.object({ scope: V2SelectorSchema }).strict()
 export const V2RemoveScopeItemResponseSchema = z.object({ removed: z.literal(true) }).strict()
 export type V2AccessToken = z.infer<typeof V2AccessTokenSchema>

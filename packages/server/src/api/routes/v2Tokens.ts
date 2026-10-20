@@ -1,4 +1,5 @@
 import { addItem, removeItem, listItems, itemCounts } from '../../access/items.js'
+import { previewTokenContent } from '../../access/contentPreview.js'
 import { recordUse } from '../../history/activity.js'
 import {
   AbeleError,
@@ -7,6 +8,7 @@ import {
   V2_CAPABILITIES_HEADER,
   V2_READ_ONLY_CAPABILITY,
   V2_TOKEN_ITEM_COUNT_CAPABILITY,
+  V2ContentPreviewQuerySchema,
 } from '@abele/sync-protocol'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import {
@@ -132,6 +134,30 @@ export function registerV2TokenRoutes(app: FastifyInstance, deps: AppDeps): void
   app.get<{ Params: { id: string } }>('/v2/tokens/:id/items', async (request) =>
     listItems(accessDeps(deps, request), bearerKey(request), request.params.id)
   )
+  app.get<{ Params: { id: string; item: string } }>(
+    '/v2/tokens/:id/items/:item/preview',
+    async (request) => {
+      const { limit } = V2ContentPreviewQuerySchema.parse(request.query)
+      return (
+        await previewTokenContent(
+          accessDeps(deps, request),
+          bearerKey(request),
+          request.params.id,
+          limit,
+          request.params.item
+        )
+      ).items[0]!
+    }
+  )
+  app.get<{ Params: { id: string } }>('/v2/tokens/:id/preview', async (request) => {
+    const { limit } = V2ContentPreviewQuerySchema.parse(request.query)
+    return previewTokenContent(
+      accessDeps(deps, request),
+      bearerKey(request),
+      request.params.id,
+      limit
+    )
+  })
   app.post<{ Params: { id: string } }>('/v2/tokens/:id/items', async (request, reply) => {
     const input = V2AddScopeItemRequestSchema.parse(request.body)
     return reply

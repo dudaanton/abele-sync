@@ -60,3 +60,37 @@ it('negotiates item counts and preserves them in token listings', async () => {
     'abele-client-capabilities': 'read-only,token-item-count',
   })
 })
+
+it('previews issued content with encoded selectors and a bounded path request', async () => {
+  const item = {
+    id: 'item',
+    scope_id: 'scope',
+    scope: { kind: 'group', id: 'group', path: 'G.md' },
+    added_at: '2026-10-20T00:00:00.000Z',
+    removed_at: null,
+    status: 'active',
+    file_count: 3,
+    total_bytes: 10,
+    files: [],
+  }
+  const token = { token_id: 'child', file_count: 3, total_bytes: 10, items: [item] }
+  const fetch = vi
+    .fn<typeof globalThis.fetch>()
+    .mockResolvedValueOnce(Response.json(item))
+    .mockResolvedValueOnce(Response.json(token))
+  const client = new AccessClient(
+    {
+      v: 1,
+      address: 'https://example.test',
+      key: 'a'.repeat(43),
+      scope: { kind: 'folder', id: 'root', path: '/' },
+    },
+    { fetch }
+  )
+  expect(await client.previewTokenItem('child/id', 'item/id', { limit: 1 })).toEqual(item)
+  expect(await client.previewToken('child/id', { limit: 1 })).toEqual(token)
+  expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+    'https://example.test/v2/tokens/child%2Fid/items/item%2Fid/preview?limit=1',
+    'https://example.test/v2/tokens/child%2Fid/preview?limit=1',
+  ])
+})

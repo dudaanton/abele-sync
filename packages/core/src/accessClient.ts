@@ -7,6 +7,9 @@ import {
   V2TokensResponseSchema,
   V2RevokeTokenResponseSchema,
   V2TokenItemsResponseSchema,
+  V2ItemContentPreviewSchema,
+  V2TokenContentPreviewSchema,
+  V2ContentPreviewQuerySchema,
   type V2AccessToken,
   type V2IssueTokenRequest,
 } from '@abele/sync-protocol'
@@ -49,6 +52,22 @@ export class AccessClient {
       V2RevokeTokenResponseSchema,
       'DELETE',
       `/v2/tokens/${encodeURIComponent(id)}`
+    )
+  }
+  previewTokenItem(id: string, item: string, options: { limit?: number } = {}) {
+    return this.http.json(
+      V2ItemContentPreviewSchema,
+      'GET',
+      `/v2/tokens/${encodeURIComponent(id)}/items/${encodeURIComponent(item)}/preview`,
+      { query: V2ContentPreviewQuerySchema.parse(options) }
+    )
+  }
+  previewToken(id: string, options: { limit?: number } = {}) {
+    return this.http.json(
+      V2TokenContentPreviewSchema,
+      'GET',
+      `/v2/tokens/${encodeURIComponent(id)}/preview`,
+      { query: V2ContentPreviewQuerySchema.parse(options) }
     )
   }
 }
