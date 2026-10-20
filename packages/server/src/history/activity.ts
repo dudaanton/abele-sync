@@ -1,6 +1,6 @@
 import { isIP } from 'node:net'
 import { sql, type Kysely } from 'kysely'
-import type { FastifyRequest, FastifyInstance } from 'fastify'
+import type { FastifyReply, FastifyRequest, FastifyInstance } from 'fastify'
 import type { Database } from '../db/schema.js'
 import type { AppDeps } from '../api/app.js'
 import type { TokenPrincipal } from '../access/tokens.js'
@@ -90,20 +90,52 @@ export async function addDaily(
     )
     .execute()
 }
+const downloadRoute = /^\/v2\/files\/[^/?]+\/content(?:\?|$)/
+
+/**
+ * Count the body bytes the socket has accepted. A client that has read the whole
+ * Content-Length body may close the connection before the source stream ends and
+ * the server calls end(); the response then closes without 'finish', although
+ * every byte was delivered. The write callback is the same signal 'finish' rests on.
+ */
+function countFlushedBody(raw: FastifyReply['raw']) {
+  const flushed = { bytes: 0 }
+  const write = raw.write
+  raw.write = function (this: typeof raw, chunk: unknown, ...rest: unknown[]) {
+    const done =
+      typeof rest.at(-1) === 'function' ? (rest.pop() as (e?: Error | null) => void) : undefined
+    const size =
+      typeof chunk === 'string'
+        ? Buffer.byteLength(
+            chunk,
+            typeof rest[0] === 'string' ? (rest[0] as BufferEncoding) : 'utf8'
+          )
+        : ArrayBuffer.isView(chunk)
+          ? chunk.byteLength
+          : 0
+    return Reflect.apply(write, this, [
+      chunk,
+      rest[0],
+      (error?: Error | null) => {
+        if (!error) flushed.bytes += size
+        done?.(error)
+      },
+    ]) as boolean
+  } as typeof raw.write
+  return flushed
+}
+
 export function registerActivity(app: FastifyInstance, deps: AppDeps) {
-  const completed = new WeakSet<FastifyRequest>()
-  app.addHook('onRequest', async (request, reply) => {
-    // onResponse also runs on response errors. Remember the actual finish event
-    // before Fastify dispatches onResponse: writableFinished can still be false
-    // during that event depending on Node/socket write-callback ordering.
-    reply.raw.prependOnceListener('finish', () => completed.add(request))
-  })
   // Keep exact totals, but coalesce transfer telemetry independently of request volume.
   // The map and each in-flight batch have a fixed bound; no per-request timer or queue.
   const pending = new Map<string, { vaultId: string; tokenId: string; at: Date; deltas: Deltas }>()
   // Publish the first sample immediately so a newly used connection is visible to
   // the operator. Bound this cache too; eviction can cause another immediate sample.
   const sampled = new Set<string>()
+  // Responses still open, each settled once its counters are recorded. A response
+  // can close after shutdown began (the server destroys its socket); onClose waits
+  // for these before draining, so neither the decision nor its write is lost.
+  const open = new Set<Promise<void>>()
   let flushing: Promise<void> | undefined
   const flush = (): Promise<void> => {
     if (flushing) return flushing
@@ -128,16 +160,17 @@ export function registerActivity(app: FastifyInstance, deps: AppDeps) {
   timer.unref()
   app.addHook('onClose', async () => {
     clearInterval(timer)
+    while (open.size) await Promise.all(open)
     await flushing
     if (pending.size) await flush()
   })
-  app.addHook('onResponse', async (request, reply) => {
+  const record = async (request: FastifyRequest, reply: FastifyReply, completed: boolean) => {
     const actor = request.tokenActivity
-    if (!completed.delete(request) || !actor || reply.statusCode >= 300) return
+    if (!completed || !actor || reply.statusCode >= 300) return
     let deltas = request.transferActivity
     if (
       request.method === 'GET' &&
-      /^\/v2\/files\/[^/?]+\/content(?:\?|$)/.test(request.url) &&
+      downloadRoute.test(request.url) &&
       (reply.statusCode === 200 || reply.statusCode === 206)
     ) {
       deltas = {
@@ -167,6 +200,36 @@ export function registerActivity(app: FastifyInstance, deps: AppDeps) {
     for (const field of dailyFields)
       if (deltas[field] !== undefined)
         item.deltas[field] = (item.deltas[field] ?? 0) + deltas[field]
+  }
+  app.addHook('onRequest', async (request, reply) => {
+    const raw = reply.raw
+    // Decide on 'close', which every response emits exactly once, after 'finish'
+    // when there is one. Fastify's onResponse runs only on 'finish' or 'error':
+    // it also runs for failed responses, and never for one closed before end().
+    let finished = false
+    raw.prependOnceListener('finish', () => {
+      finished = true
+    })
+    const flushed =
+      request.method === 'GET' && downloadRoute.test(request.url)
+        ? countFlushedBody(raw)
+        : undefined
+    let settle!: () => void
+    const settled = new Promise<void>((resolve) => {
+      settle = resolve
+    })
+    open.add(settled)
+    raw.once('close', () => {
+      // A Content-Length body that the socket fully accepted was delivered, even
+      // if the source had not ended yet. A shorter one (an abort, a stream error)
+      // was not.
+      const declared = Number(reply.getHeader('content-length') ?? raw.getHeader('content-length'))
+      const delivered = !!flushed && raw.headersSent && declared > 0 && flushed.bytes >= declared
+      void record(request, reply, finished || delivered).finally(() => {
+        open.delete(settled)
+        settle()
+      })
+    })
   })
 }
 export async function listDaily(

@@ -159,4 +159,80 @@ for (const dialect of ['sqlite', 'pg'] as const)
         await f.close()
       }
     })
+    it('counts a download whose client has every byte before the server ends the response', async () => {
+      // A client that has read the whole Content-Length body may close the
+      // connection before the server's pipe calls end(): the response then
+      // closes without 'finish'. Every byte was delivered, so it is a download.
+      const f = await tokenFixture(dialect)
+      const app = Fastify()
+      const bodies = new Map<string, PassThrough>()
+      const responsesClosed = new Map<string, Promise<void>>()
+      let finishes = 0
+      app.addHook('onRequest', async (request, reply) => {
+        request.tokenActivity = { vaultId: f.space, tokenId: f.share.info.id }
+        reply.raw.once('finish', () => {
+          finishes++
+        })
+      })
+      registerActivity(app, {
+        db: f.t.db,
+        config: f.t.config,
+        store: f.t.store,
+        hub: f.t.hub,
+        dialect,
+      })
+      app.get<{ Params: { id: string } }>('/v2/files/:id/content', (request, reply) => {
+        const body = new PassThrough()
+        bodies.set(request.params.id, body)
+        responsesClosed.set(
+          request.params.id,
+          new Promise((resolve) => reply.raw.once('close', () => resolve()))
+        )
+        reply.raw.once('close', () => body.destroy())
+        // The source has not ended yet: only the declared bytes are on the wire.
+        body.write(request.params.id === 'partial' ? 'hell' : 'hello')
+        return reply.header('content-length', '5').send(body)
+      })
+      const controller = new AbortController()
+      try {
+        const address = await app.listen({ host: '127.0.0.1', port: 0 })
+        const delivered = await fetch(address + '/v2/files/delivered/content', {
+          headers: { connection: 'close' },
+        })
+        expect(await delivered.text()).toBe('hello')
+        await responsesClosed.get('delivered')
+        // Four of five bytes and an abort is not a download.
+        const partial = await fetch(address + '/v2/files/partial/content', {
+          signal: controller.signal,
+        })
+        const reader = partial.body!.getReader()
+        expect((await reader.read()).value).toEqual(new Uint8Array(Buffer.from('hell')))
+        controller.abort()
+        await expect(reader.read()).rejects.toMatchObject({ name: 'AbortError' })
+        await responsesClosed.get('partial')
+        // Shutting down while a fully delivered response is still open must
+        // still count it before the counters are drained.
+        const atShutdown = await fetch(address + '/v2/files/shutdown/content', {
+          headers: { connection: 'close' },
+        })
+        expect(await atShutdown.text()).toBe('hello')
+        const closed = app.close()
+        app.server.closeAllConnections()
+        await closed
+        expect(finishes).toBe(0)
+        expect(
+          await f.t.db
+            .selectFrom('activity_daily')
+            .selectAll()
+            .where('token_id', '=', f.share.info.id)
+            .executeTakeFirst()
+        ).toMatchObject({ downloaded_files: 2, downloaded_bytes: 10 })
+      } finally {
+        controller.abort()
+        for (const body of bodies.values()) body.destroy()
+        app.server.closeAllConnections()
+        await app.close()
+        await f.close()
+      }
+    })
   })
