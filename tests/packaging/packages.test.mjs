@@ -25,9 +25,11 @@ test('workspace graph and lockfile agree on exact release pins', () => {
   }
 })
 for (const name of publicNames) {
-  test(`${name} is publishable`, () => {
+  // Published only inside @abele/sync-sdk; the SDK packs these tarballs itself.
+  test(`${name} stays internal and never reaches npm on its own`, () => {
     const p = JSON.parse(readFileSync(`packages/${name}/package.json`))
-    assert.notEqual(p.private, true)
+    assert.equal(p.private, true)
+    assert.equal(p.publishConfig, undefined)
     assert.deepEqual(p.repository, {
       type: 'git',
       url: 'git+https://github.com/dudaanton/abele-sync.git',
