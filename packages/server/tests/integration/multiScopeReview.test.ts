@@ -9,6 +9,36 @@ import { purgeVault } from '../../src/access/vaultLifecycle.js'
 
 for (const dialect of ['sqlite', 'pg'] as const) {
   describe.skipIf(dialect === 'pg' && !hasPgTestDb)(`item review regressions (${dialect})`, () => {
+    it('uses the issuer selected item to authorize a different token item deletion', async () => {
+      const f = await tokenFixture(dialect)
+      try {
+        const folder = success((await f.root.commit([{ op: 'mkdir', path: 'B' }])).results[0]!)
+        success(await f.root.create('B/delete.md', 'delete'))
+        const child = await f.guest.share(f.share.info.scope.id)
+        const scope = { kind: 'folder', id: folder.file_id }
+        const callerItem = await f.root.json(`/tokens/${f.share.info.id}/items`, 'POST', { scope })
+        const targetItem = await f.root.json(`/tokens/${child.info.id}/items`, 'POST', { scope })
+        expect(callerItem.id).not.toBe(targetItem.id)
+        const result = await f.guest.json(
+          `/connection/items/${targetItem.id}/delete`,
+          'POST',
+          {},
+          {
+            'abele-scope-item': callerItem.id,
+            'idempotency-key': randomUUID(),
+          }
+        )
+        expect(result.files).toBe(1)
+        expect(result.revoked_tokens).not.toContain(f.share.info.id)
+        expect(result.revoked_tokens).not.toContain(child.info.id)
+        const rows = await f.t.db.selectFrom('access_token_items').selectAll().execute()
+        expect(rows.find((row) => row.id === callerItem.id)?.removed_at).toBeNull()
+        expect(rows.find((row) => row.id === targetItem.id)?.removed_at).toEqual(expect.any(String))
+        expect((await f.guest.request('/connection')).status).toBe(200)
+      } finally {
+        await f.close()
+      }
+    })
     it('checks every group member before an issuer can delete the item', async () => {
       const f = await tokenFixture(dialect)
       try {
@@ -58,16 +88,19 @@ for (const dialect of ['sqlite', 'pg'] as const) {
           scope: { kind: 'folder', id: b.file_id },
         })
         // Naming A explicitly must not use the key's other B item.
-        expect(
-          (
-            await f.guest.request(
-              path,
-              'POST',
-              {},
-              { 'idempotency-key': randomUUID(), 'abele-scope-item': `primary:${f.share.info.id}` }
-            )
-          ).status
-        ).toBe(403)
+        const denied = await f.guest.request(
+          path,
+          'POST',
+          {},
+          { 'idempotency-key': randomUUID(), 'abele-scope-item': `primary:${f.share.info.id}` }
+        )
+        expect(denied.status).toBe(403)
+        expect(await denied.json()).toMatchObject({
+          error: {
+            code: 'forbidden',
+            message: 'item deletion requires the caller’s own live content authority',
+          },
+        })
         expect(live.id).toBeTruthy()
         const deleted = await request()
         expect(deleted.status).toBe(200)

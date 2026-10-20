@@ -33,8 +33,6 @@ export async function deleteScope(
   idempotencyKey: string,
   itemId = deps.itemId
 ): Promise<V2DeleteScopeResponse> {
-  if (deps.itemId !== undefined && itemId !== deps.itemId)
-    throw new AbeleError('forbidden', 'scope_removed', { reason: 'scope_removed' })
   if (!idempotencyKey || idempotencyKey.length > 200)
     throw new AbeleError('invalid_request', 'invalid idempotency key')
   const requestHash =
