@@ -39,15 +39,12 @@ for (const dialect of ['sqlite', 'pg'] as const)
         try {
           for (let i = 0; i < 20; i++) await f.guest.content(file.file_id)
           await expect
-            .poll(
-              async () =>
-                f.t.db
-                  .selectFrom('activity_daily')
-                  .selectAll()
-                  .where('token_id', '=', f.share.info.id)
-                  .executeTakeFirst(),
-              // The counter flush is asynchronous; a busy CI runner needs more than 1 s.
-              { timeout: 15_000 }
+            .poll(async () =>
+              f.t.db
+                .selectFrom('activity_daily')
+                .selectAll()
+                .where('token_id', '=', f.share.info.id)
+                .executeTakeFirst()
             )
             .toMatchObject({ downloaded_files: 20, downloaded_bytes: 100 })
           expect(

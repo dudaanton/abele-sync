@@ -91,6 +91,13 @@ export async function addDaily(
     .execute()
 }
 export function registerActivity(app: FastifyInstance, deps: AppDeps) {
+  const completed = new WeakSet<FastifyRequest>()
+  app.addHook('onRequest', async (request, reply) => {
+    // onResponse also runs on response errors. Remember the actual finish event
+    // before Fastify dispatches onResponse: writableFinished can still be false
+    // during that event depending on Node/socket write-callback ordering.
+    reply.raw.prependOnceListener('finish', () => completed.add(request))
+  })
   // Keep exact totals, but coalesce transfer telemetry independently of request volume.
   // The map and each in-flight batch have a fixed bound; no per-request timer or queue.
   const pending = new Map<string, { vaultId: string; tokenId: string; at: Date; deltas: Deltas }>()
@@ -126,7 +133,7 @@ export function registerActivity(app: FastifyInstance, deps: AppDeps) {
   })
   app.addHook('onResponse', async (request, reply) => {
     const actor = request.tokenActivity
-    if (!actor || !reply.raw.writableFinished || reply.statusCode >= 300) return
+    if (!completed.delete(request) || !actor || reply.statusCode >= 300) return
     let deltas = request.transferActivity
     if (
       request.method === 'GET' &&

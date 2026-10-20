@@ -1,0 +1,172 @@
+import Fastify from 'fastify'
+import { PassThrough, Readable } from 'node:stream'
+import { describe, expect, it, vi } from 'vitest'
+import { registerActivity } from '../../src/history/activity.js'
+import { tokenFixture } from '../helpers/tokenFixture.js'
+import { hasPgTestDb } from '../helpers/tempDb.js'
+
+for (const dialect of ['sqlite', 'pg'] as const)
+  describe.skipIf(dialect === 'pg' && !hasPgTestDb)(`transfer completion (${dialect})`, () => {
+    it('excludes aborted streams, HEADs and errors while counting completed downloads once', async () => {
+      const f = await tokenFixture(dialect)
+      const app = Fastify()
+      let closed!: () => void
+      const abortedClosed = new Promise<void>((resolve) => {
+        closed = resolve
+      })
+      let errorClosed!: () => void, failStream!: () => void
+      const failedClosed = new Promise<void>((resolve) => {
+        errorClosed = resolve
+      })
+      let finishes = 0
+      app.addHook('onRequest', async (request, reply) => {
+        request.tokenActivity = { vaultId: f.space, tokenId: f.share.info.id }
+        reply.raw.once('finish', () => {
+          finishes++
+        })
+      })
+      registerActivity(app, {
+        db: f.t.db,
+        config: f.t.config,
+        store: f.t.store,
+        hub: f.t.hub,
+        dialect,
+      })
+      app.get<{ Params: { id: string } }>('/v2/files/:id/content', (request, reply) => {
+        if (request.params.id === 'error') return reply.code(416).send({ error: 'invalid range' })
+        reply.header('content-length', '5')
+        if (request.params.id === 'abort' || request.params.id === 'stream-error') {
+          const body = new PassThrough()
+          reply.raw.once('close', () => {
+            body.destroy()
+            if (request.params.id === 'abort') closed()
+            else errorClosed()
+          })
+          failStream = () => {
+            // Fastify dispatches onResponse for this error too, with status 200.
+            reply.hijack()
+            reply.raw.emit('error', new Error('controlled response failure'))
+            reply.raw.destroy()
+          }
+          body.write('h')
+          return reply.send(body)
+        }
+        return reply.send(Readable.from(['hello']))
+      })
+      const controller = new AbortController()
+      try {
+        const address = await app.listen({ host: '127.0.0.1', port: 0 })
+        const response = await fetch(address + '/v2/files/abort/content', {
+          signal: controller.signal,
+        })
+        expect(response.status).toBe(200)
+        const reader = response.body!.getReader()
+        expect((await reader.read()).value).toEqual(new Uint8Array(Buffer.from('h')))
+        controller.abort()
+        await expect(reader.read()).rejects.toMatchObject({ name: 'AbortError' })
+        await abortedClosed
+        expect(finishes).toBe(0)
+        const failed = await fetch(address + '/v2/files/stream-error/content')
+        expect(failed.status).toBe(200)
+        const failedReader = failed.body!.getReader()
+        expect((await failedReader.read()).value).toEqual(new Uint8Array(Buffer.from('h')))
+        failStream()
+        await expect(failedReader.read()).rejects.toBeInstanceOf(Error)
+        await failedClosed
+        expect(finishes).toBe(0)
+        const head = await fetch(address + '/v2/files/file/content', { method: 'HEAD' })
+        expect(head.status).toBe(200)
+        expect(await head.text()).toBe('')
+        const error = await fetch(address + '/v2/files/error/content')
+        expect(error.status).toBe(416)
+        await error.arrayBuffer()
+        const good = await fetch(address + '/v2/files/file/content')
+        expect(await good.text()).toBe('hello')
+        await expect
+          .poll(() =>
+            f.t.db
+              .selectFrom('activity_daily')
+              .selectAll()
+              .where('token_id', '=', f.share.info.id)
+              .executeTakeFirst()
+          )
+          .toMatchObject({ downloaded_files: 1, downloaded_bytes: 5 })
+        // Closing also drains the counter queue, so a late duplicate would be observable.
+        await app.close()
+        expect(
+          await f.t.db
+            .selectFrom('activity_daily')
+            .selectAll()
+            .where('token_id', '=', f.share.info.id)
+            .executeTakeFirst()
+        ).toMatchObject({ downloaded_files: 1, downloaded_bytes: 5 })
+      } finally {
+        controller.abort()
+        app.server.closeAllConnections()
+        await app.close()
+        await f.close()
+      }
+    })
+    it('counts finished responses even when writableFinished has not caught up, without losing coalescing', async () => {
+      const f = await tokenFixture(dialect)
+      const app = Fastify()
+      let finishes = 0,
+        delayedFlags = 0
+      app.addHook('onRequest', async (request, reply) => {
+        request.tokenActivity = { vaultId: f.space, tokenId: f.share.info.id }
+        reply.raw.once('finish', () => {
+          finishes++
+        })
+      })
+      // Model the Node/socket ordering seen on Linux: onResponse is running
+      // because finish fired, but its writableFinished snapshot is still false.
+      app.addHook('onResponse', async (_request, reply) => {
+        if (delayedFlags < 3) {
+          delayedFlags++
+          Object.defineProperty(reply.raw, 'writableFinished', { value: false, configurable: true })
+        }
+      })
+      registerActivity(app, {
+        db: f.t.db,
+        config: f.t.config,
+        store: f.t.store,
+        hub: f.t.hub,
+        dialect,
+      })
+      app.addHook('onResponse', async (_request, reply) => {
+        Reflect.deleteProperty(reply.raw, 'writableFinished')
+      })
+      app.get('/v2/files/:id/content', (_request, reply) =>
+        reply.header('content-length', '5').send(Readable.from(['hello']))
+      )
+      const writes = vi.spyOn(f.t.db, 'insertInto')
+      try {
+        const address = await app.listen({ host: '127.0.0.1', port: 0 })
+        for (let i = 0; i < 20; i++) {
+          const response = await fetch(address + '/v2/files/file/content', {
+            headers: { connection: 'close' },
+          })
+          expect(response.status).toBe(200)
+          expect(await response.text()).toBe('hello')
+        }
+        expect(finishes).toBe(20)
+        expect(delayedFlags).toBe(3)
+        await expect
+          .poll(() =>
+            f.t.db
+              .selectFrom('activity_daily')
+              .selectAll()
+              .where('token_id', '=', f.share.info.id)
+              .executeTakeFirst()
+          )
+          .toMatchObject({ downloaded_files: 20, downloaded_bytes: 100 })
+        expect(
+          writes.mock.calls.filter(([table]) => table === 'activity_daily').length
+        ).toBeLessThan(20)
+      } finally {
+        await app.close()
+        writes.mockRestore()
+        await f.close()
+      }
+    })
+  })
