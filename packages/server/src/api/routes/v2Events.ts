@@ -2,7 +2,7 @@ import { recordUse } from '../../history/activity.js'
 import { AbeleError, type V2Event } from '@abele/sync-protocol'
 import { z } from 'zod'
 import type { FastifyInstance } from 'fastify'
-import { folderWasDeleted } from '../../access/visibility.js'
+import { selectorWasDeleted } from '../../access/visibility.js'
 import { authenticateToken, connection } from '../../access/tokens.js'
 import { accessDeps, bearerKey } from './v2Tokens.js'
 import type { AppDeps } from '../app.js'
@@ -10,8 +10,8 @@ import type { AppDeps } from '../app.js'
 /** Browser/mobile sockets authenticate with hello {token:key}; native callers may
  * authenticate the upgrade header. No content or subscription exists before auth. */
 export function registerV2EventRoutes(app: FastifyInstance, deps: AppDeps) {
-  const access = accessDeps(deps)
   app.get('/v2/events', { websocket: true }, (socket, request) => {
+    const access = accessDeps(deps, request)
     let key: string | null = request.headers.authorization ? bearerKey(request) : null
     let ended = false,
       started = false,
@@ -38,7 +38,7 @@ export function registerV2EventRoutes(app: FastifyInstance, deps: AppDeps) {
           const p = await authenticateToken(access, key)
           const state = await connection(access, p)
           if (state.status !== 'active') {
-            if (await folderWasDeleted(access, p.scope)) {
+            if (await selectorWasDeleted(access, p.scope)) {
               const final = await deps.db
                 .selectFrom('scope_changes')
                 .select('cursor')
@@ -66,6 +66,7 @@ export function registerV2EventRoutes(app: FastifyInstance, deps: AppDeps) {
         .catch((error) => {
           if (error instanceof AbeleError && error.code === 'scope_deleted') stop(4004, true)
           else if (error instanceof AbeleError && error.code === 'unauthorized') stop(4001, true)
+          else if (error instanceof AbeleError && error.code === 'forbidden') stop(4003, false)
           else stop(1011, false)
         })
     }
@@ -107,10 +108,15 @@ export function registerV2EventRoutes(app: FastifyInstance, deps: AppDeps) {
     socket.on('message', (data) => {
       if (started) return
       try {
-        key = z
-          .object({ token: z.string().regex(/^[A-Za-z0-9_-]{43}$/) })
+        const hello = z
+          .object({
+            token: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+            item: z.string().min(1).max(200).optional(),
+          })
           .strict()
-          .parse(JSON.parse(data.toString())).token
+          .parse(JSON.parse(data.toString()))
+        key = hello.token
+        if (hello.item !== undefined) access.itemId = hello.item
         start()
       } catch {
         stop(4001, false)

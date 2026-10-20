@@ -67,6 +67,96 @@ role, or separate device registration is involved. Group selectors use
 `kind: "group"` and a stable group-note ID. Path is only a display hint.
 The server resolves the bearer key, not client-edited space/scope hints.
 
+### Server-side item sets (stage 0)
+
+One bearer key can carry several folder, group and file items. Each item has an
+ordinary server scope with its own members, snapshot pages and change feed.
+`access_tokens.scope_id` remains the primary scope. Existing tokens need no
+rewrite: their primary item has the stable ID `primary:<token_id>` and is
+materialized only if detached. Additional items have opaque server-generated IDs.
+The migration preserves scopes, tokens, members and feeds on SQLite and PostgreSQL;
+SQLite rebuilds the scope table to extend its kind constraint.
+
+The unchanged v1 payload supports folders and groups. A new strict payload is
+also accepted by `encodeAccessToken` and `decodeAccessToken`:
+
+```json
+{
+  "v": 2,
+  "address": "https://sync.example",
+  "key": "<43-character base64url secret>",
+  "items": [
+    { "id": "<item ID>", "kind": "file", "scope_id": "<server scope ID>", "path": "Notes/one.md" }
+  ]
+}
+```
+
+`items` is a nonempty display preview; the server list is authoritative after
+edits, including when an old QR is pasted again. File issuance returns v2;
+folder/group issuance continues returning v1, and items can be added afterward.
+Clients can assemble a v2 preview using the item response and their known key;
+the server cannot recover a key from its hash. Old decoders reject v2 cleanly.
+
+Send `abele-scope-item: <item ID>` to select an item on any v2 request. This applies
+to connection, manifest, changes, commit, content (including HEAD/ranges),
+history, trash/restore, group assets, external files and uploads. All transaction
+reauthentication uses the selected item. Snapshot paging and commit idempotency
+receipts cannot cross items. Without the header, the primary scope and the strict
+`/v2/connection` response shape remain unchanged, including capability-gated
+`read_only`; no item fields are added to that response.
+
+| Route                                    | Request                          | Response                                                           |
+| ---------------------------------------- | -------------------------------- | ------------------------------------------------------------------ |
+| `GET /v2/connection/items`               | none                             | `{items:[{id,scope_id,scope:{kind,id,path},added_at,removed_at}]}` |
+| `POST /v2/tokens/:id/items`              | `{scope:{kind,id}}`              | 201 `{id,scope_id,scope,added_at,removed_at:null}`                 |
+| `DELETE /v2/tokens/:id/items/:item`      | none                             | `{removed:true}`                                                   |
+| `POST /v2/connection/items/:item/delete` | `{}`, required `Idempotency-Key` | `V2DeleteScopeResponse`                                            |
+
+Only the token's direct issuer or an active whole-vault key may edit its set.
+Addition uses the same containment and inherited `covers` checks as issuance;
+read-only access cannot become writable. Duplicates and folders/files already
+covered by a live folder item are refused with `forbidden`. A broader folder
+absorbs narrower folder/file items by detaching them. Groups remain independent:
+their membership may extend beyond the folder containing their root note.
+
+Detach changes only the item's `removed_at`. It deletes no content, writes no
+`removal` events and leaves the key and other items active. Removed or foreign
+items return HTTP 403 `forbidden`, message `scope_removed`, with
+`details.reason: "scope_removed"`, before reads, writes or receipt replay. Removing
+the primary also refuses requests without an item header; remaining live items
+continue working when explicitly selected. Clients keep local files on detach.
+The no-header item-list route authenticates the key independently of its primary
+item, so a client can discover the current set even after the primary or all
+items have been detached. An explicit removed item header still returns 403 on
+that route. Revoked/disabled keys cannot list items.
+Detached inventory entries redact their path as `(unavailable)`, so the list
+cannot track later renames after access ends.
+
+A `file` selector targets one stable file ID, including non-note files. It follows
+renames within inherited boundaries, never admits a replacement file at the same
+path, and cannot create files or authorize directory operations.
+After an ordinary file deletion, its final delete events can still be drained;
+content and manifest access remain unavailable.
+
+Websocket hello accepts `{token:key,item?:itemId}`; bearer-authenticated upgrades
+may instead use the item header. Subscription and periodic authentication use that
+item's feed. Detach closes its socket with code 4003, without content-removal events.
+`V2EngineClient` accepts an optional `item` transport option for HTTP and hello.
+
+Item server deletion uses the existing scope deletion transaction and trash. The
+issuer (or whole-vault key) calls the item route with its own key and the target
+item ID. The named `requireOwnerForItemServerDelete` check enforces owner-only
+deletion pending the owner's decision. Read-only callers cannot delete. This
+operation detaches the selected item and preserves both the calling key and the
+edited key. Nested/inheriting tokens are revoked, including tokens whose affected
+scope is an additional item. Shared content is genuinely deleted for other
+covering scopes. Receipts include the item identity and can be retried by the
+same still-authorized owner. No-header `/v2/connection/delete` retains its legacy
+self-revocation behavior; with an item header it uses owner-only item deletion.
+
+An older server returns 404 for the item-list route, which clients can use as the
+capability check before showing set features.
+
 ## Stage 1 endpoints
 
 Every route requires `Authorization: Bearer <key>`. Ordinary routes authenticate a live token before doing work; the self-deletion endpoint below additionally permits replay of its own recorded result after revocation.
@@ -129,7 +219,8 @@ described below.
 `POST /v2/connection/delete` implements **Delete from the server** next to a
 connection's Disconnect action. It accepts an empty body or
 `V2DeleteScopeRequest` (`{}`), with a required `Idempotency-Key` of 1–200
-characters. It accepts no folder path, vault ID, token ID or scope selector.
+characters. Without an item header it accepts no folder path, vault ID, token ID
+or scope selector and retains the legacy behavior below.
 The previous arbitrary-folder `POST /v2/folders/delete` endpoint is removed;
 the operator's local `folders delete` command remains available.
 
@@ -271,4 +362,4 @@ Group sync fails closed with `scope_updating` until stage 3 builds the graph.
 History/restore UI, group assets and root settings endpoints remain later-stage
 work. The retained merge algorithm still depends on `work/server-merge`; expected
 failures cover first-connect divergence, stale line merge and original merge
-mtime. No migration or old-client compatibility is provided.
+mtime. The token-item migration and legacy connection compatibility are described above.

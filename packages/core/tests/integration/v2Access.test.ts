@@ -15,6 +15,7 @@ it('uses the token address and key; server-returned selector replaces display hi
     server.address
   )
   const token = decodeAccessToken(root.token)
+  if (token.v !== 1) throw new Error('root provisioning must retain the legacy payload')
   const client = new AccessClient(
     { ...token, scope: { kind: 'group', id: 'fake', path: 'Wrong.md' } },
     { fetch }

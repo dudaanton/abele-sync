@@ -45,27 +45,37 @@ function bytes(request: FastifyRequest, limit: number) {
   return request.body
 }
 export function registerV2SyncRoutes(app: FastifyInstance, deps: AppDeps) {
-  const access = accessDeps(deps)
-  const uploads = createUploadManager({
-    ...deps,
-    authorizeOwner: async (db, owner) => {
-      const p = await authenticateTokenId({ ...access, db }, owner.deviceId)
-      requireWrite(p)
-      if (p.space.id !== owner.vaultId) throw new AbeleError('not_found', 'no upload in this space')
-      await activeScope({ ...access, db }, p)
-    },
-  })
+  const uploads = (request: FastifyRequest) =>
+    createUploadManager({
+      ...deps,
+      authorizeOwner: async (db, owner) => {
+        const p = await authenticateTokenId({ ...accessDeps(deps, request), db }, owner.deviceId)
+        requireWrite(p)
+        if (p.space.id !== owner.vaultId)
+          throw new AbeleError('not_found', 'no upload in this space')
+        await activeScope({ ...accessDeps(deps, request), db }, p)
+      },
+    })
   const owner = async (request: FastifyRequest) =>
-    withToken(access, bearerKey(request), async (_deps, p) => ({
+    withToken(accessDeps(deps, request), bearerKey(request), async (_deps, p) => ({
       vaultId: p.space.id,
       deviceId: p.token.id,
     }))
   app.post('/v2/connection/delete', async (request) => {
     V2DeleteScopeRequestSchema.parse(request.body === undefined ? {} : request.body)
     return deleteScope(
-      { ...deps, ...access },
+      { ...deps, ...accessDeps(deps, request) },
       bearerKey(request),
       z.string().min(1).max(200).parse(request.headers['idempotency-key'])
+    )
+  })
+  app.post<{ Params: { item: string } }>('/v2/connection/items/:item/delete', async (request) => {
+    V2DeleteScopeRequestSchema.parse(request.body === undefined ? {} : request.body)
+    return deleteScope(
+      { ...deps, ...accessDeps(deps, request) },
+      bearerKey(request),
+      z.string().min(1).max(200).parse(request.headers['idempotency-key']),
+      request.params.item
     )
   })
   app.post('/v2/group-assets', async (request) => {
@@ -83,12 +93,12 @@ export function registerV2SyncRoutes(app: FastifyInstance, deps: AppDeps) {
       ])
       .parse(request.body)
     if ('file_id' in input)
-      return withToken(access, bearerKey(request), async (access, p) => {
+      return withToken(accessDeps(deps, request), bearerKey(request), async (txAccess, p) => {
         requireWrite(p)
         if (p.scope.kind !== 'group')
           throw new AbeleError('forbidden', 'publication requires a group connection')
         await publishExisting(
-          access,
+          txAccess,
           p.scope,
           input.file_id,
           p.token.id,
@@ -96,12 +106,12 @@ export function registerV2SyncRoutes(app: FastifyInstance, deps: AppDeps) {
         )
         return { published: true }
       })
-    await withToken(access, bearerKey(request), async (_access, p) => {
+    await withToken(accessDeps(deps, request), bearerKey(request), async (_access, p) => {
       if (p.scope.kind !== 'group' || input.path.toLowerCase().endsWith('.md'))
         throw new AbeleError('forbidden', 'publication requires an attachment and group connection')
     })
     return commitWithToken(
-      { ...deps, ...access },
+      { ...deps, ...accessDeps(deps, request) },
       bearerKey(request),
       [{ op: 'create', ...input }],
       z.string().min(1).max(200).parse(request.headers['idempotency-key']),
@@ -112,15 +122,20 @@ export function registerV2SyncRoutes(app: FastifyInstance, deps: AppDeps) {
   })
   app.get('/v2/manifest', async (request) => {
     const q = page.parse(request.query)
-    return manifestWithToken(access, bearerKey(request), q.limit, q.next)
+    return manifestWithToken(accessDeps(deps, request), bearerKey(request), q.limit, q.next)
   })
   app.get('/v2/changes', async (request) => {
     const q = feed.parse(request.query)
-    return changesWithToken(access, bearerKey(request), q.next ?? q.since, q.limit)
+    return changesWithToken(
+      accessDeps(deps, request),
+      bearerKey(request),
+      q.next ?? q.since,
+      q.limit
+    )
   })
   app.post('/v2/commit', async (request) =>
     commitWithToken(
-      { ...deps, ...access },
+      { ...deps, ...accessDeps(deps, request) },
       bearerKey(request),
       V2CommitRequestSchema.parse(request.body).ops,
       z.string().min(1).max(200).parse(request.headers['idempotency-key'])
@@ -133,11 +148,11 @@ export function registerV2SyncRoutes(app: FastifyInstance, deps: AppDeps) {
         before: z.coerce.number().int().positive().optional(),
       })
       .parse(request.query)
-    return historyWithToken(access, bearerKey(request), request.params.id, q)
+    return historyWithToken(accessDeps(deps, request), bearerKey(request), request.params.id, q)
   })
   app.get('/v2/trash', async (request) => {
     const q = z.object({ path_prefix: z.string().max(4096).optional() }).parse(request.query)
-    return trashWithToken(access, bearerKey(request), q.path_prefix)
+    return trashWithToken(accessDeps(deps, request), bearerKey(request), q.path_prefix)
   })
   app.post<{ Params: { id: string } }>('/v2/files/:id/restore', async (request) => {
     const input = z
@@ -147,7 +162,7 @@ export function registerV2SyncRoutes(app: FastifyInstance, deps: AppDeps) {
       ])
       .parse(request.body)
     const result = await restoreWithToken(
-      { ...deps, ...access },
+      { ...deps, ...accessDeps(deps, request) },
       bearerKey(request),
       [request.params.id],
       'version_id' in input ? input.version_id : undefined,
@@ -161,7 +176,7 @@ export function registerV2SyncRoutes(app: FastifyInstance, deps: AppDeps) {
       .strict()
       .parse(request.body)
     return restoreWithToken(
-      { ...deps, ...access },
+      { ...deps, ...accessDeps(deps, request) },
       bearerKey(request),
       input.file_ids,
       undefined,
@@ -174,7 +189,7 @@ export function registerV2SyncRoutes(app: FastifyInstance, deps: AppDeps) {
     async (request, reply) => {
       const q = z.object({ version_id: z.string().min(1).max(200).optional() }).parse(request.query)
       const version = await contentWithToken(
-        access,
+        accessDeps(deps, request),
         bearerKey(request),
         request.params.id,
         q.version_id
@@ -185,7 +200,7 @@ export function registerV2SyncRoutes(app: FastifyInstance, deps: AppDeps) {
   app.head<{ Params: { id: string } }>('/v2/files/:id/content', async (request, reply) => {
     const q = z.object({ version_id: z.string().min(1).max(200).optional() }).parse(request.query)
     const version = await contentWithToken(
-      access,
+      accessDeps(deps, request),
       bearerKey(request),
       request.params.id,
       q.version_id
@@ -201,31 +216,35 @@ export function registerV2SyncRoutes(app: FastifyInstance, deps: AppDeps) {
     const body = bytes(request, deps.config.simpleUploadBytes)
     if (createHash('sha256').update(body).digest('hex') !== sha)
       throw new AbeleError('hash_mismatch', 'uploaded bytes do not match their digest')
-    const result = await withToken(access, bearerKey(request), async (access, p) => {
-      requireWrite(p)
-      const settings = JSON.parse(p.space.settings)
-      if (body.length > settings.max_file_bytes)
-        throw new AbeleError('too_large', 'file exceeds the space limit')
-      // Quota and credential are checked under the commit lock; no SHA existence shortcut.
-      await hasRoom(
-        access.db as import('kysely').Transaction<import('../../db/schema.js').Database>,
-        p.space.id,
-        sha,
-        body.length
-      )
-      const stored = await deps.store.put(body, sha)
-      await waitOn(
-        access.db as import('kysely').Transaction<import('../../db/schema.js').Database>,
-        {
-          vaultId: p.space.id,
-          deviceId: p.token.id,
+    const result = await withToken(
+      accessDeps(deps, request),
+      bearerKey(request),
+      async (txAccess, p) => {
+        requireWrite(p)
+        const settings = JSON.parse(p.space.settings)
+        if (body.length > settings.max_file_bytes)
+          throw new AbeleError('too_large', 'file exceeds the space limit')
+        // Quota and credential are checked under the commit lock; no SHA existence shortcut.
+        await hasRoom(
+          txAccess.db as import('kysely').Transaction<import('../../db/schema.js').Database>,
+          p.space.id,
           sha,
-          size: body.length,
-          at: deps.now?.() ?? new Date(),
-        }
-      )
-      return stored
-    })
+          body.length
+        )
+        const stored = await deps.store.put(body, sha)
+        await waitOn(
+          txAccess.db as import('kysely').Transaction<import('../../db/schema.js').Database>,
+          {
+            vaultId: p.space.id,
+            deviceId: p.token.id,
+            sha,
+            size: body.length,
+            at: deps.now?.() ?? new Date(),
+          }
+        )
+        return stored
+      }
+    )
     request.transferActivity = { uploaded_files: 1, uploaded_bytes: body.length }
     return reply.code(201).send(result)
   })
@@ -233,13 +252,13 @@ export function registerV2SyncRoutes(app: FastifyInstance, deps: AppDeps) {
     const sha = ShaSchema.parse(request.params.sha)
     const { size, max_part_bytes } = UploadBeginRequestSchema.parse(request.body)
     const who = await owner(request)
-    return reply.code(201).send(await uploads.begin(sha, size, who, max_part_bytes))
+    return reply.code(201).send(await uploads(request).begin(sha, size, who, max_part_bytes))
   })
   app.put<{ Params: { sha: string; id: string; part: string } }>(
     '/v2/uploads/:sha/:id/:part',
     async (request, reply) => {
       ShaSchema.parse(request.params.sha)
-      await uploads.putPart(
+      await uploads(request).putPart(
         request.params.id,
         z.coerce.number().int().nonnegative().parse(request.params.part),
         bytes(request, deps.config.partBytes),
@@ -252,7 +271,7 @@ export function registerV2SyncRoutes(app: FastifyInstance, deps: AppDeps) {
     '/v2/uploads/:sha/:id/complete',
     async (request, reply) => {
       ShaSchema.parse(request.params.sha)
-      const result = await uploads.complete(request.params.id, {
+      const result = await uploads(request).complete(request.params.id, {
         ...(await owner(request)),
         sha: request.params.sha,
       })

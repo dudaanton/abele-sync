@@ -60,7 +60,10 @@ export async function listItems(deps: AccessDeps, key: string) {
           .selectAll()
           .where('id', '=', row.scope_id)
           .executeTakeFirstOrThrow()
-        const resolved = await effectiveScope(deps, { scope, space: p.space })
+        const resolved =
+          row.removed_at === null
+            ? await effectiveScope(deps, { scope, space: p.space })
+            : { scope: { kind: scope.kind, id: scope.target_id, path: '(unavailable)' } }
         items.push({
           id: row.id,
           scope_id: row.scope_id,

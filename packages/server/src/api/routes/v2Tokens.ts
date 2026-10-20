@@ -1,13 +1,16 @@
+import { addItem, removeItem, listItems } from '../../access/items.js'
 import { recordUse } from '../../history/activity.js'
 import {
   AbeleError,
   V2IssueTokenRequestSchema,
+  V2AddScopeItemRequestSchema,
   V2_CAPABILITIES_HEADER,
   V2_READ_ONLY_CAPABILITY,
 } from '@abele/sync-protocol'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import {
   authenticateToken,
+  authenticateTokenForInventory,
   findTokenByKey,
   requireWrite,
   connection,
@@ -30,8 +33,12 @@ export function bearerKey(request: FastifyRequest): string {
   if (match === null) throw new AbeleError('unauthorized', 'missing or invalid access token')
   return match[1]!
 }
-export function accessDeps(deps: AppDeps): AccessDeps {
+export function accessDeps(deps: AppDeps, request?: FastifyRequest): AccessDeps {
+  const item = request?.headers['abele-scope-item']
+  if (item !== undefined && (typeof item !== 'string' || !item || item.length > 200))
+    throw new AbeleError('forbidden', 'scope_removed', { reason: 'scope_removed' })
   return {
+    ...(typeof item === 'string' ? { itemId: item } : {}),
     db: deps.db,
     pepper: deps.config.tokenPepper,
     dialect: deps.dialect,
@@ -56,9 +63,9 @@ function tokenResponse<T extends { read_only?: boolean }>(
   return legacy
 }
 export function registerV2TokenRoutes(app: FastifyInstance, deps: AppDeps): void {
-  const access = accessDeps(deps)
   // Before parsing or routing, including idempotency replays and unknown v2 routes.
   app.addHook('onRequest', async (request) => {
+    const access = accessDeps(deps, request)
     const path = request.url.split('?')[0]
     if (
       path === '/v2/events' &&
@@ -67,7 +74,11 @@ export function registerV2TokenRoutes(app: FastifyInstance, deps: AppDeps): void
     )
       return // hello authenticates before subscribing
     // Only this exact endpoint verifies secret-bound self-deletion receipts before live auth.
-    if (path === '/v2/connection/delete' && request.method === 'POST') {
+    if (
+      path === '/v2/connection/delete' &&
+      request.method === 'POST' &&
+      access.itemId === undefined
+    ) {
       const key = bearerKey(request)
       const token = await findTokenByKey(access, key)
       if (token.revoked_at !== null) {
@@ -90,12 +101,16 @@ export function registerV2TokenRoutes(app: FastifyInstance, deps: AppDeps): void
       return
     }
     if (path?.startsWith('/v2/')) {
-      const p = await authenticateToken(access, bearerKey(request))
+      const authenticate =
+        path === '/v2/connection/items' && request.method === 'GET'
+          ? authenticateTokenForInventory
+          : authenticateToken
+      const p = await authenticate(access, bearerKey(request))
       await recordUse(deps, request, p)
       if (
         !['GET', 'HEAD'].includes(request.method) &&
         path !== '/v2/tokens' &&
-        !/^\/v2\/tokens\/[^/]+$/.test(path) &&
+        !/^\/v2\/tokens\/[^/]+(?:\/items(?:\/[^/]+)?)?$/.test(path) &&
         !/^\/v2\/files\/[^/]+\/external\/verify$/.test(path)
       )
         requireWrite(p)
@@ -104,23 +119,47 @@ export function registerV2TokenRoutes(app: FastifyInstance, deps: AppDeps): void
   app.get('/v2/connection', async (request) =>
     tokenResponse(
       request,
-      await connection(access, await authenticateToken(access, bearerKey(request)))
+      await connection(
+        accessDeps(deps, request),
+        await authenticateToken(accessDeps(deps, request), bearerKey(request))
+      )
     )
   )
+  app.get('/v2/connection/items', async (request) =>
+    listItems(accessDeps(deps, request), bearerKey(request))
+  )
+  app.post<{ Params: { id: string } }>('/v2/tokens/:id/items', async (request, reply) => {
+    const input = V2AddScopeItemRequestSchema.parse(request.body)
+    return reply
+      .code(201)
+      .send(
+        await addItem(accessDeps(deps, request), bearerKey(request), request.params.id, input.scope)
+      )
+  })
+  app.delete<{ Params: { id: string; item: string } }>(
+    '/v2/tokens/:id/items/:item',
+    async (request) =>
+      removeItem(
+        accessDeps(deps, request),
+        bearerKey(request),
+        request.params.id,
+        request.params.item
+      )
+  )
   app.get('/v2/tokens', async (request) => ({
-    items: (await listTokens(access, bearerKey(request))).map((item) =>
+    items: (await listTokens(accessDeps(deps, request), bearerKey(request))).map((item) =>
       tokenResponse(request, item)
     ),
   }))
   app.post('/v2/tokens', async (request, reply) => {
     const input = V2IssueTokenRequestSchema.parse(request.body)
-    const result = await issueToken(access, bearerKey(request), input)
+    const result = await issueToken(accessDeps(deps, request), bearerKey(request), input)
     return reply
       .code(201)
       .send({ ...result, info: tokenResponse(request, result.info, input.read_only !== undefined) })
   })
   app.delete<{ Params: { id: string } }>('/v2/tokens/:id', async (request) => {
-    await revokeToken(access, bearerKey(request), request.params.id)
+    await revokeToken(accessDeps(deps, request), bearerKey(request), request.params.id)
     deps.hub.hangUp(request.params.id, 4001)
     return { revoked: true }
   })

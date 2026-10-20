@@ -13,21 +13,25 @@ import {
 } from '../../access/externalFiles.js'
 
 export function registerV2ExternalFilesRoutes(app: FastifyInstance, deps: AppDeps) {
-  const access = { ...accessDeps(deps), store: deps.store, maxFileBytes: deps.config.maxFileBytes }
+  const access = (request: import('fastify').FastifyRequest) => ({
+    ...accessDeps(deps, request),
+    store: deps.store,
+    maxFileBytes: deps.config.maxFileBytes,
+  })
   app.get('/v2/external-files/capabilities', async (request, reply) => {
     reply.header('cache-control', 'no-store')
-    return externalCapabilitiesWithToken(access, bearerKey(request))
+    return externalCapabilitiesWithToken(access(request), bearerKey(request))
   })
   app.get<{ Params: { id: string } }>('/v2/files/:id/head', async (request, reply) => {
     reply.header('cache-control', 'no-store')
     requireExternalFilesVersion(request.headers[EXTERNAL_FILES_VERSION_HEADER])
-    return headWithToken(access, bearerKey(request), request.params.id)
+    return headWithToken(access(request), bearerKey(request), request.params.id)
   })
   app.post<{ Params: { id: string } }>('/v2/files/:id/external/verify', async (request, reply) => {
     reply.header('cache-control', 'no-store')
     requireExternalFilesVersion(request.headers[EXTERNAL_FILES_VERSION_HEADER])
     return verifyExternalWithToken(
-      access,
+      access(request),
       bearerKey(request),
       request.params.id,
       ExternalVerifyRequestSchema.parse(request.body)
