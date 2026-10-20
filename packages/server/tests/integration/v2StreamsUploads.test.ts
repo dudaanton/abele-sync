@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import { once } from 'node:events'
 import WebSocket from 'ws'
@@ -17,7 +17,15 @@ for (const dialect of ['sqlite', 'pg'] as const)
     let server: V2Server | undefined
     const sockets: WebSocket[] = []
     afterEach(async () => {
-      for (const s of sockets.splice(0)) s.terminate()
+      await Promise.all(
+        sockets.splice(0).map((socket) => {
+          if (socket.readyState === WebSocket.CLOSED) return Promise.resolve()
+          return new Promise<void>((resolve) => {
+            socket.once('close', () => resolve())
+            socket.terminate()
+          })
+        })
+      )
       await server?.close()
       server = undefined
     })
@@ -46,6 +54,32 @@ for (const dialect of ['sqlite', 'pg'] as const)
       await until(() => events.length > 0)
       return { socket, events }
     }
+    it('closes active group sockets before destroying the server database pool', async () => {
+      const { owner } = await setup()
+      const root = await owner.create('Shared/G.md', 'group root')
+      if (root.status === 'rejected') throw new Error(root.message)
+      const share = await owner.json('/tokens', 'POST', {
+        scope: { kind: 'group', id: root.file_id },
+        label: 'Group',
+      })
+      const group = new V2SyncClient(share.token)
+      await listen(group)
+      const space = (await owner.json('/connection')).space_id
+      expect(server!.hub.sockets(space)).toBe(1)
+      const destroy = server!.db.destroy.bind(server!.db)
+      const attachedAtPoolClose: number[] = []
+      const spy = vi.spyOn(server!.db, 'destroy').mockImplementation(async () => {
+        attachedAtPoolClose.push(server!.hub.sockets(space))
+        await destroy()
+      })
+      try {
+        await server!.close()
+        expect(attachedAtPoolClose.length).toBeGreaterThan(0)
+        expect(attachedAtPoolClose.every((count) => count === 0)).toBe(true)
+      } finally {
+        spy.mockRestore()
+      }
+    })
     it('browser/mobile hello authenticates before any notification or subscription', async () => {
       const { guest } = await setup()
       const socket = new WebSocket(guest.address.replace('http:', 'ws:') + '/v2/events')

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { sql } from 'kysely'
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { resolve, join } from 'node:path'
+import { WebSocket } from 'ws'
 import { buildApp } from '../../src/api/app.js'
 import { BlobStore } from '../../src/blobs/store.js'
 import { loadConfig } from '../../src/config.js'
@@ -48,6 +49,24 @@ export async function v2Server(
       ...(options.now ? { now: options.now } : {}),
     })
     let address = await app.listen({ port: 0, host: '127.0.0.1' })
+    let closing: Promise<void> | undefined
+    async function stopApp() {
+      // Fastify's websocket preClose hook may finish before its sockets emit
+      // close. Await those events explicitly so subscriptions/timers detach
+      // before destroying the database used by the event routes.
+      const socketsClosed = [...app.websocketServer.clients].map((socket) => {
+        if (socket.readyState === WebSocket.CLOSED) return Promise.resolve()
+        return new Promise<void>((resolve) => {
+          socket.once('close', () => resolve())
+          socket.terminate()
+        })
+      })
+      const appClosed = app.close()
+      // This disposable listener owns its HTTP sockets too. Incomplete/pooled
+      // HTTP connections must not extend fixture teardown.
+      app.server.closeAllConnections()
+      await Promise.all([appClosed, ...socketsClosed])
+    }
     return {
       get db() {
         return active.db
@@ -63,7 +82,7 @@ export async function v2Server(
       },
       async restart(beforeOpen?: () => Promise<void>) {
         const port = Number(new URL(address).port)
-        await app.close()
+        await stopApp()
         // Close only the pool, not tempDb's schema cleanup; then reopen the same durable data.
         await active.db.destroy()
         await beforeOpen?.()
@@ -79,20 +98,20 @@ export async function v2Server(
         })
         address = await app.listen({ port, host: '127.0.0.1' })
       },
-      async close() {
-        try {
-          // This disposable listener owns its sockets. Engines have already stopped;
-          // incomplete/pooled HTTP connections must not extend fixture teardown.
-          app.server.closeAllConnections()
-          await app.close()
-        } finally {
+      close() {
+        closing ??= (async () => {
           try {
-            await active.db.destroy()
+            await stopApp()
           } finally {
-            await handle.close()
-            await rm(dir, { recursive: true, force: true })
+            try {
+              await active.db.destroy()
+            } finally {
+              await handle.close()
+              await rm(dir, { recursive: true, force: true })
+            }
           }
-        }
+        })()
+        return closing
       },
     }
   } catch (error) {
@@ -127,7 +146,11 @@ async function isolatedPgDb() {
         } finally {
           const cleanup = createDb(PG_TEST_URL)
           try {
-            await sql.raw(`drop database if exists "${name}" with (force)`).execute(cleanup.db)
+            // pg-pool.end() can resolve before its clients' TCP close callbacks.
+            // Plain DROP waits for those backends to disconnect; FORCE could
+            // instead kill an ending client and emit an unhandled 57P01 error.
+            // A genuinely leaked connection must fail cleanup, never be killed.
+            await sql.raw(`drop database if exists "${name}"`).execute(cleanup.db)
           } finally {
             await cleanup.close()
           }
