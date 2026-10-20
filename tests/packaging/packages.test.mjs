@@ -4,7 +4,7 @@ import { readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-const version = '0.4.0'
+const version = '0.5.0'
 const publicNames = ['protocol', 'core', 'node']
 const publicPackages = new Set(publicNames.map((name) => `@abele/sync-${name}`))
 
