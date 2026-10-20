@@ -12,6 +12,7 @@ export const V2_PROTOCOL_VERSION = 2
 /** Additive strict response fields are returned only to clients advertising support. */
 export const V2_CAPABILITIES_HEADER = 'abele-client-capabilities'
 export const V2_READ_ONLY_CAPABILITY = 'read-only'
+export const V2_TOKEN_ITEM_COUNT_CAPABILITY = 'token-item-count'
 const id = z.string().min(1).max(200)
 const integer = z.number().int().nonnegative().safe()
 const timestamp = z.string().datetime({ offset: true })
@@ -54,6 +55,9 @@ export const V2ScopeItemSchema = z
   })
   .strict()
 export const V2ScopeItemsResponseSchema = z.object({ items: z.array(V2ScopeItemSchema) }).strict()
+/** Owner inventory uses the identical item/state representation as holder inventory. */
+export const V2TokenItemsResponseSchema = V2ScopeItemsResponseSchema
+export type V2TokenItemsResponse = z.infer<typeof V2TokenItemsResponseSchema>
 export const V2AddScopeItemRequestSchema = z.object({ scope: V2SelectorSchema }).strict()
 export const V2RemoveScopeItemResponseSchema = z.object({ removed: z.literal(true) }).strict()
 export type V2AccessToken = z.infer<typeof V2AccessTokenSchema>
@@ -130,7 +134,11 @@ export const V2IssueTokenResponseSchema = z
   .object({ token: z.string(), info: V2TokenInfoSchema })
   .strict()
 export type V2IssueTokenResponse = z.infer<typeof V2IssueTokenResponseSchema>
-export const V2TokensResponseSchema = z.object({ items: z.array(V2TokenInfoSchema) }).strict()
+export const V2TokensResponseSchema = z
+  .object({
+    items: z.array(V2TokenInfoSchema.extend({ item_count: integer.optional() }).strict()),
+  })
+  .strict()
 export const V2RevokeTokenResponseSchema = z.object({ revoked: z.literal(true) }).strict()
 
 const directory = z

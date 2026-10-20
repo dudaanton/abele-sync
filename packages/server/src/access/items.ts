@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { AbeleError, type V2Selector } from '@abele/sync-protocol'
 import type { Selectable } from 'kysely'
+import { sql } from 'kysely'
 import type { AccessTokensTable } from '../db/schemaAccess.js'
 import {
   mutation,
@@ -9,6 +10,7 @@ import {
   grantScope,
   contained,
   authenticateTokenForInventory,
+  authenticateToken,
   type AccessDeps,
   type TokenPrincipal,
 } from './tokens.js'
@@ -48,13 +50,14 @@ export async function resolveTokenItem(
   if (!row || row.removed_at !== null) throw removed()
   return row
 }
-export async function listItems(deps: AccessDeps, key: string) {
+export async function listItems(deps: AccessDeps, key: string, tokenId?: string) {
   return mutation(
     deps,
     key,
     async (deps, p) => {
       const items = []
-      for (const row of await tokenItems(deps, p.token)) {
+      const token = tokenId === undefined ? p.token : await requireItemOwner(deps, p, tokenId)
+      for (const row of await tokenItems(deps, token)) {
         const scope = await deps.db
           .selectFrom('access_scopes')
           .selectAll()
@@ -74,8 +77,26 @@ export async function listItems(deps: AccessDeps, key: string) {
       }
       return { items }
     },
-    authenticateTokenForInventory
+    tokenId === undefined ? authenticateTokenForInventory : authenticateToken
   )
+}
+/** One grouped query for the already-authorized listing; implicit primaries need no rows. */
+export async function itemCounts(deps: AccessDeps, tokenIds: string[]) {
+  if (!tokenIds.length) return new Map<string, number>()
+  const rows = await deps.db
+    .selectFrom('access_token_items')
+    .select([
+      'token_id',
+      sql<number>`sum(case when removed_at is null then 1 else 0 end)`.as('live_count'),
+      sql<number>`max(case when id = 'primary:' || token_id then 1 else 0 end)`.as('has_primary'),
+    ])
+    .where('token_id', 'in', tokenIds)
+    .groupBy('token_id')
+    .execute()
+  const counts = new Map(tokenIds.map((id) => [id, 1]))
+  for (const row of rows)
+    counts.set(row.token_id, Number(row.live_count) + (Number(row.has_primary) ? 0 : 1))
+  return counts
 }
 export async function requireItemOwner(deps: AccessDeps, p: TokenPrincipal, targetId: string) {
   const target = await deps.db

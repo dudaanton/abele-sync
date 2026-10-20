@@ -6,6 +6,7 @@ import {
   V2IssueTokenResponseSchema,
   V2TokensResponseSchema,
   V2RevokeTokenResponseSchema,
+  V2TokenItemsResponseSchema,
   type V2AccessToken,
   type V2IssueTokenRequest,
 } from '@abele/sync-protocol'
@@ -35,6 +36,13 @@ export class AccessClient {
   }
   tokens() {
     return this.http.json(V2TokensResponseSchema, 'GET', '/v2/tokens')
+  }
+  tokenItems(id: string) {
+    return this.http.json(
+      V2TokenItemsResponseSchema,
+      'GET',
+      `/v2/tokens/${encodeURIComponent(id)}/items`
+    )
   }
   revoke(id: string) {
     return this.http.json(

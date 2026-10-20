@@ -108,11 +108,20 @@ receipts cannot cross items. Without the header, the primary scope and the stric
 | Route                                    | Request                          | Response                                                           |
 | ---------------------------------------- | -------------------------------- | ------------------------------------------------------------------ |
 | `GET /v2/connection/items`               | none                             | `{items:[{id,scope_id,scope:{kind,id,path},added_at,removed_at}]}` |
+| `GET /v2/tokens/:id/items`               | none                             | Same item list and state as the holder view above                  |
 | `POST /v2/tokens/:id/items`              | `{scope:{kind,id}}`              | 201 `{id,scope_id,scope,added_at,removed_at:null}`                 |
 | `DELETE /v2/tokens/:id/items/:item`      | none                             | `{removed:true}`                                                   |
 | `POST /v2/connection/items/:item/delete` | `{}`, required `Idempotency-Key` | `V2DeleteScopeResponse`                                            |
 
 Only the token's direct issuer or an active whole-vault key may edit its set.
+Those same keys may read the set through `GET /v2/tokens/:id/items`; other
+tokens, including the holder itself unless it has whole-vault authority, must
+use their own `GET /v2/connection/items` inventory. Legacy tokens return their
+implicit primary item, and removed items remain listed with `removed_at`.
+`GET /v2/tokens` includes `item_count` only when the client advertises
+`abele-client-capabilities: token-item-count`. It counts non-removed items,
+including an attached implicit primary; scope availability and token revocation
+do not change that count. Without the capability the strict legacy shape is preserved.
 Addition uses the same containment and inherited `covers` checks as issuance;
 read-only access cannot become writable. Duplicates and folders/files already
 covered by a live folder item are refused with `forbidden`. A broader folder

@@ -1,4 +1,4 @@
-import { addItem, removeItem, listItems } from '../../access/items.js'
+import { addItem, removeItem, listItems, itemCounts } from '../../access/items.js'
 import { recordUse } from '../../history/activity.js'
 import {
   AbeleError,
@@ -6,6 +6,7 @@ import {
   V2AddScopeItemRequestSchema,
   V2_CAPABILITIES_HEADER,
   V2_READ_ONLY_CAPABILITY,
+  V2_TOKEN_ITEM_COUNT_CAPABILITY,
 } from '@abele/sync-protocol'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import {
@@ -128,6 +129,9 @@ export function registerV2TokenRoutes(app: FastifyInstance, deps: AppDeps): void
   app.get('/v2/connection/items', async (request) =>
     listItems(accessDeps(deps, request), bearerKey(request))
   )
+  app.get<{ Params: { id: string } }>('/v2/tokens/:id/items', async (request) =>
+    listItems(accessDeps(deps, request), bearerKey(request), request.params.id)
+  )
   app.post<{ Params: { id: string } }>('/v2/tokens/:id/items', async (request, reply) => {
     const input = V2AddScopeItemRequestSchema.parse(request.body)
     return reply
@@ -146,11 +150,25 @@ export function registerV2TokenRoutes(app: FastifyInstance, deps: AppDeps): void
         request.params.item
       )
   )
-  app.get('/v2/tokens', async (request) => ({
-    items: (await listTokens(accessDeps(deps, request), bearerKey(request))).map((item) =>
-      tokenResponse(request, item)
-    ),
-  }))
+  app.get('/v2/tokens', async (request) => {
+    const access = accessDeps(deps, request)
+    const tokens = await listTokens(access, bearerKey(request))
+    const capabilities = request.headers[V2_CAPABILITIES_HEADER]
+    const counts =
+      typeof capabilities === 'string' &&
+      capabilities.split(',').some((value) => value.trim() === V2_TOKEN_ITEM_COUNT_CAPABILITY)
+        ? await itemCounts(
+            access,
+            tokens.map((token) => token.id)
+          )
+        : undefined
+    return {
+      items: tokens.map((token) => ({
+        ...tokenResponse(request, token),
+        ...(counts ? { item_count: counts.get(token.id)! } : {}),
+      })),
+    }
+  })
   app.post('/v2/tokens', async (request, reply) => {
     const input = V2IssueTokenRequestSchema.parse(request.body)
     const result = await issueToken(accessDeps(deps, request), bearerKey(request), input)

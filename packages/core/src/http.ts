@@ -3,6 +3,7 @@ import {
   RESTORE_GENERATION_HEADER,
   V2_CAPABILITIES_HEADER,
   V2_READ_ONLY_CAPABILITY,
+  V2_TOKEN_ITEM_COUNT_CAPABILITY,
 } from '@abele/sync-protocol'
 import { z } from 'zod'
 import { EngineError, HttpError } from './errors.js'
@@ -158,7 +159,10 @@ export class Http {
   ): Promise<Response> {
     const headers: Record<string, string> = { ...init.headers }
     if (this.opts.item !== undefined) headers['abele-scope-item'] = this.opts.item
-    headers[V2_CAPABILITIES_HEADER] = V2_READ_ONLY_CAPABILITY
+    headers[V2_CAPABILITIES_HEADER] = [
+      V2_READ_ONLY_CAPABILITY,
+      V2_TOKEN_ITEM_COUNT_CAPABILITY,
+    ].join(',')
     if (this.generation !== undefined) headers[RESTORE_GENERATION_HEADER] = this.generation
     if (this.opts.token !== '') headers['authorization'] = `Bearer ${this.opts.token}`
     if (this.opts.userAgent !== undefined) headers['user-agent'] = this.opts.userAgent
