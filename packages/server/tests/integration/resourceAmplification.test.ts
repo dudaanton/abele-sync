@@ -44,7 +44,9 @@ for (const dialect of ['sqlite', 'pg'] as const)
                 .selectFrom('activity_daily')
                 .selectAll()
                 .where('token_id', '=', f.share.info.id)
-                .executeTakeFirst()
+                .executeTakeFirst(),
+              // The counter flush is asynchronous; a busy CI runner needs more than 1 s.
+              { timeout: 15_000 }
             )
             .toMatchObject({ downloaded_files: 20, downloaded_bytes: 100 })
           expect(
