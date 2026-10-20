@@ -11,7 +11,7 @@ import type { AccessDeps } from '../tokens.js'
 import type { AccessScopesTable } from '../../db/schemaAccess.js'
 import type { VersionsTable } from '../../db/schema.js'
 import { effectiveScope } from '../tokens.js'
-import { groupPathAllowed, members, remember } from '../visibility.js'
+import { groupPathAllowed, members, remember, refreshFileScopes } from '../visibility.js'
 import { isConfigurationPath } from '../../configurationDirectories.js'
 
 const unique = (values: Iterable<string>) => [...new Set(values)]
@@ -362,6 +362,8 @@ export async function refreshGroups(
   versions: Selectable<VersionsTable>[] = [],
   all = false
 ) {
+  // File projections inherit the graph too, including through intermediate groups.
+  await refreshFileScopes(deps, space, at)
   const changedIds = unique(versions.map((v) => v.file_id))
   const changedScopes = changedIds.length
     ? (

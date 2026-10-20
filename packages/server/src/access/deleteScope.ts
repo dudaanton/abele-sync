@@ -1,4 +1,9 @@
-import { resolveTokenItem, requireOwnerForItemServerDelete, detachItem } from './items.js'
+import {
+  resolveTokenItem,
+  requireOwnerForItemServerDelete,
+  detachItem,
+  tokenItems,
+} from './items.js'
 import { addDaily } from '../history/activity.js'
 import { randomUUID } from 'node:crypto'
 import {
@@ -51,6 +56,30 @@ export async function deleteScope(
       }
     }
     let p = await authenticateToken(access, key)
+    // Management authority never supplies content authority. Keep the caller's
+    // own live item scopes before resolving somebody else's deletion selector.
+    const callerScopes =
+      itemId === undefined || deps.itemId !== undefined
+        ? [p.scope]
+        : await db
+            .selectFrom('access_scopes')
+            .selectAll()
+            .where('space_id', '=', p.space.id)
+            .where(
+              'id',
+              'in',
+              (await tokenItems(access, p.token))
+                .filter((item) => item.removed_at === null)
+                .map((item) => item.scope_id)
+            )
+            .execute()
+    const requireCallerContent = async (path: string, id: string) => {
+      for (const scope of callerScopes) if (await covers(access, scope, path, id)) return
+      throw new AbeleError(
+        'forbidden',
+        'item deletion requires the caller’s own live content authority'
+      )
+    }
     let itemToken = p.token
     if (itemId !== undefined) {
       const row = await db
@@ -68,6 +97,8 @@ export async function deleteScope(
         .where('id', '=', item.scope_id)
         .where('space_id', '=', p.space.id)
         .executeTakeFirstOrThrow()
+      const selected = await activeScope(access, { ...p, scope })
+      await requireCallerContent(selected.path, selected.id)
       p = { ...p, scope }
     }
     requireWrite(p)
@@ -113,6 +144,7 @@ export async function deleteScope(
     const selected = new Set<string>()
     for (const file of allFiles) {
       if (!members.has(file.id) || !(await covers(access, p.scope, file.path, file.id))) continue
+      if (itemId !== undefined) await requireCallerContent(file.path, file.id)
       const op: CommitOp = {
         op: 'delete',
         file_id: file.id,
@@ -132,8 +164,10 @@ export async function deleteScope(
     const permittedDirs = new Set<string>()
     if (scope.kind === 'folder')
       for (const dir of allDirs) {
-        if (dir.path !== '/' && members.has(dir.id) && (await covers(access, p.scope, dir.path)))
+        if (dir.path !== '/' && members.has(dir.id) && (await covers(access, p.scope, dir.path))) {
+          if (itemId !== undefined) await requireCallerContent(dir.path, dir.id)
           permittedDirs.add(dir.id)
+        }
       }
     // Leave ancestors of private/excluded content intact; no scope deletion expands authority.
     const dirs = allDirs

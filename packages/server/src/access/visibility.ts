@@ -52,6 +52,7 @@ export async function covers(
   const resolved = await effectiveScope(deps, { scope, space: { id: scope.space_id } })
   if (!resolved.active) return false
   if (resolved.scope.kind === 'file') {
+    if (!(await filePathAllowed(deps, scope, path))) return false
     if (fileId !== undefined) return fileId === scope.target_id
     const file = await deps.db
       .selectFrom('files')
@@ -256,6 +257,70 @@ export async function initializeScope(deps: AccessDeps, scope: AccessScopesTable
         kind: 'directory',
         mtime: dir.mtime,
       })
+}
+
+/** A membership edit can restore an inherited boundary without changing the
+ * file itself. Publish only its current head at a fresh projection cursor;
+ * inaccessible intermediate versions are never backfilled into history. */
+export async function refreshFileScopes(deps: AccessDeps, spaceId: string, at: string) {
+  const scopes = await deps.db
+    .selectFrom('access_scopes')
+    .selectAll()
+    .where('space_id', '=', spaceId)
+    .where('kind', '=', 'file')
+    .execute()
+  for (const scope of scopes) {
+    const file = await deps.db
+      .selectFrom('files')
+      .innerJoin('versions', 'versions.id', 'files.head_version_id')
+      .select([
+        'files.id',
+        'files.kind',
+        'versions.id as version_id',
+        'versions.path',
+        'versions.blob_sha',
+        'versions.size',
+        'versions.mtime',
+      ])
+      .where('files.vault_id', '=', spaceId)
+      .where('files.id', '=', scope.target_id)
+      .where('files.deleted_at', 'is', null)
+      .executeTakeFirst()
+    if (!file?.blob_sha || !(await covers(deps, scope, file.path, file.id))) continue
+    const old = await member(deps.db, scope.id, file.id)
+    if (old?.version_id === file.version_id && old.path === file.path) continue
+    const item: V2ManifestItem = {
+      file_id: file.id,
+      kind: file.kind,
+      version_id: file.version_id,
+      path: file.path,
+      sha: file.blob_sha,
+      size: file.size,
+      mtime: file.mtime,
+    }
+    const cursor = (
+      await deps.db
+        .updateTable('vault_seq')
+        .set((eb) => ({ head_seq: eb('head_seq', '+', 1) }))
+        .where('vault_id', '=', spaceId)
+        .returning('head_seq')
+        .executeTakeFirstOrThrow()
+    ).head_seq
+    await remember(deps.db, scope.id, item)
+    const event: V2Change = {
+      type: 'content',
+      cursor,
+      at,
+      file_id: file.id,
+      path: file.path,
+      item,
+      prev_path: old && old.path !== file.path ? old.path : null,
+    }
+    await deps.db
+      .insertInto('scope_changes')
+      .values({ scope_id: scope.id, cursor, type: 'content', event: JSON.stringify(event) })
+      .execute()
+  }
 }
 
 /** One durable event per engine/directory version, per effective selector.

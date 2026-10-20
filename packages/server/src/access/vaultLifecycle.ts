@@ -77,6 +77,8 @@ export async function purgeVault(db: Transaction<Database>, id: string) {
   for (const v of versions) if (v.blob_sha) await releaseRef(db, v.blob_sha)
   const scopes = db.selectFrom('access_scopes').select('id').where('space_id', '=', id)
   const tokens = db.selectFrom('access_tokens').select('id').where('space_id', '=', id)
+  // Both live additions and detached primary tombstones reference tokens/scopes.
+  await db.deleteFrom('access_token_items').where('token_id', 'in', tokens).execute()
   await db.deleteFrom('group_write_bases').where('token_id', 'in', tokens).execute()
   await db.deleteFrom('idempotency').where('actor_id', 'in', tokens).execute()
   for (const table of [

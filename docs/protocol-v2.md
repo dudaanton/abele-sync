@@ -135,6 +135,10 @@ cannot track later renames after access ends.
 A `file` selector targets one stable file ID, including non-note files. It follows
 renames within inherited boundaries, never admits a replacement file at the same
 path, and cannot create files or authorize directory operations.
+File coverage also enforces inherited configuration-directory restrictions, even
+when an ancestor folder is moved into a configuration directory. If inherited
+group access returns, the file projection publishes its current head at a fresh
+cursor; inaccessible intermediate versions are not added to its history.
 After an ordinary file deletion, its final delete events can still be drained;
 content and manifest access remain unavailable.
 
@@ -146,8 +150,13 @@ item's feed. Detach closes its socket with code 4003, without content-removal ev
 Item server deletion uses the existing scope deletion transaction and trash. The
 issuer (or whole-vault key) calls the item route with its own key and the target
 item ID. The named `requireOwnerForItemServerDelete` check enforces owner-only
-deletion pending the owner's decision. Read-only callers cannot delete. This
-operation detaches the selected item and preserves both the calling key and the
+deletion pending the owner's decision. Read-only callers cannot delete. The
+management check does not grant content authority: the caller must also cover
+the target selector and every file/directory to be deleted through its own live
+items. With an explicit item header, only that caller item supplies coverage;
+without a header, the caller's live items may supply coverage together. Issuance
+of the edited key alone cannot authorize deletion of later additions.
+The operation detaches the selected item and preserves both the calling key and the
 edited key. Nested/inheriting tokens are revoked, including tokens whose affected
 scope is an additional item. Shared content is genuinely deleted for other
 covering scopes. Receipts include the item identity and can be retried by the
