@@ -1,6 +1,7 @@
 import { PostgresAdapter, sql, type Kysely } from 'kysely'
 import { Migrator, type MigrationProvider } from 'kysely/migration'
 import type { Database } from './schema.js'
+import * as items from './migrations/018_token_items.js'
 import * as activity from './migrations/016_activity.js'
 import * as generation from './migrations/017_generation.js'
 import * as readOnly from './migrations/015_read_only.js'
@@ -11,7 +12,7 @@ import * as sync from './migrations/012_sync_access.js'
 import * as groups from './migrations/013_groups.js'
 import * as conflictDivergences from './migrations/011_conflict_divergences.js'
 
-/** Fresh-only schema. Nobody has sync data: no conversion or old-client compatibility. */
+/** Token schema upgrades preserve existing data; retired account schemas are refused. */
 export const migrationChain = Object.freeze([
   '001_engine',
   '002_token_access',
@@ -22,6 +23,7 @@ export const migrationChain = Object.freeze([
   '007_read_only',
   '008_activity',
   '009_generation',
+  '010_token_items',
 ])
 const provider: MigrationProvider = {
   getMigrations: async () => ({
@@ -34,6 +36,7 @@ const provider: MigrationProvider = {
     '007_read_only': { up: readOnly.up },
     '008_activity': { up: activity.up },
     '009_generation': { up: generation.up },
+    '010_token_items': { up: items.up },
   }),
 }
 export async function runMigrations(
@@ -41,6 +44,21 @@ export async function runMigrations(
   schema?: string,
   target?: string
 ): Promise<void> {
+  if (!(db.getExecutor().adapter instanceof PostgresAdapter)) {
+    // SQLite cannot change foreign_keys inside Migrator's DDL transaction. Pin
+    // the connection and restore enforcement even when a migration rolls back.
+    return db.connection().execute(async (connection) => {
+      await sql`pragma foreign_keys = off`.execute(connection)
+      try {
+        await migrate(connection, schema, target)
+      } finally {
+        await sql`pragma foreign_keys = on`.execute(connection)
+      }
+    })
+  }
+  return migrate(db, schema, target)
+}
+async function migrate(db: Kysely<Database>, schema?: string, target?: string): Promise<void> {
   const own = schema ?? (await currentSchema(db))
   const pg = own !== null
   const old = pg

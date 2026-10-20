@@ -50,6 +50,14 @@ export interface AccessTokensTable {
   revoked_at: string | null
 }
 export interface AccessDatabase {
+  access_token_items: {
+    id: string
+    token_id: string
+    scope_id: string
+    added_by_token_id: string | null
+    added_at: string
+    removed_at: string | null
+  }
   scope_deletions: { secret_hash: string; deleted_at: string }
   activity_daily: {
     vault_id: string
