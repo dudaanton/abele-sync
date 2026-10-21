@@ -114,9 +114,12 @@ it('does not replay a pending recursive deletion over an occupied canonical dire
         ]
       }
     ).scan()
-  ).rejects.toThrow('pending directory deletion needs review')
+  ).resolves.toBeUndefined()
   expect(sent).toEqual([])
-  expect(JSON.parse((await state.getMeta('v2-directories'))!).pending).toEqual(pending)
+  expect(JSON.parse((await state.getMeta('v2-directories'))!).pending).toBeUndefined()
+  expect(JSON.parse((await state.getMeta('v2-directory-review'))!)).toEqual([
+    expect.objectContaining({ pending }),
+  ])
 })
 
 it('retires stale cleanup of a case alias whose physical identity is still tracked', async () => {

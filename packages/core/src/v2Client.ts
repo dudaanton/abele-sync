@@ -166,6 +166,7 @@ export class V2EngineClient implements EngineClient {
       },
       signal
     )
+    await this.directories.retireRecreatedDelete()
     const members = JSON.parse((await state.getMeta(MEMBERS_KEY)) ?? '[]') as StateEntry[]
     this.restoreAssets.clear()
     for (const entry of members)

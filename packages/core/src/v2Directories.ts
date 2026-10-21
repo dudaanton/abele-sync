@@ -9,7 +9,7 @@ import {
 } from '@abele/sync-protocol'
 import { z } from 'zod'
 import type { FileSystem } from './fs.js'
-import type { StateStore } from './state.js'
+import type { StateEntry, StateStore } from './state.js'
 import { LocalPaths, wirePath } from './localPaths.js'
 
 const KEY = 'v2-directories'
@@ -181,6 +181,7 @@ export class V2Directories {
   }
   async scan() {
     if (!this.fs.listDirectories) return
+    if (await this.retireRecreatedDelete()) return
     const waiting = await this.read()
     for (const item of waiting.incoming ?? [])
       if (item.kind === 'directory') await this.receive(item)
@@ -204,10 +205,8 @@ export class V2Directories {
       ) {
         // The request may already have been submitted. Preserve its exact evidence,
         // but do not replay recursive deletion over a directory that is present now.
-        throw new AbeleError(
-          'invalid_request',
-          `pending directory deletion needs review: occupied canonical path ${path}`
-        )
+        await this.retireRecreatedDelete()
+        return
       }
     }
     const record = async (pending: NonNullable<Document['pending']>) => {
@@ -325,5 +324,52 @@ export class V2Directories {
       await this.save(doc)
       await record(doc.pending)
     }
+  }
+
+  /** A recreated directory revokes the old recursive-delete intent, never current bytes. */
+  async retireRecreatedDelete(): Promise<boolean> {
+    const doc = await this.read(),
+      pending = doc.pending
+    if (pending?.op.op !== 'delete_directory' || !this.fs.listDirectories) return false
+    const fileId = pending.op.file_id
+    const old = doc.directories.find((dir) => dir.file_id === fileId)
+    if (!old) return false
+    const inventory = await LocalPaths.forPath(this.fs, old.path, this.state)
+    if (
+      inventory.blocked(old.path) ||
+      !inventory.directory(inventory.resolve(old.path, 'directory'))
+    )
+      return false
+    const within = (path: string) => path === old.path || path.startsWith(old.path + '/')
+    const entries: StateEntry[] = []
+    for await (const entry of this.state.all()) if (within(entry.wirePath)) entries.push(entry)
+    const review = JSON.parse(
+      (await this.state.getMeta!('v2-directory-review')) ?? '[]'
+    ) as unknown[]
+    delete doc.pending
+    doc.directories = doc.directories.filter((dir) => !within(dir.path))
+    doc.incoming = doc.incoming?.filter((item) => !within(item.path))
+    doc.removals = doc.removals.filter(
+      (item) => !within(typeof item === 'string' ? item : item.path)
+    )
+    await this.state.transaction(async () => {
+      await this.state.setMeta!(
+        'v2-directory-review',
+        JSON.stringify([
+          ...review,
+          {
+            pending,
+            path: old.path,
+            reason: 'directory recreated before pending deletion was reconciled',
+          },
+        ])
+      )
+      for (const entry of entries) await this.state.delete(entry.path)
+      await this.state.setCursor(0)
+      await this.state.setMeta!('pull-manifest-progress', null)
+      await this.state.setMeta!('pull-manifest-page', null)
+      await this.save(doc)
+    })
+    return true
   }
 }
