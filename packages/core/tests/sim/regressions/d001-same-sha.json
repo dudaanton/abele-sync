@@ -1,6 +1,5 @@
 {
   "seed": 2,
-  "bug": "D-001",
   "actions": [
     {
       "kind": "write",

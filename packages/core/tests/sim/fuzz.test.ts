@@ -16,7 +16,7 @@ for (const name of readdirSync(dir)
   .filter((n) => n.endsWith('.json'))
   .sort()) {
   const trace = JSON.parse(readFileSync(new URL(name, dir), 'utf8')) as Trace
-  // BUG: D-001/D-002: JSON cases keep the original invariant assertions failing.
+  // Future bug fields retain expected-failure semantics; fixed regressions have no marker.
   const test = trace.bug ? it.fails : it
   test(`replays JSON regression ${name}${trace.bug ? ` (${trace.bug})` : ''}`, async () => {
     await replay(trace)

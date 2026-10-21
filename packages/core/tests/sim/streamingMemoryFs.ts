@@ -147,10 +147,13 @@ export class MemoryStreamingFS {
   async beginAtomicWrite(
     path: string,
     mtime: number,
-    base: ContentIdentity | null
+    base: ContentIdentity | null,
+    beforeCreate?: (stageId: string) => Promise<void>
   ): Promise<AtomicStage> {
     await this.point('beginAtomicWrite')
     const id = this.scheduler.uuid()
+    await beforeCreate?.(id)
+    this.scheduler.fence(this.epoch)
     this.stages.set(id, { path, mtime, base, bytes: new Uint8Array(), sealed: false })
     return this.handle(id)
   }
@@ -158,9 +161,13 @@ export class MemoryStreamingFS {
     await this.point('reopenStage')
     return this.handle(id)
   }
+  async discardStage(id: string) {
+    await this.point('stage.discard')
+    this.stages.delete(id)
+  }
   private handle(id: string): AtomicStage {
     const stage = this.stages.get(id)
-    if (!stage) throw new Error('missing stage')
+    if (!stage) throw Object.assign(new Error('missing stage'), { code: 'ENOENT' })
     return {
       id,
       get offset() {
@@ -194,10 +201,7 @@ export class MemoryStreamingFS {
         await this.disk.fs.writeAtomic(stage.path, stage.bytes, stage.mtime)
         this.stages.delete(id)
       },
-      discard: async () => {
-        await this.point('stage.discard')
-        this.stages.delete(id)
-      },
+      discard: () => this.discardStage(id),
     }
   }
 }

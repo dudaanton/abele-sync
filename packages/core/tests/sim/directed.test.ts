@@ -4,6 +4,7 @@ import { SimScheduler } from './scheduler.js'
 import { simServer } from './server.js'
 import { SimDevice } from './simDevice.js'
 import { ownDownloads, haltedEffects, stages, idle, ledger, exactlyOnce } from './invariants.js'
+import { SyncCancelled } from '../../src/engine.js'
 
 it('v2 simulation converges and is idle through streaming placement', async () => {
   const scheduler = new SimScheduler(1),
@@ -23,8 +24,8 @@ it('v2 simulation converges and is idle through streaming placement', async () =
   }
 })
 
-// BUG: D-001 H1: streaming placement downloads known bytes for an unknown version.
-it.fails('H1: a version bump with the same sha does not download', async () => {
+// Regression D-001 H1: a new version of identical content requires no content GET.
+it('H1: a version bump with the same sha does not download', async () => {
   const scheduler = new SimScheduler(2),
     server = await simServer(scheduler)
   const device = new SimDevice(scheduler, server.token, server.fetch)
@@ -52,53 +53,47 @@ it.fails('H1: a version bump with the same sha does not download', async () => {
   }
 })
 
-// BUG: D-001 hypothesis: interrupted own upload must never become a download.
-// The default cut currently passes unwrapped; keep the requested fails marker visible
-// as an unexpected pass until the manager resolves the expectation (see report).
-it.fails(
-  'T1: interrupted first upload of 2500 tiny files never pulls own bytes',
-  async () => {
-    const scheduler = new SimScheduler(3),
-      server = await simServer(scheduler)
-    let device = new SimDevice(scheduler, server.token, server.fetch)
+// Regression D-001: the applied-response cut retains the own-content guarantee.
+it('T1: interrupted first upload of 2500 tiny files never pulls own bytes', async () => {
+  const scheduler = new SimScheduler(3),
+    server = await simServer(scheduler)
+  let device = new SimDevice(scheduler, server.token, server.fetch)
+  try {
+    for (let n = 0; n < 2500; n++)
+      await device.write(`f${String(n).padStart(4, '0')}.md`, `tiny${n}`)
+    scheduler.cut = process.env.SIM_CUT ?? 'net.after.POST./v2/commit#1'
     try {
-      for (let n = 0; n < 2500; n++)
-        await device.write(`f${String(n).padStart(4, '0')}.md`, `tiny${n}`)
-      scheduler.cut = process.env.SIM_CUT ?? 'net.after.POST./v2/commit#1'
-      try {
-        await device.engine.sync()
-      } catch (error) {
-        if (scheduler.epoch === 0) throw error
-      }
-      expect(scheduler.points).toContain(scheduler.cut)
-      expect(scheduler.epoch).toBe(1)
-      scheduler.cut = undefined
-      device = device.crash()
-      await device.quiesce()
-      stages(device)
-      exactlyOnce(
-        await server.db.selectFrom('versions').select(['file_id', 'blob_sha as sha']).execute()
-      )
-      const versions = await server.db.selectFrom('versions').select(['id', 'seq']).execute()
-      expect(versions, 'I11: exactly one initial version per file').toHaveLength(2500)
-      await ledger(
-        device,
-        Math.max(0, ...versions.map((v) => v.seq)),
-        new Set(versions.map((v) => v.id))
-      )
-      await idle(device)
-      ownDownloads(device)
-    } finally {
-      await device.engine.stop()
-      await server.close()
+      await device.engine.sync()
+    } catch (error) {
+      if (scheduler.epoch === 0) throw error
     }
-  },
-  90_000
-)
+    expect(scheduler.points).toContain(scheduler.cut)
+    expect(scheduler.epoch).toBe(1)
+    scheduler.cut = undefined
+    device = device.crash()
+    await device.quiesce()
+    stages(device)
+    exactlyOnce(
+      await server.db.selectFrom('versions').select(['file_id', 'blob_sha as sha']).execute()
+    )
+    const versions = await server.db.selectFrom('versions').select(['id', 'seq']).execute()
+    expect(versions, 'I11: exactly one initial version per file').toHaveLength(2500)
+    await ledger(
+      device,
+      Math.max(0, ...versions.map((v) => v.seq)),
+      new Set(versions.map((v) => v.id))
+    )
+    await idle(device)
+    ownDownloads(device)
+  } finally {
+    await device.engine.stop()
+    await server.close()
+  }
+}, 90_000)
 
 for (const operation of ['pause', 'stop'] as const) {
-  // BUG: D-002: pause/stop permits the active pull to continue beyond one file per lane.
-  it.fails(`T2: ${operation} during pull bounds effects to one per lane`, async () => {
+  // Regression D-002: cancellation preserves the original per-lane effect envelope.
+  it(`T2: ${operation} during pull bounds effects to one per lane`, async () => {
     const scheduler = new SimScheduler(4),
       server = await simServer(scheduler)
     const device = new SimDevice(scheduler, server.token, server.fetch)
@@ -119,7 +114,7 @@ for (const operation of ['pause', 'stop'] as const) {
           else stopping = device.engine.stop()
         }
       }
-      await device.engine.sync()
+      await expect(device.engine.sync()).rejects.toBeInstanceOf(SyncCancelled)
       await stopping
       expect(mark).toBeGreaterThanOrEqual(0)
       const effects = scheduler.points

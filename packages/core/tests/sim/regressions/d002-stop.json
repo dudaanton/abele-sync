@@ -1,6 +1,5 @@
 {
   "seed": 4,
-  "bug": "D-002",
   "actions": [
     {
       "kind": "remote",

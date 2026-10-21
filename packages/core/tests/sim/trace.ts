@@ -6,6 +6,7 @@ import { SimDevice } from './simDevice.js'
 import { stages, idle, ledger, ownDownloads, haltedEffects } from './invariants.js'
 import type { Trace } from './actions.js'
 import { EngineError } from '../../src/errors.js'
+import { SyncCancelled } from '../../src/engine.js'
 import { converged } from './model.js'
 
 export async function replay(trace: Trace) {
@@ -52,7 +53,11 @@ export async function replay(trace: Trace) {
             }
           }
           try {
-            await device.engine.sync()
+            try {
+              await device.engine.sync()
+            } catch (error) {
+              if (!(error instanceof SyncCancelled)) throw error
+            }
             await stopping
             if (mark < 0) throw new Error('pull mark not reached')
             haltedEffects(

@@ -10,12 +10,9 @@ mkdir -p .scratch
 TMPDIR="$PWD/.scratch" SIM_RUNS=200 node_modules/.bin/vitest run --config vitest.config.ts --root packages/core tests/sim --maxWorkers=2
 ```
 
-H1 and T2 are `it.fails` with BUG references. **T1 is also marked `it.fails` as
-requested, but the applied-commit response cut currently passes its assertions.**
-Vitest therefore reports an unexpected pass, and CI is intentionally red pending
-the manager's decision about that marker. Do not interpret an arbitrary exception
-inside a fails test as proof of the bug: the developer report records unwrapped
-diagnostic failures. No product fix is included.
+H1, T1, T2 and the D-001/D-002 JSON cases are ordinary passing regressions after
+the core reliability fixes. Halt traces expect the explicit `SyncCancelled`
+result and still assert the original effect envelope and convergence oracles.
 
 Replay one generated seed (25 actions by default):
 
@@ -50,8 +47,8 @@ and disk for every cut from the first upload through the remainder of the pass.
 Failures retain their cut name in the assertion. A single 2,500-file directed cut
 can be selected with `SIM_CUT='net.after.POST./v2/commit#1'` and `-t T1` on
 `directed.test.ts`. A cut name is `label#occurrence`; UUIDs in network labels are
-normalized to encounter-order aliases. The exhaustive test retains the requested
-D-001 fails marker too; an all-passing sweep is an unexpected pass.
+normalized to encounter-order aliases. The exhaustive test is an ordinary
+assertion when explicitly enabled; CI does not run this sweep.
 
 The scheduler selects ready continuations with a seeded PRNG. Crash increments
 the device scheduler's epoch; old FS/state/client/transport handles reject before

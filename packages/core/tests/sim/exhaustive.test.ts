@@ -44,8 +44,8 @@ async function upload(cut?: string) {
   }
 }
 
-// BUG: D-001: crash sweep retains the own-content guarantee while product recovery is fixed.
-it.skipIf(process.env.SIM_EXHAUSTIVE !== '1').fails(
+// D-001: optional exhaustive crash sweep retains the own-content guarantee.
+it.skipIf(process.env.SIM_EXHAUSTIVE !== '1')(
   'sweeps every recorded push adapter boundary',
   async () => {
     const points = await upload()
