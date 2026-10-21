@@ -8,6 +8,7 @@ import {
   shaIndex,
 } from './apply.js'
 import type { EngineClient } from './engineClient.js'
+import { checkCancellation } from './cancellation.js'
 import { touchesDeferred, type Staged } from './defer.js'
 import { EngineError } from './errors.js'
 import type { FileSystem } from './fs.js'
@@ -124,6 +125,7 @@ export class VerdictPlanner {
       local: { path: string; sha: string | null }
     }> = []
     for (const [at, result] of results.entries()) {
+      if (at > 0) checkCancellation(this.opts.signal)
       if (result.status === 'rejected') continue
       const op = ops[at]
       if (op === undefined) continue

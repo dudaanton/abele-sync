@@ -23,6 +23,7 @@ import { Staging } from './staging.js'
 import type { StateEntry } from './state.js'
 import type { WatchReports } from './watchReports.js'
 import { refreshLocalPaths } from './localPaths.js'
+import { stoppableListings } from './guard.js'
 import { GENERATION_KEY, MEMBERS_KEY, RECONCILING_KEY } from './restoreGeneration.js'
 import {
   reconciliationScan,
@@ -47,6 +48,7 @@ export interface CycleContext {
   watch: WatchReports
   log: (line: string) => void
   now: () => number
+  signal?: () => AbortSignal
   /** Change the status. */
   set: (patch: Partial<EngineStatus>) => void
   /** The status as it stands. */
@@ -151,7 +153,7 @@ export class SyncCycle {
   }
 
   /** Mark the synced files this scope leaves out; see `SyncEngine.recordScope`. */
-  recordScope(): Promise<void> {
+  recordScope(signal?: AbortSignal): Promise<void> {
     const { opts } = this.ctx
     const record: ScopeRecord = {
       selective: opts.selective,
@@ -159,7 +161,11 @@ export class SyncCycle {
       ...(opts.ignoreText === undefined ? {} : { ignore: opts.ignoreText }),
     }
     const marking = this.scope
-      .record(opts.fs, structuredClone(record), this.filter)
+      .record(
+        stoppableListings(opts.fs, () => signal),
+        structuredClone(record),
+        this.filter
+      )
       .catch((error: unknown) => {
         // A lapsed claim stops the run here, as at any other guarded step.
         if (error instanceof EngineError && error.code === 'lost') throw error
@@ -200,7 +206,8 @@ export class SyncCycle {
    */
   async cycle(): Promise<SyncReport> {
     const { client, fs, state } = this.ctx.opts
-    await refreshLocalPaths(fs, state)
+    const scanningFs = stoppableListings(fs, () => this.ctx.signal?.())
+    await refreshLocalPaths(scanningFs, state)
     const generationBefore = await state.getMeta?.(GENERATION_KEY)
     await client.prepare?.(
       fs,
@@ -222,6 +229,7 @@ export class SyncCycle {
     }
     const log = this.ctx.log
     const common = {
+      signal: this.ctx.signal?.(),
       ...(this.ctx.opts.transferBudget === undefined
         ? {}
         : { transferBudget: this.ctx.opts.transferBudget }),
@@ -253,13 +261,13 @@ export class SyncCycle {
     // Before the server is asked anything, so a narrowing is recorded even offline. A file
     // that came back into scope is settled by a manifest walk, so a widening always walks it,
     // whether or not the host asked for the rescan.
-    await this.recordScope()
-    const scope = await this.scope.review(fs, this.filter)
+    await this.recordScope(this.ctx.signal?.())
+    const scope = await this.scope.review(scanningFs, this.filter)
     for (const path of scope.forgotten) {
       log(`scope: ${path} went while this device did not sync it; the vault's copy is kept`)
     }
     if (scope.forgotten.length > 0 || scope.recheck.size > 0) this.rewind = true
-    if (await this.asides.due(fs, this.filter)) {
+    if (await this.asides.due(scanningFs, this.filter)) {
       log('scope: a local file a server file was passed over for has gone; walking the vault')
       this.rewind = true
     }
@@ -267,7 +275,7 @@ export class SyncCycle {
     this.ctx.set({ headSeq: vault.head_seq, cursor: await state.getCursor() })
     this.learnLimits(vault.settings.max_file_bytes, vault.settings.quota_bytes)
     const inspection = await reconciliationScan(
-      fs,
+      scanningFs,
       state,
       this.scanFilter,
       vault.head_seq,
@@ -276,7 +284,8 @@ export class SyncCycle {
         ? (JSON.parse((await state.getMeta?.(MEMBERS_KEY)) ?? '[]') as StateEntry[])
         : undefined,
       this.unscanned,
-      client
+      client,
+      this.ctx.signal?.()
     )
     const reconciliation = inspection.reconciliation
     if (!reconciling && reconciliation && reconciliation.phase !== 'complete')
@@ -305,6 +314,8 @@ export class SyncCycle {
     if (this.rewind) {
       this.rewind = false
       await state.setCursor(0)
+      await state.setMeta?.('pull-manifest-progress', null)
+      await state.setMeta?.('pull-manifest-page', null)
     }
     // Carried out once the feed is rewound: killed before that, the next run does it again.
     if (filed?.decision.kind === 'restore') await this.holds.settle(filed.raw)
@@ -346,7 +357,8 @@ export class SyncCycle {
     // from a delete and an unrelated create (`likeness.ts`).
     const previous = (entry: StateEntry): Promise<Uint8Array | null> =>
       fetchChecked(client, entry.sha, sha256)
-    const found = await scan(fs, state, this.scanFilter, {
+    const found = await scan(scanningFs, state, this.scanFilter, {
+      signal: this.ctx.signal?.(),
       log,
       previous,
       verifyPaths: inspection.found.dirty,
@@ -529,6 +541,7 @@ export class SyncCycle {
   ): Promise<PullReport> {
     const { client, fs, state } = this.ctx.opts
     const report = await pull(client, fs, state, {
+      signal: this.ctx.signal?.(),
       ...(this.ctx.opts.transferBudget === undefined
         ? {}
         : { transferBudget: this.ctx.opts.transferBudget }),

@@ -10,6 +10,7 @@ import type { PullOptions } from './puller.js'
 import { PendingPullWrites } from './pullWrite.js'
 import type { StateEntry, StateStore } from './state.js'
 import { LocalPaths, resolveLocalFile } from './localPaths.js'
+import { checkCancellation } from './cancellation.js'
 
 /**
  * A change put onto this disk: its file carried to where the change says, its bytes written or
@@ -40,6 +41,7 @@ export class PullPlacer {
     private readonly state: StateStore,
     private readonly opts: Pick<
       PullOptions,
+      | 'signal'
       | 'dirty'
       | 'expected'
       | 'filter'
@@ -303,6 +305,7 @@ export class PullPlacer {
 
     // What the file will be once this is done: as it was, or exactly what gets written.
     let wrote: { size: number; mtime: number }
+    checkCancellation(this.opts.signal)
     try {
       if (from !== null && (await this.fs.stat(from)) !== null) {
         await this.pending.prepare(change, entry, target, from)
@@ -377,8 +380,13 @@ export class PullPlacer {
         : await this.fs.beginAtomicWrite!(target, change.mtime ?? 0, base)
     if (!pending?.stageId) await this.pending.prepare(change, entry, target, from, stage.id)
     try {
-      const source = await this.client.openVersion!(change.file_id, change.version_id, identity)
-      await downloadToStage(source, stage, identity, this.budget, undefined, async () => {
+      const source = await this.client.openVersion!(
+        change.file_id,
+        change.version_id,
+        identity,
+        this.opts.signal
+      )
+      await downloadToStage(source, stage, identity, this.budget, this.opts.signal, async () => {
         await this.recheckTarget(change.path, target)
         if (
           !sameStat(beforeTarget, await this.fs.stat(target)) ||

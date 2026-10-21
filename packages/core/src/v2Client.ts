@@ -73,8 +73,8 @@ export class V2EngineClient implements EngineClient {
     this.item = options.item
     this.http = new Http({ ...options, baseUrl: this.token.address, token: this.token.key })
   }
-  async connection() {
-    const value = await this.http.json(V2ConnectionSchema, 'GET', '/v2/connection')
+  async connection(signal?: AbortSignal) {
+    const value = await this.http.json(V2ConnectionSchema, 'GET', '/v2/connection', { signal })
     if (value.status !== 'active')
       throw new AbeleError(value.status, 'connection scope is not ready')
     this.connectionInfo = value
@@ -101,13 +101,14 @@ export class V2EngineClient implements EngineClient {
   async prepare(
     fs: FileSystem,
     state: StateStore,
-    excludeDirectory: (path: string) => boolean = () => false
+    excludeDirectory: (path: string) => boolean = () => false,
+    signal?: AbortSignal
   ) {
     if (!state.getMeta || !state.setMeta)
       throw new AbeleError('invalid_request', 'token sync requires durable metadata state ports')
     this.ports = { fs, state }
     this.http.generation = undefined
-    await this.connection()
+    await this.connection(signal)
     const generation = this.http.observedGeneration
     if (await reconcileGeneration(state, generation)) {
       this.files.clear()
@@ -134,14 +135,18 @@ export class V2EngineClient implements EngineClient {
         })
         return (await this.http.decode(V2CommitResponseSchema, response, 'POST', '/v2/commit'))
           .results
-      }
+      },
+      signal
     )
     const members = JSON.parse((await state.getMeta(MEMBERS_KEY)) ?? '[]') as StateEntry[]
     this.restoreAssets.clear()
     for (const entry of members)
       if (!entry.wirePath.toLowerCase().endsWith('.md')) this.restoreAssets.add(entry.wirePath)
     const current: StateEntry[] = []
-    for await (const entry of state.all()) current.push(entry)
+    for await (const entry of state.all()) {
+      signal?.throwIfAborted()
+      current.push(entry)
+    }
     for (const entry of [...members, ...current])
       if (!this.departed.has(entry.wirePath)) {
         const item = {
@@ -156,11 +161,11 @@ export class V2EngineClient implements EngineClient {
         this.files.set(entry.wirePath, item)
         this.byteSources.set(entry.sha, item)
       }
-    if (this.connectionInfo!.scope.kind === 'group') await this.groupEligibility(fs)
+    if (this.connectionInfo!.scope.kind === 'group') await this.groupEligibility(fs, signal)
   }
   /** Only note frontmatter grants local eligibility. Attachments remain tracked-only until
    * an explicit host publication call. The same bounded resolver runs on both ends. */
-  private async groupEligibility(fs: FileSystem) {
+  private async groupEligibility(fs: FileSystem, signal?: AbortSignal) {
     this.localGroupPaths.clear()
     const notes: Array<{ id: string; path: string; sha: string; links: string[] }> = []
     const bindings = JSON.parse(
@@ -169,6 +174,7 @@ export class V2EngineClient implements EngineClient {
     const nextBindings: typeof bindings = {}
     const listed = new Set<string>()
     for await (const file of fs.list()) {
+      signal?.throwIfAborted()
       if (
         !file.path.toLowerCase().endsWith('.md') ||
         file.path.startsWith('.obsidian/') ||
@@ -301,23 +307,27 @@ export class V2EngineClient implements EngineClient {
     this.byteSources.set(item.sha, item)
     return { ...item, seq }
   }
-  async manifest(cursor: string | null, limit?: number) {
+  async manifest(cursor: string | null, limit?: number, signal?: AbortSignal) {
     const page = await this.http.json(V2ManifestSchema, 'GET', '/v2/manifest', {
       query: { next: cursor, limit },
+      signal,
     })
     const items: ManifestItem[] = []
     for (const item of page.items) {
+      signal?.throwIfAborted()
       const file = await this.fileItem(item, page.cursor)
       if (file) items.push(file)
     }
     return { items, next: page.next, head_seq: page.cursor }
   }
-  async changes(since: number, limit?: number) {
+  async changes(since: number, limit?: number, signal?: AbortSignal) {
     const page = await this.http.json(V2ChangesSchema, 'GET', '/v2/changes', {
       query: { since, limit },
+      signal,
     })
     const items: ChangeItem[] = []
     for (const event of page.items) {
+      signal?.throwIfAborted()
       if (event.type === 'content') {
         if (event.prev_path) this.files.delete(event.prev_path)
         const file = await this.fileItem(event.item, event.cursor)
@@ -467,22 +477,23 @@ export class V2EngineClient implements EngineClient {
   async hasBlob(_sha: string) {
     return false
   }
-  async getBlob(sha: string): Promise<Uint8Array> {
+  async getBlob(sha: string, signal?: AbortSignal): Promise<Uint8Array> {
     let file = this.byteSources.get(sha)
     if (!file) {
       let cursor: string | null = null
       do {
-        const page = await this.manifest(cursor)
+        const page = await this.manifest(cursor, undefined, signal)
         cursor = page.next
       } while (cursor)
       file = this.byteSources.get(sha)
     }
     if (!file) throw new AbeleError('not_found', 'no authorized file version for these bytes')
-    return this.versionBytes(file.file_id, file.version_id)
+    return this.versionBytes(file.file_id, file.version_id, signal)
   }
-  versionBytes(fileId: string, versionId: string) {
+  versionBytes(fileId: string, versionId: string, signal?: AbortSignal) {
     return this.http.bytes('GET', `/v2/files/${encodeURIComponent(fileId)}/content`, {
       query: { version_id: versionId },
+      signal,
     })
   }
   async openVersion(
@@ -496,27 +507,33 @@ export class V2EngineClient implements EngineClient {
       ...(signal === undefined ? {} : { signal }),
     })
   }
-  async putBlob(sha: string, bytes: Uint8Array) {
+  async putBlob(sha: string, bytes: Uint8Array, signal?: AbortSignal) {
+    signal?.throwIfAborted()
     const path = `/v2/uploads/${sha}`
     if (bytes.length <= this.http.simpleUploadBytes) {
-      await this.http.send('PUT', path, { bytes })
+      await this.http.send('PUT', path, { bytes, signal })
       return
     }
     const upload = await this.http.json(UploadBeginResponseSchema, 'POST', path + '/begin', {
       json: { size: bytes.length },
+      signal,
     })
     const parts = Math.ceil(bytes.length / upload.part_size)
     if (parts !== upload.parts) throw new EngineError('protocol', 'invalid multipart layout')
     const base = `${path}/${encodeURIComponent(upload.upload_id)}`
-    for (let part = 0; part < parts; part++)
+    for (let part = 0; part < parts; part++) {
+      signal?.throwIfAborted()
       if (!(upload.received ?? []).includes(part))
         await this.http.send('PUT', `${base}/${part}`, {
+          signal,
           bytes: bytes.subarray(
             part * upload.part_size,
             Math.min((part + 1) * upload.part_size, bytes.length)
           ),
         })
-    await this.http.send('POST', base + '/complete')
+    }
+    signal?.throwIfAborted()
+    await this.http.send('POST', base + '/complete', { signal })
   }
   /** Owns source until both passes and the server acknowledgement finish. */
   async putBlobSource(

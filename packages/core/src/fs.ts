@@ -2,6 +2,7 @@ import { caseKey } from '@abele/sync-protocol'
 import { EngineError } from './errors.js'
 import type { StreamingFileSystem } from './streaming.js'
 import { fingerprintSource } from './streaming.js'
+import { checkCancellation } from './cancellation.js'
 
 /** A regular file as the host sees it. `path` is on-disk form, `/`-separated and vault-relative. */
 export interface FileInfo {
@@ -50,10 +51,12 @@ export interface FileSystem extends Partial<StreamingFileSystem> {
 export async function fingerprintFile(
   fs: FileSystem,
   path: string,
-  hash: (bytes: Uint8Array) => Promise<string>
+  hash: (bytes: Uint8Array) => Promise<string>,
+  signal?: AbortSignal
 ): Promise<{ size: number; sha: string }> {
+  checkCancellation(signal)
   if (fs.fingerprint) return fs.fingerprint(path)
-  if (fs.openRead) return fingerprintSource(await fs.openRead(path))
+  if (fs.openRead) return fingerprintSource(await fs.openRead(path), undefined, signal)
   const bytes = await fs.read(path)
   return { size: bytes.length, sha: await hash(bytes) }
 }

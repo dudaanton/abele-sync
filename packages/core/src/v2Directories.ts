@@ -70,7 +70,8 @@ export class V2Directories {
     private readonly fs: FileSystem,
     private readonly state: StateStore,
     private readonly includes: (path: string) => boolean,
-    private readonly commit: (ops: V2CommitOp[], key: string) => Promise<CommitOpResult[]>
+    private readonly commit: (ops: V2CommitOp[], key: string) => Promise<CommitOpResult[]>,
+    private readonly signal?: AbortSignal
   ) {}
   private async read(): Promise<Document> {
     const raw = await this.state.getMeta!(KEY)
@@ -83,6 +84,7 @@ export class V2Directories {
     return this.state.setMeta!(KEY, JSON.stringify(doc))
   }
   async receive(item: DirectoryItem) {
+    this.signal?.throwIfAborted()
     if (!this.includes(item.path)) return
     if (!this.fs.mkdir || !this.fs.listDirectories)
       throw new AbeleError('invalid_request', 'host directory filesystem ports are required')
@@ -149,6 +151,7 @@ export class V2Directories {
     for (const removal of [...doc.removals].sort(
       (a, b) => localPath(b).length - localPath(a).length
     )) {
+      this.signal?.throwIfAborted()
       const path = localPath(removal)
       // Legacy cleanup lacks identity evidence. Preserve it for review rather than
       // deleting whatever now occupies the spelling after an upgrade.
@@ -208,6 +211,7 @@ export class V2Directories {
       }
     }
     const record = async (pending: NonNullable<Document['pending']>) => {
+      this.signal?.throwIfAborted()
       let result: CommitOpResult
       try {
         result = (await this.commit([pending.op], pending.key))[0]!
@@ -280,6 +284,7 @@ export class V2Directories {
       (old) => !missing.some((parent) => parent !== old && old.path.startsWith(parent.path + '/'))
     )
     for (const old of roots.sort((a, b) => a.path.length - b.path.length)) {
+      this.signal?.throwIfAborted()
       const moved = local.find((l) => l.identity === old.identity)
       // A widened/reset scope needs its snapshot before absence is a deletion.
       // The next ordinary cycle can delete missing folders on a known baseline.
@@ -309,6 +314,7 @@ export class V2Directories {
       await this.save(doc)
     }
     for (const dir of local.sort((a, b) => a.path.length - b.path.length)) {
+      this.signal?.throwIfAborted()
       if (doc.directories.some((d) => d.path === wirePath(dir.path))) continue
       doc.pending = {
         key: crypto.randomUUID(),

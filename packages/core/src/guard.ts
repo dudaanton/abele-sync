@@ -3,6 +3,34 @@ import { EngineError } from './errors.js'
 import type { FileSystem } from './fs.js'
 import type { StateStore } from './state.js'
 import type { ChunkSource } from './streaming.js'
+import { checkCancellation } from './cancellation.js'
+
+/** Inventory walks can be large, but have no file operation whose ledger must settle. */
+export function stoppableListings(
+  fs: FileSystem,
+  signalFor: () => AbortSignal | undefined
+): FileSystem {
+  return new Proxy(fs, {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key)
+      if (typeof value !== 'function') return value
+      if (key === 'list' || key === 'listDirectories')
+        return async function* (...args: unknown[]) {
+          const signal = signalFor()
+          checkCancellation(signal)
+          const listed = (value as (...args: unknown[]) => AsyncIterable<unknown>).apply(
+            target,
+            args
+          )
+          for await (const item of listed) {
+            checkCancellation(signal)
+            yield item
+          }
+        }
+      return (value as (...args: unknown[]) => unknown).bind(target)
+    },
+  })
+}
 
 function stopped<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -117,9 +145,21 @@ export function stoppableClient(
     get(target, key) {
       const value: unknown = Reflect.get(target, key)
       if (typeof value !== 'function') return value
+      if (key === 'includes') return (value as (...args: unknown[]) => unknown).bind(target)
       return (...args: unknown[]): unknown => {
         const signal = signalFor()
-        if (signal.aborted) throw new EngineError('offline', 'sync stopped')
+        if (signal.aborted) {
+          if (key === 'putBlobSource')
+            return Promise.resolve((args[1] as ChunkSource).close()).then(() => {
+              throw new EngineError('offline', 'sync stopped')
+            })
+          throw new EngineError('offline', 'sync stopped')
+        }
+        if (key === 'manifest' || key === 'changes') args[2] = signal
+        if (key === 'getBlob') args[1] = signal
+        if (key === 'versionBytes') args[2] = signal
+        if (key === 'prepare') args[3] = signal
+        if (key === 'putBlob') args[2] = signal
         let cleanup = () => {}
         if (key === 'openVersion' || key === 'putBlobSource') {
           const at = key === 'openVersion' ? 3 : 2

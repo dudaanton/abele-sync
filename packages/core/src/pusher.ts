@@ -22,6 +22,7 @@ import { sourcesFromOps, sourcesFromScan, type Sources } from './pushSources.js'
 import { TransferBudget } from './streaming.js'
 import { VerdictPlanner } from './pushVerdicts.js'
 import type { StateStore, Journal } from './state.js'
+import { checkCancellation } from './cancellation.js'
 export { batches } from './pushBatches.js'
 
 /**
@@ -101,6 +102,7 @@ export interface PushReport {
 
 /** What a replay needs: everything but the keys, which the journal already holds. */
 export interface ResumeOptions {
+  signal?: AbortSignal
   onApplied?: import('./applied.js').AppliedOptions['onApplied']
   transferBudget?: import('./streaming.js').TransferBudget
   /** The registry the host's watcher checks, so the engine does not push its own writes back. */
@@ -375,6 +377,7 @@ class Pusher {
     batchId?: string,
     startedAt?: string
   ): Promise<void> {
+    checkCancellation(this.opts.signal)
     const journal: Journal = {
       batchId: batchId ?? crypto.randomUUID(),
       ops,
@@ -427,10 +430,31 @@ class Pusher {
         (this.report.deferred ?? 0) + (typeof fresh === 'number' ? fresh : heads.length)
     }
     const applied: AppliedChange[] = []
+    let recorded = 0
+    let interrupted = false
     await this.state.transaction(async () => {
       for (const [k, run] of verdicts.runs.entries()) {
-        if (k > 0) await this.planner.fetchRun(run, verdicts)
+        if (k > 0) {
+          if (this.opts.signal?.aborted) {
+            interrupted = true
+            return
+          }
+          try {
+            await this.planner.fetchRun(run, verdicts)
+          } catch (error) {
+            // Download cancellation must not roll back files already recorded by this batch.
+            if (!this.opts.signal?.aborted) throw error
+            interrupted = true
+            return
+          }
+        }
         for (const at of run) {
+          // Commit completed ledger entries even when the remaining verdicts are cancelled.
+          // Keep the journal: resume replays the same server receipt for the rest.
+          if (recorded > 0 && this.opts.signal?.aborted) {
+            interrupted = true
+            return
+          }
           const op = sending[at]
           if (op !== undefined) {
             const previous =
@@ -439,6 +463,7 @@ class Pusher {
                 : await this.state.byFileId(op.file_id)
             const keptBefore = this.report.kept.length
             await this.recorder.take(op, results[at], at, verdicts)
+            recorded++
             const result = results[at]!
             if (
               this.opts.onApplied !== undefined &&
@@ -475,6 +500,7 @@ class Pusher {
       await this.state.setJournal(null)
     })
     for (const change of applied) await notifyApplied(this.opts, change)
+    if (interrupted) checkCancellation(this.opts.signal)
   }
 
   /**
@@ -524,9 +550,11 @@ class Pusher {
 
   /** One blob onto the server, unless it is there already or refused for good. */
   private async uploadOne(sha: string, sources: Sources): Promise<void> {
+    checkCancellation(this.opts.signal)
     if (await this.client.hasBlob(sha)) return
     try {
       const upload = async () => {
+        checkCancellation(this.opts.signal)
         if (sources.open && this.client.putBlobSource) {
           const source = await sources.open(sha)
           if (!source) {
@@ -536,7 +564,7 @@ class Pusher {
           await this.client.putBlobSource(
             { sha, size: source.size },
             source,
-            undefined,
+            this.opts.signal,
             this.transferBudget.maxChunkBytes
           )
         } else {
@@ -545,10 +573,11 @@ class Pusher {
             this.opts.log?.(`push: no file on this disk holds ${sha}`)
             return
           }
-          await this.client.putBlob(sha, bytes)
+          checkCancellation(this.opts.signal)
+          await this.client.putBlob(sha, bytes, this.opts.signal)
         }
       }
-      await this.transferBudget.run(upload)
+      await this.transferBudget.run(upload, this.opts.signal)
     } catch (error) {
       if (!(error instanceof AbeleError)) throw error
       // The server will not have these bytes at any price: over its cap, or over the

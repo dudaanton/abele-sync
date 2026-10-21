@@ -487,7 +487,7 @@ describe('the engine over the device facet', () => {
     expect(stopped).toBe(true)
     const report = await running
     expect(report.push.applied).toBe(1)
-    expect(d.engine.status.state).toBe('idle')
+    expect(d.engine.status.state).toBe('paused')
     expect((await vault.client.manifest(null)).items.map((item) => item.path)).toEqual(['note.md'])
   })
 

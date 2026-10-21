@@ -9,6 +9,7 @@ import { AbeleError, fitGeneratedName, type ChangeItem } from '@abele/sync-proto
 import { isEngineOwn } from './selective.js'
 import { StagedChanges } from './defer.js'
 import { DeleteHolds, DEFAULT_DELETE_WINDOW_MS } from './deletes.js'
+import { checkCancellation } from './cancellation.js'
 
 async function stagedPaths(state: StateStore): Promise<Set<string>> {
   const paths = new Set<string>()
@@ -316,7 +317,8 @@ export async function reconciliationScan(
   liveJournalKey?: string,
   retiredEntries?: readonly StateEntry[],
   startup = true,
-  client?: EngineClient
+  client?: EngineClient,
+  signal?: AbortSignal
 ): Promise<{ found: ScanResult; reconciliation: ReconciliationState | null; basis: StateStore }> {
   const basis = retiredEntries ? await comparisonState(state, retiredEntries) : state
   let reconciliation = await readReconciliation(state)
@@ -333,6 +335,7 @@ export async function reconciliationScan(
   const older: Array<{ entry: StateEntry; info: FileInfo }> = []
   let reason: string | null = null
   for await (const entry of basis.all()) {
+    checkCancellation(signal)
     if (isEngineOwn(entry.wirePath) || filter.excluded(entry.wirePath, entry.size)) continue
     entries.set(entry.wirePath, entry)
     const info = disk.get(entry.path)
@@ -352,7 +355,8 @@ export async function reconciliationScan(
   const changedOlder: typeof older = []
   if (older.length > 1) {
     for (const { entry, info } of older) {
-      if ((await fingerprintFile(fs, info.path, sha256)).sha !== entry.sha)
+      checkCancellation(signal)
+      if ((await fingerprintFile(fs, info.path, sha256, signal)).sha !== entry.sha)
         changedOlder.push({ entry, info })
       if (changedOlder.length > 1) {
         reason = 'multiple tracked files have changed content with older timestamps'
@@ -385,7 +389,7 @@ export async function reconciliationScan(
         latest.sha !== null &&
         info.mtime > latest.mtime
       ) {
-        const { sha } = await fingerprintFile(fs, info.path, sha256)
+        const { sha } = await fingerprintFile(fs, info.path, sha256, signal)
         if (sha !== entry.sha && sha !== latest.sha)
           reason = 'backdated local binary diverges from a newer remote version with an older clock'
       }
@@ -457,7 +461,7 @@ export async function reconciliationScan(
   await fenceRestoredJournal(state, head, fs, liveJournalKey, client)
   let found: ScanResult
   if (reconciliation?.phase === 'requested') {
-    found = await scan(fs, basis, filter, { revalidate: 'all', pairMoves: false })
+    found = await scan(fs, basis, filter, { revalidate: 'all', pairMoves: false, signal })
   } else {
     // The ordinary preflight already stats tracked entries. Reuse it for rolling
     // hashes and pull protection; fresh files and rename pairing belong to the final scan.
@@ -472,12 +476,13 @@ export async function reconciliationScan(
     }
     const selected = await revalidationPaths(files, state, { revalidate: 16 })
     for (const [path, info] of files) {
+      checkCancellation(signal)
       const entry = entries.get(path)!
       const changed = info.size !== entry.size || info.mtime !== entry.mtime
       if (changed) found.dirty.add(path)
       if (!selected.has(path) && !changed) continue
       try {
-        const fingerprint = await fingerprintFile(fs, info.path, sha256)
+        const fingerprint = await fingerprintFile(fs, info.path, sha256, signal)
         if (fingerprint.size !== info.size)
           throw new Error('file changed during content revalidation')
         found.hashes.set(path, fingerprint.sha)

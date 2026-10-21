@@ -7,6 +7,7 @@ import { alike, comparable } from './likeness.js'
 import { isEngineOwn } from './selective.js'
 import type { StateEntry, StateStore } from './state.js'
 import { LocalPaths, rememberedCollisions, wirePath as localToWire } from './localPaths.js'
+import { checkCancellation } from './cancellation.js'
 
 /**
  * The scanner: what is on disk against what was last synced, as the ops a push commits.
@@ -72,6 +73,7 @@ export interface ScanResult {
 }
 
 export interface ScanOptions {
+  signal?: AbortSignal
   /** Status can inspect collisions while another process owns the write lock. */
   readOnly?: boolean
   /** Extra tracked files to hash per scan; `all` forces content reconciliation. */
@@ -371,6 +373,7 @@ export async function scan(
   const modifies: Array<{ path: string; op: CommitOp }> = []
   const fresh: string[] = []
   for (const [wirePath, info] of files) {
+    checkCancellation(opts.signal)
     const entry = entries.get(wirePath)
     const twin = entry ? undefined : synced.get(caseKey(wirePath))
     if (twin !== undefined) {
@@ -391,7 +394,7 @@ export async function scan(
     }
     let sha: string
     try {
-      const fingerprint = await fingerprintFile(fs, info.path, hash)
+      const fingerprint = await fingerprintFile(fs, info.path, hash, opts.signal)
       if (fingerprint.size !== info.size) throw new Error('file changed during scan')
       sha = fingerprint.sha
     } catch (error) {

@@ -21,8 +21,10 @@ import { Wake } from './wake.js'
 import { WatchReports } from './watchReports.js'
 import { TransferBudget } from './streaming.js'
 import { requestReconciliation } from './reconciliation.js'
+import { SyncCancelled } from './cancellation.js'
 
 export { classifyFailure, joinFinished } from './engineTypes.js'
+export { SyncCancelled } from './cancellation.js'
 export type {
   EngineOptions,
   EngineState,
@@ -153,6 +155,7 @@ export class SyncEngine implements ExclusiveOperationPort {
       watch: this.watch,
       log: this.log,
       now: this.now,
+      signal: () => this.cancellation.signal,
       set: (patch) => this.set(patch),
       status: () => this.current,
       watching: () => this.unwatch !== null,
@@ -380,6 +383,7 @@ export class SyncEngine implements ExclusiveOperationPort {
   private launch(): Promise<SyncReport> {
     this.stopping = false
     if (this.cancellation.signal.aborted) this.cancellation = new AbortController()
+    if (this.started && !this.paused) this.wake.connect()
     return this.occupy(this.run())
   }
 
@@ -391,9 +395,14 @@ export class SyncEngine implements ExclusiveOperationPort {
     this.running = work
     void work.then(noop, noop).then(() => {
       this.running = null
+      if (this.cancellation.signal.aborted) this.set({ state: 'paused', lastError: null })
       const next = this.queued
       if (next === null) return
       this.queued = null
+      if (this.stopping || (this.paused && this.cancellation.signal.aborted)) {
+        next.reject(new SyncCancelled())
+        return
+      }
       this.launch().then(next.resolve, next.reject)
     })
     return work
@@ -415,7 +424,7 @@ export class SyncEngine implements ExclusiveOperationPort {
       const report = await this.cycle.cycle()
       this.wake.succeeded()
       this.set({
-        state: this.paused ? 'paused' : 'idle',
+        state: this.paused || this.stopping ? 'paused' : 'idle',
         lastSyncAt: new Date(this.now()).toISOString(),
         lastError: null,
       })
@@ -424,6 +433,10 @@ export class SyncEngine implements ExclusiveOperationPort {
       if (this.heard !== null && this.heard > this.current.cursor) this.trigger('events')
       return report
     } catch (error) {
+      if (this.cancellation.signal.aborted) {
+        this.set({ state: 'paused', lastError: null, cursor: await this.opts.state.getCursor() })
+        throw new SyncCancelled()
+      }
       this.fail(error)
       throw error
     }
@@ -470,7 +483,8 @@ export class SyncEngine implements ExclusiveOperationPort {
     if (this.started) return
     this.stopping = false
     // Subscribe before launching the first sync, so renew a stopped connection here too.
-    if (this.cancellation.signal.aborted) this.cancellation = new AbortController()
+    if (this.running === null && this.cancellation.signal.aborted)
+      this.cancellation = new AbortController()
     this.started = true
     void this.recordScope().catch(noop)
     // Whatever was edited while nothing was watching is nobody's report but the disk's.
@@ -492,15 +506,17 @@ export class SyncEngine implements ExclusiveOperationPort {
     this.watch.cancel()
     // A sent commit may already have landed; wait for its answer and ledger recording.
     // A blocked read has no such side effect and can be abandoned immediately.
-    if (this.activeWrites.count === 0) this.cancellation.abort()
-    // A run promised to callers while this one ran still follows it; wait for that too.
+    this.cancellation.abort()
+    // occupy rejects queued syncs rather than launching another run during shutdown.
     while (this.running !== null) await this.running.then(noop, noop)
+    if (!this.started) this.set({ state: 'paused', lastError: null })
   }
 
-  /** Stop syncing on any trigger. A running sync finishes; `sync()` still runs when asked. */
+  /** Stop triggers and interrupt the current run; `sync()` still runs when asked. */
   pause(): void {
     if (this.paused) return
     this.paused = true
+    this.cancellation.abort()
     this.wake.disconnect()
     this.wake.clearTimers()
     if (this.running === null) this.set({ state: 'paused' })

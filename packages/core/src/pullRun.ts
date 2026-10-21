@@ -16,6 +16,17 @@ import { PullPlacer } from './pullPlace.js'
 import type { PullOptions, PullReport } from './puller.js'
 import { isEngineOwn } from './selective.js'
 import type { StateEntry, StateStore } from './state.js'
+import { checkCancellation } from './cancellation.js'
+
+const MANIFEST_PROGRESS = 'pull-manifest-progress'
+const MANIFEST_PAGE_DATA = 'pull-manifest-page'
+interface ManifestProgress {
+  page: ManifestResponse
+  head: number
+  completed: string[]
+  seen: string[]
+  firstHeld: number | null
+}
 
 /**
  * One run of the puller (see `puller.ts`): the manifest or the feed read page by page, each
@@ -135,6 +146,7 @@ export class Puller {
    */
   private async recheck(): Promise<void> {
     for (const fileId of this.opts.recheck ?? []) {
+      checkCancellation(this.opts.signal)
       if (this.seen.has(fileId)) continue
       const entry = await this.state.byFileId(fileId)
       if (entry === null) continue
@@ -190,11 +202,63 @@ export class Puller {
     let head: number | null = null
     this.walking = true
     try {
+      let progress: ManifestProgress | null = JSON.parse(
+        (await this.state.getMeta?.(MANIFEST_PROGRESS)) ?? 'null'
+      ) as ManifestProgress | null
+      if (progress !== null) {
+        progress.page = JSON.parse(
+          (await this.state.getMeta?.(MANIFEST_PAGE_DATA)) ?? 'null'
+        ) as ManifestResponse
+        if (progress.page === null) throw new Error('missing manifest checkpoint page')
+        this.firstHeld = progress.firstHeld
+        for (const id of progress.seen) this.seen.add(id)
+      }
       do {
-        const page: ManifestResponse = await this.client.manifest(cursor, MANIFEST_PAGE)
-        head ??= page.head_seq
-        await this.page(page.items.map(asCreate))
+        checkCancellation(this.opts.signal)
+        const page: ManifestResponse =
+          progress?.page ?? (await this.client.manifest(cursor, MANIFEST_PAGE))
+        head ??= progress?.head ?? page.head_seq
+        progress ??= { page, head, completed: [], seen: [], firstHeld: this.firstHeld }
+        const checkpoint = progress
+        const saveProgress = () => {
+          checkpoint.firstHeld = this.firstHeld
+          checkpoint.seen = [...this.seen].filter((id) => this.opts.recheck?.has(id))
+          return this.state.setMeta?.(
+            MANIFEST_PROGRESS,
+            JSON.stringify({ ...checkpoint, page: undefined })
+          )
+        }
+        await this.state.transaction(async () => {
+          await this.state.setMeta?.(MANIFEST_PAGE_DATA, JSON.stringify(page))
+          await saveProgress()
+        })
+        const completed = new Set(checkpoint.completed)
+        await this.page(
+          page.items.filter((item) => !completed.has(item.file_id)).map(asCreate),
+          async (change) => {
+            checkpoint.completed.push(change.file_id)
+            await saveProgress()
+          }
+        )
         cursor = page.next
+        if (cursor !== null) {
+          checkCancellation(this.opts.signal)
+          const next = await this.client.manifest(cursor, MANIFEST_PAGE)
+          progress = {
+            page: next,
+            head,
+            completed: [],
+            seen: checkpoint.seen,
+            firstHeld: this.firstHeld,
+          }
+          await this.state.transaction(async () => {
+            await this.state.setMeta?.(MANIFEST_PAGE_DATA, JSON.stringify(next))
+            await this.state.setMeta?.(
+              MANIFEST_PROGRESS,
+              JSON.stringify({ ...progress, page: undefined })
+            )
+          })
+        }
       } while (cursor !== null)
     } finally {
       this.walking = false
@@ -206,15 +270,23 @@ export class Puller {
     // did apply is recognised by its version and skipped.
     this.walkAgain = this.firstHeld !== null
     this.reached = head ?? 0
-    await this.save()
+    await this.state.transaction(async () => {
+      await this.save()
+      await this.state.setMeta?.(MANIFEST_PROGRESS, null)
+      await this.state.setMeta?.(MANIFEST_PAGE_DATA, null)
+    })
   }
 
   /** The feed, page after page, until the last one handed out reaches the head. */
   private async follow(): Promise<void> {
     for (;;) {
+      checkCancellation(this.opts.signal)
       const previous = this.reached
       const page = await this.client.changes(this.reached, CHANGES_PAGE)
-      await this.page(page.items)
+      await this.page(page.items, async (change) => {
+        this.reached = change.seq
+        await this.save()
+      })
       this.reached = page.next_since
       await this.save()
       if (
@@ -232,7 +304,11 @@ export class Puller {
    * bytes fit `prefetchBytes`, each fetched, written and let go before the next, so what is
    * held at once is bounded by bytes and not by the page's thousand files.
    */
-  private async page(changes: ChangeItem[]): Promise<void> {
+  private async page(
+    changes: ChangeItem[],
+    completed?: (change: ChangeItem) => Promise<void>
+  ): Promise<void> {
+    checkCancellation(this.opts.signal)
     if (changes.length === 0) return
     for (const change of changes) this.seen.add(change.file_id)
     const latest = lastPerFile(changes)
@@ -243,6 +319,7 @@ export class Puller {
     const taking: ChangeItem[] = []
     const staged: Staged[] = []
     for (const change of wanted) {
+      checkCancellation(this.opts.signal)
       const stage = await this.staging(change)
       if (stage === null) taking.push(change)
       else staged.push(stage)
@@ -252,8 +329,13 @@ export class Puller {
     const local = await shaIndex(this.state)
     const budget = this.opts.prefetchBytes ?? DEFAULT_PREFETCH_BYTES
     for (const run of runsWithin(taking, downloads, budget)) {
+      checkCancellation(this.opts.signal)
       const fetched = await this.prefetch(run, local)
-      for (const change of run) await this.take(change, fetched, local)
+      for (const change of run) {
+        checkCancellation(this.opts.signal)
+        await this.take(change, fetched, local)
+        await completed?.(change)
+      }
     }
   }
 
@@ -471,9 +553,10 @@ export class Puller {
     changes: ChangeItem[],
     local: Map<string, StateEntry>
   ): Promise<Map<string, Uint8Array>> {
-    const wanted: string[] = []
+    const wanted = new Map<string, ChangeItem>()
     const seen = new Set<string>()
     for (const change of changes) {
+      checkCancellation(this.opts.signal)
       const sha = change.sha
       if (sha === null || change.op === 'delete') continue
       if (this.fs.beginAtomicWrite && this.fs.reopenStage && this.client.openVersion) continue
@@ -491,12 +574,24 @@ export class Puller {
       )
         continue
       seen.add(sha)
-      wanted.push(sha)
+      wanted.set(sha, change)
     }
 
     const fetched = new Map<string, Uint8Array>()
-    await pool(wanted, this.opts.concurrency ?? DEFAULT_CONCURRENCY, async (sha) => {
-      const bytes = await fetchChecked(this.client, sha, this.hash)
+    await pool([...wanted], this.opts.concurrency ?? DEFAULT_CONCURRENCY, async ([sha, change]) => {
+      checkCancellation(this.opts.signal)
+      // A resumed manifest page already names immutable versions. A fresh token client
+      // must not rediscover their SHA-to-version mapping by walking the manifest from 0.
+      const bytes = await fetchChecked(
+        {
+          getBlob: () =>
+            this.client.readEffects && this.client.versionBytes
+              ? this.client.versionBytes(change.file_id, change.version_id, this.opts.signal)
+              : this.client.getBlob(sha, this.opts.signal),
+        },
+        sha,
+        this.hash
+      )
       if (bytes === null) this.placer.disbelieve(sha)
       else fetched.set(sha, bytes)
     })

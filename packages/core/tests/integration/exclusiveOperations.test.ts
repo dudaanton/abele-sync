@@ -118,7 +118,7 @@ describe('public engine exclusive operations', () => {
     expect(events).toEqual(['first', 'second'])
   })
 
-  it('stop does not release an in-flight host effect early, and drains a promised sync', async () => {
+  it('stop waits for an in-flight host effect and cancels a promised sync', async () => {
     const { engine } = await fixture()
     const entered = gate(),
       release = gate()
@@ -129,6 +129,7 @@ describe('public engine exclusive operations', () => {
     })
     await entered.promise
     const following = engine.sync()
+    const cancelled = expect(following).rejects.toMatchObject({ code: 'offline' })
     let stopped = false
     const stopping = engine.stop().then(() => {
       stopped = true
@@ -139,10 +140,11 @@ describe('public engine exclusive operations', () => {
     } finally {
       release.release()
       await operation
-      await following
+      await cancelled
       await stopping
     }
     expect(stopped).toBe(true)
+    expect(engine.status.state).toBe('paused')
     await expect(operation).resolves.toBe('recorded')
   })
 

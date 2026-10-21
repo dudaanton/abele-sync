@@ -36,15 +36,15 @@ export interface EngineClient {
     maxChunkBytes?: number
   ): Promise<void>
   state(): Promise<VaultState>
-  manifest(cursor: string | null, limit?: number): Promise<ManifestResponse>
-  changes(since: number, limit?: number): Promise<ChangesResponse>
+  manifest(cursor: string | null, limit?: number, signal?: AbortSignal): Promise<ManifestResponse>
+  changes(since: number, limit?: number, signal?: AbortSignal): Promise<ChangesResponse>
   commitRaw(ops: CommitOp[], key: string): Promise<CommitOutcome>
   commit(ops: CommitOp[], key: string): Promise<CommitResponse>
   hasBlob(sha: string): Promise<boolean>
-  getBlob(sha: string): Promise<Uint8Array>
-  putBlob(sha: string, bytes: Uint8Array): Promise<void>
+  getBlob(sha: string, signal?: AbortSignal): Promise<Uint8Array>
+  putBlob(sha: string, bytes: Uint8Array, signal?: AbortSignal): Promise<void>
   versions(fileId: string, query?: VersionsQuery): Promise<VersionInfo[]>
-  versionBytes(fileId: string, versionId: string): Promise<Uint8Array>
+  versionBytes(fileId: string, versionId: string, signal?: AbortSignal): Promise<Uint8Array>
   restore(fileId: string, versionId: string, key?: string): Promise<CommitOpResult>
   restoreDeleted(fileId: string, key?: string): Promise<CommitOpResult>
   restoreDeletedMany(fileIds: string[], key?: string): Promise<CommitOpResult[]>
@@ -58,7 +58,8 @@ export interface EngineClient {
   prepare?(
     fs: FileSystem,
     state: StateStore,
-    excludeDirectory?: (path: string) => boolean
+    excludeDirectory?: (path: string) => boolean,
+    signal?: AbortSignal
   ): Promise<void>
   syncDirectories?(): Promise<void>
   finishPull?(): Promise<void>
