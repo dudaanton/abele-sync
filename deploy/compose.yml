@@ -1,0 +1,41 @@
+# Abele sync server behind a reverse proxy on the host (nginx, Tailscale serve).
+# Copy .env.example to .env (chmod 600) and fill it in. Data lives in ./data next to this file;
+# on Linux create it first: mkdir -p data/server data/postgres && sudo chown 1000:1000 data/server
+services:
+  server:
+    image: ghcr.io/dudaanton/abele-sync:${ABELE_VERSION:?set ABELE_VERSION}
+    environment:
+      ABELE_MASTER_KEY: ${ABELE_MASTER_KEY:?set ABELE_MASTER_KEY}
+      ABELE_TOKEN_PEPPER: ${ABELE_TOKEN_PEPPER:?set ABELE_TOKEN_PEPPER}
+      ABELE_DATABASE_URL: postgres://abele:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/abele
+      ABELE_BLOB_DIR: /data/blobs
+      ABELE_PUBLIC_URL: ${ABELE_PUBLIC_URL:?set ABELE_PUBLIC_URL}
+      ABELE_TRUST_PROXY: ${ABELE_TRUST_PROXY:-false}
+    ports:
+      # Loopback only: the proxy on the host terminates HTTPS and forwards here.
+      - '127.0.0.1:${ABELE_PORT:-8787}:8787'
+    volumes:
+      # Encrypted file contents and the restore checkpoint. Owned by uid 1000 (node).
+      - ./data/server:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 60s
+
+  postgres:
+    # PostgreSQL 16, multi-platform index pinned by digest.
+    image: postgres:16-bookworm@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
+    environment:
+      POSTGRES_USER: abele
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: abele
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U abele -d abele']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
