@@ -17,10 +17,12 @@ import type { PullOptions, PullReport } from './puller.js'
 import { isEngineOwn } from './selective.js'
 import type { StateEntry, StateStore } from './state.js'
 import { checkCancellation } from './cancellation.js'
+import { GENERATION_KEY } from './restoreGeneration.js'
 
 const MANIFEST_PROGRESS = 'pull-manifest-progress'
 const MANIFEST_PAGE_DATA = 'pull-manifest-page'
 interface ManifestProgress {
+  generation: string | null
   page: ManifestResponse
   head: number
   completed: string[]
@@ -202,9 +204,17 @@ export class Puller {
     let head: number | null = null
     this.walking = true
     try {
+      const generation = (await this.state.getMeta?.(GENERATION_KEY)) ?? null
       let progress: ManifestProgress | null = JSON.parse(
         (await this.state.getMeta?.(MANIFEST_PROGRESS)) ?? 'null'
       ) as ManifestProgress | null
+      if (progress !== null && (progress.generation ?? null) !== generation) {
+        await this.state.transaction(async () => {
+          await this.state.setMeta?.(MANIFEST_PROGRESS, null)
+          await this.state.setMeta?.(MANIFEST_PAGE_DATA, null)
+        })
+        progress = null
+      }
       if (progress !== null) {
         progress.page = JSON.parse(
           (await this.state.getMeta?.(MANIFEST_PAGE_DATA)) ?? 'null'
@@ -219,7 +229,7 @@ export class Puller {
         const page: ManifestResponse =
           progress?.page ?? (await this.client.manifest(cursor, MANIFEST_PAGE))
         head ??= progress?.head ?? page.head_seq
-        progress ??= { page, head, completed: [], seen: [], firstHeld: this.firstHeld }
+        progress ??= { page, head, generation, completed: [], seen: [], firstHeld: this.firstHeld }
         const checkpoint = progress
         const saveProgress = () => {
           checkpoint.firstHeld = this.firstHeld
@@ -247,6 +257,7 @@ export class Puller {
           const next = await this.client.manifest(cursor, MANIFEST_PAGE)
           progress = {
             page: next,
+            generation,
             head,
             completed: [],
             seen: checkpoint.seen,
