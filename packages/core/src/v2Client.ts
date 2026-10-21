@@ -407,12 +407,22 @@ export class V2EngineClient implements EngineClient {
           if (entry) {
             // A host with overlapping connections decides whether the local bytes still
             // have a covering connection. A departure never becomes a global delete.
-            const stat = await this.ports!.fs.stat(entry.path)
-            const edited =
-              stat !== null &&
-              (await fingerprintFile(this.ports!.fs, entry.path, sha256)).sha !== entry.sha
-            if (!retain && !edited) await this.ports!.fs.remove(entry.path)
-            await this.ports!.state.delete(entry.wirePath)
+            let removed = false
+            if (!retain) {
+              await this.ports!.state.setMeta!(
+                `pull-base:${entry.path}`,
+                JSON.stringify({ base: entry })
+              )
+              removed =
+                (await this.ports!.fs.conditionalFile?.({
+                  path: entry.path,
+                  expected: entry,
+                  effect: { kind: 'remove' },
+                })) ?? false
+            }
+            // A refused effect means an unpushed save still depends on this base.
+            // Keep it across departures/rejoins rather than adopting that save as clean.
+            if (retain || removed) await this.ports!.state.delete(entry.path)
           }
           continue
         }
