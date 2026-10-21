@@ -119,13 +119,13 @@ export class PullPlacer {
     // A moved source recreated since the crash belongs to the user; do not remove it.
     if (pending.from !== null && (await this.fs.stat(pending.from)) !== null) return notWritten()
     const have = await this.fs.stat(pending.target)
-    if (have === null || have.size !== change.size) return notWritten()
+    if (have === null) return notWritten()
     try {
       const sha = (await fingerprintFile(this.fs, pending.target, this.hash)).sha
       // The rename landed, but the following write did not. Keep its exact intent so
       // recovery can replace only the proven old base at the new target.
       if (sha !== change.sha && pending.from !== null && pending.base?.sha === sha) return false
-      if (sha !== change.sha) return notWritten()
+      if (sha !== change.sha || have.size !== change.size) return notWritten()
     } catch {
       return notWritten()
     }

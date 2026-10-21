@@ -10,8 +10,10 @@ import { selectiveDefaults } from '../../src/selective.js'
 import type { EngineClient } from '../../src/engineClient.js'
 import { recoverPendingPullWrites } from '../../src/pullRecovery.js'
 
-it('D-015 resumes a buffered move interrupted before its content replacement', async () => {
+it.each([1, 4])('D-015 resumes a buffered move before a %i-byte replacement', async (size) => {
   const f = await fixture()
+  f.bytes = new Uint8Array(size).fill(2)
+  f.sha = await sha256(f.bytes)
   const old = new Uint8Array([1])
   const base = {
     path: 'before.bin',
@@ -31,7 +33,7 @@ it('D-015 resumes a buffered move interrupted before its content replacement', a
       versionId: 'new',
       wirePath: 'file.bin',
       sha: f.sha,
-      size: 1,
+      size,
       mtime: 2,
       target: 'file.bin',
       from: 'before.bin',
