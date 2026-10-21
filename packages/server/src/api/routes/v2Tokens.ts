@@ -185,7 +185,8 @@ export function registerV2TokenRoutes(app: FastifyInstance, deps: AppDeps): void
       capabilities.split(',').some((value) => value.trim() === V2_TOKEN_ITEM_COUNT_CAPABILITY)
         ? await itemCounts(
             access,
-            tokens.map((token) => token.id)
+            tokens.map((token) => token.id),
+            bearerKey(request)
           )
         : undefined
     return {

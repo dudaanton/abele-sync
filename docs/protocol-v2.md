@@ -108,7 +108,7 @@ receipts cannot cross items. Without the header, the primary scope and the stric
 | Route                                    | Request                          | Response                                                           |
 | ---------------------------------------- | -------------------------------- | ------------------------------------------------------------------ |
 | `GET /v2/connection/items`               | none                             | `{items:[{id,scope_id,scope:{kind,id,path},added_at,removed_at}]}` |
-| `GET /v2/tokens/:id/items`               | none                             | Same item list and state as the holder view above                  |
+| `GET /v2/tokens/:id/items`               | none                             | Same item shape, limited to the caller's own coverage              |
 | `POST /v2/tokens/:id/items`              | `{scope:{kind,id}}`              | 201 `{id,scope_id,scope,added_at,removed_at:null}`                 |
 | `DELETE /v2/tokens/:id/items/:item`      | none                             | `{removed:true}`                                                   |
 | `POST /v2/connection/items/:item/delete` | `{}`, required `Idempotency-Key` | `V2DeleteScopeResponse`                                            |
@@ -118,10 +118,15 @@ Those same keys may read the set through `GET /v2/tokens/:id/items`; other
 tokens, including the holder itself unless it has whole-vault authority, must
 use their own `GET /v2/connection/items` inventory. Legacy tokens return their
 implicit primary item, and removed items remain listed with `removed_at`.
+Owner inventory **omits** items whose selectors are outside the caller's live
+content coverage. The holder's inventory is unchanged. Without an item header,
+coverage is the union of the caller's live items; an explicit header restricts
+it to that caller item. Whole-vault coverage retains unavailable/removed metadata.
 `GET /v2/tokens` includes `item_count` only when the client advertises
 `abele-client-capabilities: token-item-count`. It counts non-removed items,
-including an attached implicit primary; scope availability and token revocation
-do not change that count. Without the capability the strict legacy shape is preserved.
+including an attached implicit primary, from the caller's visible inventory.
+Whole-vault counts include unavailable scopes; token revocation does not change
+the count. Without the capability the strict legacy shape is preserved.
 
 Owner confirmation dialogs can use `GET /v2/tokens/:id/items/:item/preview` and
 `GET /v2/tokens/:id/preview`, with the same issuer/whole-vault authorization as
@@ -135,6 +140,10 @@ directories, deleted files and retained history are excluded. Removed or
 unavailable items have empty coverage. Whole-token responses contain
 `{token_id,file_count,total_bytes,items}`; their totals deduplicate file identities
 across items. Each item's totals remain independent.
+Owner previews use the same omission policy: an out-of-coverage item is omitted
+from the whole-token preview and its direct preview returns 403 `forbidden`.
+For a visible group with members outside caller coverage, file lists and all
+totals include only the intersection with the caller's live content authority.
 
 `?limit=100` controls the path list **per item** (default 100, maximum 500).
 Files are ordered by current path and identity. `file_count` always gives the
@@ -142,6 +151,11 @@ uncapped total. For group items, each returned file's `overlaps` lists up to 20
 other live grants as `{token_id,item_id,scope_id,scope:{kind,id,path}}`, enough
 to identify another group by its current path. `overlap_count` gives the full
 number of such grants. Folder and file item previews have empty overlap lists.
+Overlap details are disclosed only for the caller's own or directly issued
+keys (or a whole-vault caller) and only when the other selector is within the
+caller's content coverage. Other grants contribute to `overlap_count` without
+exposing paths or identifiers; clients can display "another share" when that
+count exceeds the returned detail list (which can also be capped).
 Overlap includes implicit primaries and items of any non-revoked key in the same
 vault, excluding the exact target token/item pair, detached items, unavailable
 scopes and orphan scopes. Different tokens sharing the same scope remain

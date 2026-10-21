@@ -3,6 +3,7 @@ import { AbeleError, type V2Selector } from '@abele/sync-protocol'
 import type { Selectable } from 'kysely'
 import { sql } from 'kysely'
 import type { AccessTokensTable } from '../db/schemaAccess.js'
+import { covers } from './visibility.js'
 import {
   mutation,
   effectiveScope,
@@ -57,15 +58,28 @@ export async function listItems(deps: AccessDeps, key: string, tokenId?: string)
     async (deps, p) => {
       const items = []
       const token = tokenId === undefined ? p.token : await requireItemOwner(deps, p, tokenId)
+      const callerScopes = tokenId === undefined ? [] : await callerItemScopes(deps, p)
+      const root = tokenId !== undefined && (await rootAuthority(deps, p))
       for (const row of await tokenItems(deps, token)) {
         const scope = await deps.db
           .selectFrom('access_scopes')
           .selectAll()
           .where('id', '=', row.scope_id)
           .executeTakeFirstOrThrow()
+        const current = await effectiveScope(deps, { scope, space: p.space })
+        if (tokenId !== undefined && !root) {
+          let visible = false
+          if (current.active)
+            for (const caller of callerScopes)
+              if (await covers(deps, caller, current.scope.path, current.scope.id)) {
+                visible = true
+                break
+              }
+          if (!visible) continue
+        }
         const resolved =
           row.removed_at === null
-            ? await effectiveScope(deps, { scope, space: p.space })
+            ? current
             : { scope: { kind: scope.kind, id: scope.target_id, path: '(unavailable)' } }
         items.push({
           id: row.id,
@@ -80,9 +94,56 @@ export async function listItems(deps: AccessDeps, key: string, tokenId?: string)
     tokenId === undefined ? authenticateTokenForInventory : authenticateToken
   )
 }
-/** One grouped query for the already-authorized listing; implicit primaries need no rows. */
-export async function itemCounts(deps: AccessDeps, tokenIds: string[]) {
+/** Explicit headers restrict content to that item; otherwise use the key's live item union. */
+export async function callerItemScopes(deps: AccessDeps, p: TokenPrincipal) {
+  if (deps.itemId !== undefined) return [p.scope]
+  const ids = (await tokenItems(deps, p.token))
+    .filter((item) => item.removed_at === null)
+    .map((item) => item.scope_id)
+  return deps.db
+    .selectFrom('access_scopes')
+    .selectAll()
+    .where('space_id', '=', p.space.id)
+    .where('id', 'in', ids)
+    .execute()
+}
+/** Whole-vault counts use one grouped query; scoped counts apply inventory visibility. */
+export async function itemCounts(
+  deps: AccessDeps,
+  tokenIds: string[],
+  key?: string
+): Promise<Map<string, number>> {
   if (!tokenIds.length) return new Map<string, number>()
+  if (key !== undefined)
+    return mutation(deps, key, async (deps, p) => {
+      if (await rootAuthority(deps, p)) return itemCounts(deps, tokenIds)
+      const callerScopes = await callerItemScopes(deps, p)
+      const counts = new Map(tokenIds.map((id) => [id, 0]))
+      const tokens = await deps.db
+        .selectFrom('access_tokens')
+        .selectAll()
+        .where('space_id', '=', p.space.id)
+        .where('issued_by_token_id', '=', p.token.id)
+        .where('id', 'in', tokenIds)
+        .execute()
+      for (const token of tokens)
+        for (const item of await tokenItems(deps, token)) {
+          if (item.removed_at !== null) continue
+          const scope = await deps.db
+            .selectFrom('access_scopes')
+            .selectAll()
+            .where('id', '=', item.scope_id)
+            .executeTakeFirstOrThrow()
+          const current = await effectiveScope(deps, { scope, space: p.space })
+          if (!current.active) continue
+          for (const caller of callerScopes)
+            if (await covers(deps, caller, current.scope.path, current.scope.id)) {
+              counts.set(token.id, counts.get(token.id)! + 1)
+              break
+            }
+        }
+      return counts
+    })
   const rows = await deps.db
     .selectFrom('access_token_items')
     .select([

@@ -69,7 +69,11 @@ for (const dialect of ['sqlite', 'pg'] as const)
           'folder',
           'group',
         ])
-        expect(await f.guest.json(`/tokens/${child.info.id}/items`)).toEqual(before)
+        // The issuer can manage the child key, but the added outside file is
+        // outside its content authority and must not appear in its inventory.
+        expect(await f.guest.json(`/tokens/${child.info.id}/items`)).toEqual({
+          items: before.items.filter((item) => item.id !== added.id),
+        })
         expect(await f.root.json(`/tokens/${child.info.id}/items`)).toEqual(before)
         await f.root.json(`/tokens/${child.info.id}/items/${added.id}`, 'DELETE')
         const after = V2ScopeItemsResponseSchema.parse(await holder.json('/connection/items'))
@@ -77,7 +81,9 @@ for (const dialect of ['sqlite', 'pg'] as const)
           removed_at: expect.any(String),
           scope: { path: '(unavailable)' },
         })
-        expect(await f.guest.json(`/tokens/${child.info.id}/items`)).toEqual(after)
+        expect(await f.guest.json(`/tokens/${child.info.id}/items`)).toEqual({
+          items: after.items.filter((item) => item.id !== added.id),
+        })
         expect(await f.root.json(`/tokens/${child.info.id}/items`)).toEqual(after)
       } finally {
         await f.close()
