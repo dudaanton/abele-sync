@@ -33,7 +33,7 @@ save the minimized trace. Review its failure before adding a `bug` marker.
 Studio long sweep (increase the timeout when increasing sequence length):
 
 ```sh
-TMPDIR="$PWD/.scratch" SIM_SEED=1 SIM_RUNS=10000 SIM_ACTIONS=80 SIM_SAVE=1 node_modules/.bin/vitest run --config vitest.config.ts --root packages/core tests/sim/fuzz.test.ts --maxWorkers=2 --testTimeout=7200000
+TMPDIR="$PWD/.scratch" SIM_SEED=1 SIM_RUNS=10000 SIM_ACTIONS=80 SIM_SAVE=1 SIM_TIMEOUT=7200000 node_modules/.bin/vitest run --config vitest.config.ts --root packages/core tests/sim/fuzz.test.ts --maxWorkers=2
 ```
 
 The random test has a 90-second default; use `SIM_TIMEOUT=7200000` for long runs.
