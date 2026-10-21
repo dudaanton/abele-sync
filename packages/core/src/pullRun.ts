@@ -23,11 +23,31 @@ const MANIFEST_PROGRESS = 'pull-manifest-progress'
 const MANIFEST_PAGE_DATA = 'pull-manifest-page'
 interface ManifestProgress {
   generation: string | null
+  scope: string | null
+  recheck: string[]
   page: ManifestResponse
   head: number
   completed: string[]
   seen: string[]
   firstHeld: number | null
+}
+
+/** Repeated scope marks describe the walk already in progress, not a new rewind. */
+export async function resumesScopeRecheck(
+  state: StateStore,
+  recheck: ReadonlySet<string>
+): Promise<boolean> {
+  if ((await state.getCursor()) !== 0) return false
+  const progress = JSON.parse(
+    (await state.getMeta?.(MANIFEST_PROGRESS)) ?? 'null'
+  ) as ManifestProgress | null
+  return (
+    progress !== null &&
+    progress.scope === ((await state.getMeta?.('marked-scope')) ?? null) &&
+    (progress.generation ?? null) === ((await state.getMeta?.(GENERATION_KEY)) ?? null) &&
+    [...recheck].every((id) => progress.recheck?.includes(id)) &&
+    (await state.getMeta?.(MANIFEST_PAGE_DATA)) != null
+  )
 }
 
 /**
@@ -205,6 +225,8 @@ export class Puller {
     this.walking = true
     try {
       const generation = (await this.state.getMeta?.(GENERATION_KEY)) ?? null
+      const scope = (await this.state.getMeta?.('marked-scope')) ?? null
+      const recheck = [...(this.opts.recheck ?? [])]
       let progress: ManifestProgress | null = JSON.parse(
         (await this.state.getMeta?.(MANIFEST_PROGRESS)) ?? 'null'
       ) as ManifestProgress | null
@@ -229,7 +251,16 @@ export class Puller {
         const page: ManifestResponse =
           progress?.page ?? (await this.client.manifest(cursor, MANIFEST_PAGE))
         head ??= progress?.head ?? page.head_seq
-        progress ??= { page, head, generation, completed: [], seen: [], firstHeld: this.firstHeld }
+        progress ??= {
+          page,
+          head,
+          generation,
+          scope,
+          recheck,
+          completed: [],
+          seen: [],
+          firstHeld: this.firstHeld,
+        }
         const checkpoint = progress
         const saveProgress = () => {
           checkpoint.firstHeld = this.firstHeld
@@ -258,6 +289,8 @@ export class Puller {
           progress = {
             page: next,
             generation,
+            scope,
+            recheck,
             head,
             completed: [],
             seen: checkpoint.seen,

@@ -5,6 +5,7 @@ import { MemoryStateStore } from '../../src/state.js'
 import { selectiveDefaults } from '../../src/selective.js'
 import { sha256 } from '../../src/hash.js'
 import type { EngineClient } from '../../src/engineClient.js'
+import { ScopeMarks } from '../../src/scope.js'
 
 function gate() {
   let release!: () => void
@@ -52,6 +53,46 @@ async function fixture() {
   const engine = new SyncEngine({ fs, state, client, selective: selectiveDefaults() })
   return { fs, state, client, engine, items, bytes }
 }
+
+it('D-035 resumes later manifest pages while unchanged scope recheck marks remain', async () => {
+  const f = await fixture()
+  await f.fs.writeAtomic('0.md', f.bytes[0]!, 1)
+  const item = f.items[0]!
+  await f.state.put({
+    path: item.path,
+    wirePath: item.path,
+    fileId: item.file_id,
+    versionId: item.version_id,
+    sha: item.sha,
+    size: item.size,
+    mtime: item.mtime,
+  })
+  await f.state.setCursor(13)
+  await new ScopeMarks(f.state).review(f.fs, { excluded: () => true })
+  f.client.manifest = vi.fn(async (cursor) => ({
+    items: cursor === null ? f.items.slice(0, 4) : f.items.slice(4),
+    next: cursor === null ? 'later' : null,
+    head_seq: 13,
+  }))
+  const write = f.fs.writeAtomic.bind(f.fs)
+  let paused = false
+  f.fs.writeAtomic = async (...args) => {
+    await write(...args)
+    if (args[0] === '4.md' && !paused) {
+      paused = true
+      f.engine.pause()
+    }
+  }
+  await expect(f.engine.sync()).rejects.toMatchObject({ code: 'offline' })
+  expect(await f.state.getMeta('pull-manifest-progress')).not.toBeNull()
+  await f.engine.sync()
+  expect(
+    vi.mocked(f.client.manifest).mock.calls.filter(([cursor]) => cursor === null)
+  ).toHaveLength(1)
+  expect(f.fs.snapshot().size).toBe(12)
+  expect(await f.state.getMeta('out-of-scope-files')).toBeNull()
+  await f.engine.stop()
+})
 
 for (const verb of ['pause', 'stop'] as const) {
   it(`${verb} stops between pull files and resumes without downloading completed files`, async () => {

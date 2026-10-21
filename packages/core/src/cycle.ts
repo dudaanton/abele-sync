@@ -24,6 +24,7 @@ import type { StateEntry } from './state.js'
 import type { WatchReports } from './watchReports.js'
 import { refreshLocalPaths } from './localPaths.js'
 import { stoppableListings } from './guard.js'
+import { resumesScopeRecheck } from './pullRun.js'
 import { GENERATION_KEY, MEMBERS_KEY, RECONCILING_KEY } from './restoreGeneration.js'
 import {
   reconciliationScan,
@@ -266,7 +267,11 @@ export class SyncCycle {
     for (const path of scope.forgotten) {
       log(`scope: ${path} went while this device did not sync it; the vault's copy is kept`)
     }
-    if (scope.forgotten.length > 0 || scope.recheck.size > 0) this.rewind = true
+    if (
+      scope.forgotten.length > 0 ||
+      (scope.recheck.size > 0 && !(await resumesScopeRecheck(state, scope.recheck)))
+    )
+      this.rewind = true
     if (await this.asides.due(scanningFs, this.filter)) {
       log('scope: a local file a server file was passed over for has gone; walking the vault')
       this.rewind = true
