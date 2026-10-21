@@ -12,6 +12,7 @@ import type { StateEntry, StateStore } from './state.js'
 import { LocalPaths, resolveLocalFile } from './localPaths.js'
 import { checkCancellation } from './cancellation.js'
 import { discardPullStage } from './pullStages.js'
+import { evictionKey } from './pullEvictions.js'
 
 /**
  * A change put onto this disk: its file carried to where the change says, its bytes written or
@@ -512,9 +513,17 @@ export class PullPlacer {
       if (this.opts.dirty.has(occupant.wirePath) || (await this.edited(occupant))) {
         return 'held'
       }
-      if (!(await this.clearPath(occupant.path))) return 'held'
+      const intent = evictionKey(occupant.fileId)
+      await this.state.setMeta?.(intent, JSON.stringify(occupant))
+      if (!(await this.clearPath(occupant.path))) {
+        await this.state.setMeta?.(intent, null)
+        return 'held'
+      }
       this.opts.expected.clear(occupant.path)
-      await this.state.delete(occupant.path)
+      await this.state.transaction(async () => {
+        await this.state.delete(occupant.path)
+        await this.state.setMeta?.(intent, null)
+      })
       // Our removal authorizes only an absent target. A file saved while the ledger
       // deletion awaited belongs to the user; it must not become our new baseline.
       return { free: null, removed: true }

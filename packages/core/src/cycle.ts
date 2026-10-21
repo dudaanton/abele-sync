@@ -28,6 +28,7 @@ import { resumesScopeRecheck } from './pullRun.js'
 import { scanSnapshot } from './scanSnapshot.js'
 import { readReconciliation } from './reconciliation.js'
 import { recoverPendingPullWrites } from './pullRecovery.js'
+import { recoverPullEvictions } from './pullEvictions.js'
 import { GENERATION_KEY, MEMBERS_KEY, RECONCILING_KEY } from './restoreGeneration.js'
 import {
   reconciliationScan,
@@ -235,6 +236,7 @@ export class SyncCycle {
       this.ctx.log('sync: server generation observed; reconciling with local files preserved')
     }
     const log = this.ctx.log
+    await recoverPullEvictions(fs, state, this.ctx.signal?.())
     const pendingFiles = new Set(
       ((await state.metadataKeys?.('pull-write:')) ?? []).map((key) =>
         key.slice('pull-write:'.length)
