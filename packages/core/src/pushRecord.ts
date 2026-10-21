@@ -118,11 +118,12 @@ export class VerdictRecorder {
     const incoming = verdicts.writes.get(at)
     const kept = verdicts.aside.get(at)
     const sent = sentBy(op, previous)
+    const checkingSha = incoming ?? (op.op === 'create' ? sent?.sha : undefined)
     // Planning precedes downloads (and later runs may wait much longer). Ask
     // again at the write boundary; a plan is not permission to overwrite typing.
     const changed =
-      incoming !== undefined &&
-      !(await this.disk.holds(target, incoming)) &&
+      checkingSha !== undefined &&
+      !(await this.disk.holds(target, checkingSha)) &&
       !(await this.disk.untouched(op, sent, target))
     if (verdicts.stale.has(at) || changed) {
       await this.keepBase(op, result, previous, target)
@@ -274,29 +275,32 @@ export class VerdictRecorder {
     )
     this.report.kept.push(result.path)
     const sent = sentBy(op, previous)
-    if (op.op === 'create' || sent === null) {
+    if (sent === null || (op.op === 'create' && result.sha !== sent.sha)) {
       await this.state.delete(target)
       return
     }
-    // A create and a restore name no base; both are gone by here, and everything else has one.
+    // A receipt acknowledging the submitted bytes gives a create its own server base.
+    // A divergent create head is not the base the local typing derives from.
+    const base =
+      op.op === 'create' ? { sha: result.sha!, size: result.size, mtime: result.mtime } : sent
     const version = 'base_version_id' in op ? op.base_version_id : result.version_id
     const have = await this.fs.stat(target)
     // A content hold can occur with unchanged/rounded metadata. Persist a
     // mismatching scan hint so restart cannot mistake the known unsent edit for
     // unchanged bytes. This is not timestamp/authorship or replacement proof.
     const mtime =
-      have !== null && have.size === sent.size && have.mtime === sent.mtime
-        ? sent.mtime === 0
+      have !== null && have.size === base.size && have.mtime === base.mtime
+        ? base.mtime === 0
           ? 1
-          : sent.mtime - 1
-        : sent.mtime
+          : base.mtime - 1
+        : base.mtime
     await this.state.put({
       path: target,
       wirePath: result.path,
       fileId: result.file_id,
       versionId: version,
-      sha: sent.sha,
-      size: sent.size,
+      sha: base.sha,
+      size: base.size,
       mtime,
     })
   }
