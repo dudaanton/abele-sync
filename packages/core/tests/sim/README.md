@@ -60,7 +60,18 @@ core UUID/random/Date.now sites are scoped to the fixture; the engine and server
 receive the virtual clock explicitly. Real deadline/watch timers are not
 virtualized; tests drive `sync()` directly and do not call `start()`.
 
-Oracles cover own-content GETs (I3), the four-lane post-mark effect envelope
+`pullEdits.test.ts` adds I2: for buffered/streaming updates, moves, eviction and
+remote deletion, first collect every scheduled pull await, then replay once per
+boundary with a same-stat local save injected there. Both metadata/state calls
+and host operation boundaries participate. The atomic filesystem port itself is
+indivisible in the memory model; Node's quarantine/publication races have separate
+host tests. Run the bounded CI property, without the optional exhaustive sweep:
+
+```sh
+TMPDIR="$PWD/.scratch" SIM_RUNS=200 node_modules/.bin/vitest run --config vitest.config.ts --root packages/core tests/sim/pullEdits.test.ts --maxWorkers=2
+```
+
+Oracles cover preservation of injected local bytes (I2), own-content GETs (I3), the four-lane post-mark effect envelope
 (I4), disk/manifest content equality and two idle rounds (I5), zero stages at
 quiescence (I6), journal/cursor/identity/version/disk consistency (I7), and duplicate
 file/content version effects for first-upload traces (I11). Content transport

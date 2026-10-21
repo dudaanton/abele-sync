@@ -4,15 +4,18 @@ import {
   type AtomicStage,
   type ContentIdentity,
   type ChunkSource,
+  type ConditionalFileOperation,
+  EngineError,
 } from '../../src/index.js'
 import { SimScheduler } from './scheduler.js'
 
 interface Stage {
   path: string
   mtime: number
-  base: ContentIdentity | null
+  base: (ContentIdentity & { mtime?: number }) | null
   bytes: Uint8Array
   sealed: boolean
+  committed?: boolean
 }
 interface Disk {
   fs: MemoryFileSystem
@@ -111,6 +114,16 @@ export class MemoryStreamingFS {
     await this.point('move')
     await this.disk.fs.move(from, to)
   }
+  async conditionalFile(op: ConditionalFileOperation) {
+    await this.point('conditionalFile')
+    return this.disk.fs.conditionalFile(op)
+  }
+  async installedFile(id: string, path: string, sha: string) {
+    return this.disk.fs.installedFile(id, path, sha)
+  }
+  async discardInstallation(id: string) {
+    await this.disk.fs.discardInstallation(id)
+  }
   snapshot() {
     return this.disk.fs.snapshot()
   }
@@ -147,7 +160,7 @@ export class MemoryStreamingFS {
   async beginAtomicWrite(
     path: string,
     mtime: number,
-    base: ContentIdentity | null,
+    base: (ContentIdentity & { mtime?: number }) | null,
     beforeCreate?: (stageId: string) => Promise<void>
   ): Promise<AtomicStage> {
     await this.point('beginAtomicWrite')
@@ -164,12 +177,16 @@ export class MemoryStreamingFS {
   async discardStage(id: string) {
     await this.point('stage.discard')
     this.stages.delete(id)
+    await this.disk.fs.discardInstallation(id)
   }
   private handle(id: string): AtomicStage {
     const stage = this.stages.get(id)
     if (!stage) throw Object.assign(new Error('missing stage'), { code: 'ENOENT' })
     return {
       id,
+      installed: async () =>
+        stage.committed === true &&
+        this.disk.fs.installedFile(id, stage.path, await sha256(stage.bytes)),
       get offset() {
         return stage.bytes.length
       },
@@ -197,9 +214,24 @@ export class MemoryStreamingFS {
         const current = await this.disk.fs.stat(stage.path)
         const sha = current ? await sha256(await this.disk.fs.read(stage.path)) : null
         this.scheduler.fence(this.epoch)
-        if (sha !== (stage.base?.sha ?? null)) throw new Error('base changed')
-        await this.disk.fs.writeAtomic(stage.path, stage.bytes, stage.mtime)
-        this.stages.delete(id)
+        if (
+          stage.committed &&
+          (await this.disk.fs.installedFile(id, stage.path, await sha256(stage.bytes)))
+        )
+          return
+        if (sha !== (stage.base?.sha ?? null)) throw new EngineError('conflict', 'base changed')
+        if (
+          !(await this.disk.fs.conditionalFile({
+            path: stage.path,
+            expected:
+              current === null
+                ? null
+                : { ...current, mtime: stage.base?.mtime ?? current.mtime, sha: stage.base!.sha },
+            effect: { kind: 'write', bytes: stage.bytes, mtime: stage.mtime, receipt: id },
+          }))
+        )
+          throw new EngineError('conflict', 'base changed')
+        stage.committed = true
       },
       discard: () => this.discardStage(id),
     }
