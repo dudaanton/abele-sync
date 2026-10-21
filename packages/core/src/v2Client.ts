@@ -47,6 +47,22 @@ import { sha256 as incrementalSha256 } from '@noble/hashes/sha256'
 import { MAX_CHUNK_BYTES, type ChunkSource, type ContentIdentity } from './streaming.js'
 import { negotiateExternalFiles, checkedExternalVerification } from './externalVerification.js'
 import { isFinalForBatch } from './commitErrors.js'
+import { scanHintEpoch } from './scanHints.js'
+
+const NoteCacheSchema = z.object({
+  epoch: z.string(),
+  entries: z.array(
+    z.tuple([
+      z.string(),
+      z.object({
+        size: z.number().nonnegative(),
+        mtime: z.number(),
+        sha: z.string(),
+        links: z.array(z.string()),
+      }),
+    ])
+  ),
+})
 
 /** One production transport for root, folder and group token connections.
  * Wire authority is always v2. Engine-local file/version shapes are not v1 routes. */
@@ -103,7 +119,8 @@ export class V2EngineClient implements EngineClient {
     fs: FileSystem,
     state: StateStore,
     excludeDirectory: (path: string) => boolean = () => false,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    deferLocalScan = false
   ) {
     if (!state.getMeta || !state.setMeta)
       throw new AbeleError('invalid_request', 'token sync requires durable metadata state ports')
@@ -117,6 +134,16 @@ export class V2EngineClient implements EngineClient {
       this.localNoteCache.clear()
     }
     this.http.generation = generation
+    this.localNoteCache.clear()
+    try {
+      const cached = NoteCacheSchema.parse(
+        JSON.parse((await state.getMeta('v2-local-note-cache')) ?? 'null')
+      )
+      if (cached.epoch === (await scanHintEpoch(state)))
+        for (const [path, note] of cached.entries) this.localNoteCache.set(path, note)
+    } catch {
+      /* Missing or stale hints require fresh inspection, never recovery. */
+    }
     this.authoredDepartures.clear()
     for (const path of JSON.parse(
       (await state.getMeta!('v2-authored-departures')) ?? '[]'
@@ -162,7 +189,12 @@ export class V2EngineClient implements EngineClient {
         this.files.set(entry.wirePath, item)
         this.byteSources.set(entry.sha, item)
       }
-    if (this.connectionInfo!.scope.kind === 'group') await this.groupEligibility(fs, signal)
+    if (!deferLocalScan) await this.scanLocal(fs, signal)
+  }
+  async scanLocal(fs: FileSystem, signal?: AbortSignal, changed?: ReadonlySet<string>) {
+    for (const path of this.localNoteCache.keys())
+      if (changed?.has(path.normalize('NFC'))) this.localNoteCache.delete(path)
+    if (this.connectionInfo?.scope.kind === 'group') await this.groupEligibility(fs, signal)
   }
   /** Only note frontmatter grants local eligibility. Attachments remain tracked-only until
    * an explicit host publication call. The same bounded resolver runs on both ends. */
@@ -265,6 +297,13 @@ export class V2EngineClient implements EngineClient {
       if (path) this.localGroupPaths.add(path)
       queue.push(...(reverse.get(id) ?? []))
     }
+    await this.ports!.state.setMeta!(
+      'v2-local-note-cache',
+      JSON.stringify({
+        epoch: await scanHintEpoch(this.ports!.state),
+        entries: [...this.localNoteCache],
+      })
+    )
   }
   /** Publication is deliberate and connection-bound. A path/hash discovered by indexing
    * never calls this method; hosts invoke it only after their durable consent decision. */

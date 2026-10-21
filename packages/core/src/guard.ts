@@ -177,7 +177,7 @@ export function stoppableClient(
         }
         const mutating =
           (client.readEffects === true &&
-            ['prepare', 'manifest', 'changes'].includes(String(key))) ||
+            ['prepare', 'manifest', 'changes', 'scanLocal'].includes(String(key))) ||
           [
             'commitRaw',
             'syncDirectories',

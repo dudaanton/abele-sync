@@ -55,7 +55,7 @@ export async function fingerprintFile(
   signal?: AbortSignal
 ): Promise<{ size: number; sha: string }> {
   checkCancellation(signal)
-  if (fs.fingerprint) return fs.fingerprint(path)
+  if (fs.fingerprint) return fs.fingerprint(path, signal)
   if (fs.openRead) return fingerprintSource(await fs.openRead(path), undefined, signal)
   const bytes = await fs.read(path)
   return { size: bytes.length, sha: await hash(bytes) }

@@ -27,6 +27,8 @@ import type { StateStore } from './state.js'
 
 export interface PullOptions {
   signal?: AbortSignal
+  /** Early engine pulls preserve offline local deletes until the scanner judges them. */
+  protectMissing?: boolean
   onApplied?: import('./applied.js').AppliedOptions['onApplied']
   transferBudget?: import('./streaming.js').TransferBudget
   /** Personal note deliveries keep automatic reactions enabled, including shared edits.

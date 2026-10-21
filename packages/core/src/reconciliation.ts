@@ -59,6 +59,7 @@ export async function requestReconciliation(
       await state.setMeta!('delete-decision', null)
     }
     await state.setMeta!(RECONCILIATION_KEY, JSON.stringify({ phase: 'requested', reason }))
+    await state.setMeta!('scan-hint-epoch', crypto.randomUUID())
   })
 }
 
@@ -461,7 +462,12 @@ export async function reconciliationScan(
   await fenceRestoredJournal(state, head, fs, liveJournalKey, client)
   let found: ScanResult
   if (reconciliation?.phase === 'requested') {
-    found = await scan(fs, basis, filter, { revalidate: 'all', pairMoves: false, signal })
+    found = await scan(fs, basis, filter, {
+      revalidate: 'all',
+      pairMoves: false,
+      signal,
+      persistHints: true,
+    })
   } else {
     // The ordinary preflight already stats tracked entries. Reuse it for rolling
     // hashes and pull protection; fresh files and rename pairing belong to the final scan.

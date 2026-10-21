@@ -8,6 +8,7 @@ import { isEngineOwn } from './selective.js'
 import type { StateEntry, StateStore } from './state.js'
 import { LocalPaths, rememberedCollisions, wirePath as localToWire } from './localPaths.js'
 import { checkCancellation } from './cancellation.js'
+import { scanHintEpoch, readScanHint, writeScanHint } from './scanHints.js'
 
 /**
  * The scanner: what is on disk against what was last synced, as the ops a push commits.
@@ -74,6 +75,8 @@ export interface ScanResult {
 
 export interface ScanOptions {
   signal?: AbortSignal
+  /** Durable scan hints only; uploads and pull writes still verify their actual bytes. */
+  persistHints?: boolean
   /** Status can inspect collisions while another process owns the write lock. */
   readOnly?: boolean
   /** Extra tracked files to hash per scan; `all` forces content reconciliation. */
@@ -326,6 +329,7 @@ export async function scan(
   opts: ScanOptions = {}
 ): Promise<ScanResult> {
   const hash = opts.hash ?? sha256
+  const hintEpoch = opts.persistHints ? await scanHintEpoch(state) : ''
   const skipped: SkippedPath[] = []
   const skip = (path: string, reason: string): void => {
     skipped.push({ path, reason })
@@ -394,9 +398,23 @@ export async function scan(
     }
     let sha: string
     try {
-      const fingerprint = await fingerprintFile(fs, info.path, hash, opts.signal)
-      if (fingerprint.size !== info.size) throw new Error('file changed during scan')
-      sha = fingerprint.sha
+      const hint =
+        opts.persistHints &&
+        !opts.verifyPaths?.has(wirePath) &&
+        !(typeof opts.revalidate === 'number' && revalidate.has(wirePath))
+          ? await readScanHint(state, info, hintEpoch)
+          : null
+      if (hint !== null) sha = hint
+      else {
+        const fingerprint = await fingerprintFile(fs, info.path, hash, opts.signal)
+        if (fingerprint.size !== info.size) throw new Error('file changed during scan')
+        sha = fingerprint.sha
+        if (opts.persistHints && !opts.readOnly) {
+          const after = await fs.stat(info.path)
+          if (after?.size === info.size && after.mtime === info.mtime)
+            await writeScanHint(state, info, hintEpoch, sha)
+        }
+      }
     } catch (error) {
       // Read after list is a race: the file may be gone or locked. Leave it for the next scan.
       skip(info.path, reasonOf(error))

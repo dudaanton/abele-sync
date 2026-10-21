@@ -25,6 +25,8 @@ import type { WatchReports } from './watchReports.js'
 import { refreshLocalPaths } from './localPaths.js'
 import { stoppableListings } from './guard.js'
 import { resumesScopeRecheck } from './pullRun.js'
+import { scanSnapshot } from './scanSnapshot.js'
+import { readReconciliation } from './reconciliation.js'
 import { GENERATION_KEY, MEMBERS_KEY, RECONCILING_KEY } from './restoreGeneration.js'
 import {
   reconciliationScan,
@@ -50,6 +52,7 @@ export interface CycleContext {
   log: (line: string) => void
   now: () => number
   signal?: () => AbortSignal
+  scanning?: (active: boolean) => void
   /** Change the status. */
   set: (patch: Partial<EngineStatus>) => void
   /** The status as it stands. */
@@ -207,8 +210,8 @@ export class SyncCycle {
    */
   async cycle(): Promise<SyncReport> {
     const { client, fs, state } = this.ctx.opts
-    const scanningFs = stoppableListings(fs, () => this.ctx.signal?.())
-    await refreshLocalPaths(scanningFs, state)
+    const inventory = scanSnapshot(fs, () => this.ctx.signal?.())
+    const scanningFs = stoppableListings(inventory.fs, () => this.ctx.signal?.())
     const generationBefore = await state.getMeta?.(GENERATION_KEY)
     await client.prepare?.(
       fs,
@@ -218,7 +221,9 @@ export class SyncCycle {
         (this.ctx.opts.selective?.excludedFolders ?? []).some(
           (folder) =>
             path === folder.normalize('NFC') || path.startsWith(folder.normalize('NFC') + '/')
-        )
+        ),
+      this.ctx.signal?.(),
+      true
     )
     if (generationBefore !== (await state.getMeta?.(GENERATION_KEY))) {
       this.staging.records.invalidate()
@@ -279,18 +284,48 @@ export class SyncCycle {
     const vault = await client.state()
     this.ctx.set({ headSeq: vault.head_seq, cursor: await state.getCursor() })
     this.learnLimits(vault.settings.max_file_bytes, vault.settings.quota_bytes)
-    const inspection = await reconciliationScan(
-      scanningFs,
-      state,
-      this.scanFilter,
-      vault.head_seq,
-      this.liveJournalKey,
-      reconciling
-        ? (JSON.parse((await state.getMeta?.(MEMBERS_KEY)) ?? '[]') as StateEntry[])
-        : undefined,
-      this.unscanned,
-      client,
-      this.ctx.signal?.()
+    let earlyPull: PullReport | null = null
+    const priorReconciliation = await readReconciliation(state)
+    if (
+      !reconciling &&
+      (!priorReconciliation || priorReconciliation.phase === 'complete') &&
+      (await state.getJournal()) === null &&
+      (await this.holds.decision()) === null
+    ) {
+      if (this.rewind) {
+        this.rewind = false
+        await state.setCursor(0)
+        await state.setMeta?.('pull-manifest-progress', null)
+        await state.setMeta?.('pull-manifest-page', null)
+      }
+      const holding = await this.holds.held()
+      await this.ctx.watch.examine()
+      earlyPull = await this.pull(
+        new Set([...this.kept, ...this.unsettled, ...holding, ...this.ctx.watch.reported]),
+        scope.recheck,
+        holding
+      )
+      this.ctx.set({ cursor: earlyPull.cursor })
+    }
+    await this.scanWork(() => refreshLocalPaths(scanningFs, state))
+    if (reconciling || (priorReconciliation && priorReconciliation.phase !== 'complete'))
+      await this.scanWork(
+        () => client.scanLocal?.(scanningFs, this.ctx.signal?.()) ?? Promise.resolve()
+      )
+    const inspection = await this.scanWork(async () =>
+      reconciliationScan(
+        scanningFs,
+        state,
+        this.scanFilter,
+        vault.head_seq,
+        this.liveJournalKey,
+        reconciling
+          ? (JSON.parse((await state.getMeta?.(MEMBERS_KEY)) ?? '[]') as StateEntry[])
+          : undefined,
+        this.unscanned,
+        client,
+        this.ctx.signal?.()
+      )
     )
     const reconciliation = inspection.reconciliation
     if (!reconciling && reconciliation && reconciliation.phase !== 'complete')
@@ -303,6 +338,8 @@ export class SyncCycle {
         false,
         this.ctx.opts.defer
       )
+    if (!reconciling && reconciliation && reconciliation.phase !== 'complete')
+      inventory.invalidate()
     this.ctx.set({ reconciliation })
 
     // Read through the guarded state, and every step it leads to is a guarded write: a daemon
@@ -340,7 +377,8 @@ export class SyncCycle {
     const protect = new Set([...this.kept, ...reported, ...this.unsettled, ...holding])
     for await (const entry of state.all())
       if (inspection.found.dirty.has(entry.wirePath)) protect.add(entry.wirePath)
-    const first = await this.pull(protect, scope.recheck, holding)
+    const first = earlyPull ?? (await this.pull(protect, scope.recheck, holding))
+    if (earlyPull === null && first.applied > 0) inventory.invalidate()
     if (reconciling)
       await preserveGenerationConflicts(
         client,
@@ -350,6 +388,7 @@ export class SyncCycle {
         first.held,
         this.scanFilter
       )
+    if (reconciling) inventory.invalidate()
     // Content inspection and conflict preservation are durable independently of upload.
     // A later network failure must not request another full content sweep on restart.
     if (reconciliation?.phase === 'requested') {
@@ -369,13 +408,19 @@ export class SyncCycle {
     // from a delete and an unrelated create (`likeness.ts`).
     const previous = (entry: StateEntry): Promise<Uint8Array | null> =>
       fetchChecked(client, entry.sha, sha256)
-    const found = await scan(scanningFs, state, this.scanFilter, {
-      signal: this.ctx.signal?.(),
-      log,
-      previous,
-      verifyPaths: inspection.found.dirty,
-      pairMoves: !reconciliation || reconciliation.phase === 'complete',
-    })
+    await this.scanWork(
+      () => client.scanLocal?.(scanningFs, this.ctx.signal?.(), reported) ?? Promise.resolve()
+    )
+    const found = await this.scanWork(() =>
+      scan(scanningFs, state, this.scanFilter, {
+        signal: this.ctx.signal?.(),
+        persistHints: true,
+        log,
+        previous,
+        verifyPaths: new Set([...inspection.found.dirty, ...reported]),
+        pairMoves: !reconciliation || reconciliation.phase === 'complete',
+      })
+    )
     for (const path of seen) reported.delete(path)
     this.unscanned = false
     this.unsettled = new Set(found.dirty)
@@ -468,6 +513,15 @@ export class SyncCycle {
     return state.getMeta !== undefined && (await state.getMeta(JOIN_KEY)) !== null
   }
 
+  private async scanWork<T>(work: () => Promise<T>): Promise<T> {
+    this.ctx.scanning?.(true)
+    try {
+      return await work()
+    } finally {
+      this.ctx.scanning?.(false)
+    }
+  }
+
   /**
    * Mark a join begun, before its first pull, or finished, once its push is answered. A store
    * that keeps nothing beside its entries keeps no mark, and a restart there joins only while
@@ -554,6 +608,7 @@ export class SyncCycle {
     const { client, fs, state } = this.ctx.opts
     const report = await pull(client, fs, state, {
       signal: this.ctx.signal?.(),
+      protectMissing: true,
       ...(this.ctx.opts.transferBudget === undefined
         ? {}
         : { transferBudget: this.ctx.opts.transferBudget }),

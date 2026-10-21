@@ -39,7 +39,7 @@ it('R2 streams known equal bytes from another synced local file instead of HTTP'
         return data.length
       },
       append: async (_at, part) => {
-        data = part
+        data = new Uint8Array(part)
       },
       seal: async () => {},
       commit: async () => {

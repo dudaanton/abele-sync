@@ -5,6 +5,7 @@ import type { ScanResult } from './scanner.js'
 import type { StateStore } from './state.js'
 import type { ChunkSource } from './streaming.js'
 import { LocalPaths, resolveLocalFile } from './localPaths.js'
+import { scanHintKey } from './scanHints.js'
 
 /**
  * Where an upload finds the bytes it wants on this disk: where the scan found each sha, or, for
@@ -13,17 +14,25 @@ import { LocalPaths, resolveLocalFile } from './localPaths.js'
 
 /** The bytes an upload wants, from this disk: null when this device cannot find them. */
 export interface Sources {
+  invalidate?(sha: string): Promise<void>
   open?(sha: string): Promise<ChunkSource | null>
   bytes(sha: string): Promise<Uint8Array | null>
 }
 
 /** Where the scan found each sha. The scan hashed those very bytes, so it is the best index. */
-export function sourcesFromScan(fs: FileSystem, scan: ScanResult): Sources {
+export function sourcesFromScan(fs: FileSystem, scan: ScanResult, state?: StateStore): Sources {
   const paths = new Map<string, string>()
   for (const [wirePath, sha] of scan.hashes) {
     if (!paths.has(sha)) paths.set(sha, scan.diskPaths.get(wirePath) ?? wirePath)
   }
-  return sourcesAt(fs, paths)
+  return {
+    ...sourcesAt(fs, paths),
+    invalidate: async (sha) => {
+      for (const [path, digest] of scan.hashes)
+        if (digest === sha)
+          await state?.setMeta?.(scanHintKey(scan.diskPaths.get(path) ?? path), null)
+    },
+  }
 }
 
 /**

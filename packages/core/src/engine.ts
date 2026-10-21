@@ -114,6 +114,7 @@ export class SyncEngine implements ExclusiveOperationPort {
   private readonly opts: EngineOptions
   private cancellation = new AbortController()
   private stopping = false
+  private scanning = false
   private readonly activeWrites = { count: 0 }
   private readonly hostOperations = exclusiveOperationPort((job) => this.exclusive(job))
 
@@ -156,6 +157,9 @@ export class SyncEngine implements ExclusiveOperationPort {
       log: this.log,
       now: this.now,
       signal: () => this.cancellation.signal,
+      scanning: (active) => {
+        this.scanning = active
+      },
       set: (patch) => this.set(patch),
       status: () => this.current,
       watching: () => this.unwatch !== null,
@@ -395,7 +399,8 @@ export class SyncEngine implements ExclusiveOperationPort {
     this.running = work
     void work.then(noop, noop).then(() => {
       this.running = null
-      if (this.cancellation.signal.aborted) this.set({ state: 'paused', lastError: null })
+      if (this.cancellation.signal.aborted)
+        this.set({ state: this.paused || this.stopping ? 'paused' : 'idle', lastError: null })
       const next = this.queued
       if (next === null) return
       this.queued = null
@@ -434,7 +439,11 @@ export class SyncEngine implements ExclusiveOperationPort {
       return report
     } catch (error) {
       if (this.cancellation.signal.aborted) {
-        this.set({ state: 'paused', lastError: null, cursor: await this.opts.state.getCursor() })
+        this.set({
+          state: this.paused || this.stopping ? 'paused' : 'idle',
+          lastError: null,
+          cursor: await this.opts.state.getCursor(),
+        })
         throw new SyncCancelled()
       }
       this.fail(error)
@@ -550,6 +559,10 @@ export class SyncEngine implements ExclusiveOperationPort {
     this.set({ headSeq: Math.max(seq, this.current.headSeq ?? 0) })
     if (this.running !== null) {
       this.heard = Math.max(seq, this.heard ?? 0)
+      if (this.scanning && seq > this.current.cursor && !this.paused && !this.stopping) {
+        this.cancellation.abort()
+        void this.sync().catch(noop)
+      }
       return
     }
     if (seq > this.current.cursor) this.trigger('events')

@@ -6,6 +6,7 @@ import {
 } from '@abele/sync-protocol'
 import { settledStat, writeExpected } from './apply.js'
 import { EngineError } from './errors.js'
+import { scanHintKey } from './scanHints.js'
 import { touchesDeferred } from './defer.js'
 import type { FileSystem } from './fs.js'
 import { inTheWay, sentBy, type Content, type PushDisk } from './pushDisk.js'
@@ -62,6 +63,7 @@ export class VerdictRecorder {
       return
     }
     if (result.status === 'rejected') {
+      if (op.op === 'create') await this.state.setMeta?.(scanHintKey(op.path), null)
       // The local file stays exactly as the scan found it — except a refused rename, which
       // goes back where it was: the entry still says the old path, and left at the new one
       // the file would be a rename every scan sends and the server refuses again, while the
@@ -247,6 +249,7 @@ export class VerdictRecorder {
     }
     this.opts.log?.(`push: ${target} is left unrecorded: nothing but the head to record it against`)
     this.report.kept.push(result.path)
+    await this.state.setMeta?.(scanHintKey(target), null)
   }
 
   /**

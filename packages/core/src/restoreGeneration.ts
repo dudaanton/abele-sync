@@ -7,6 +7,8 @@ export const MEMBERS_KEY = 'server-restore-members'
 const RESET_KEYS = [
   'pull-manifest-progress',
   'pull-manifest-page',
+  'v2-local-note-cache',
+  'scan-hint-epoch',
   'v2-directories',
   'v2-departures',
   'v2-authored-departures',

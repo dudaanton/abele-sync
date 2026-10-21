@@ -471,6 +471,18 @@ export class Puller {
       this.report.applied++
       return
     }
+    if (
+      this.opts.protectMissing &&
+      entry !== null &&
+      change.sha !== null &&
+      change.op !== 'delete' &&
+      !this.opts.recheck?.has(entry.fileId) &&
+      (await this.fs.stat(entry.path)) === null &&
+      (await this.placer.pending.matching(change, entry)) === null
+    ) {
+      this.hold(change)
+      return
+    }
     if (touchesDeferred(this.opts.defer, change.path, change.prev_path, entry?.wirePath)) {
       // An earlier equality probe permits metadata adoption only, never a later disk write.
       if (await this.placer.adoptExisting(change, entry)) this.report.applied++

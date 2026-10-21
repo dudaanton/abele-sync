@@ -61,8 +61,10 @@ export interface EngineClient {
     fs: FileSystem,
     state: StateStore,
     excludeDirectory?: (path: string) => boolean,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    deferLocalScan?: boolean
   ): Promise<void>
+  scanLocal?(fs: FileSystem, signal?: AbortSignal, changed?: ReadonlySet<string>): Promise<void>
   syncDirectories?(): Promise<void>
   finishPull?(): Promise<void>
 }

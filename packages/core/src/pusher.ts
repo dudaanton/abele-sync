@@ -187,7 +187,7 @@ export async function push(
   const pusher = new Pusher(client, fs, state, opts, report, scan.diskPaths)
   await pusher.refresh(scan)
   const newKey = opts.keys ?? (() => crypto.randomUUID())
-  const sources = sourcesFromScan(fs, scan)
+  const sources = sourcesFromScan(fs, scan, state)
   const all = batches(pusher.sendable(preferring(scan.ops, opts.prefer)))
   const progress = opts.onProgress
   if (progress !== undefined)
@@ -601,6 +601,7 @@ class Pusher {
       // says so, and the journal clears — which is what unsticks a batch written against
       // bytes that have since gone.
       if (error.code !== 'hash_mismatch') throw error
+      await sources.invalidate?.(sha)
       this.opts.log?.(`push: ${sha} is no longer what this disk holds`)
     }
   }
