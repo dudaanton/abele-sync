@@ -273,7 +273,11 @@ export class SyncCycle {
     if ((await state.getCursor()) > 0 && !marked) this.joined = true
     const reconciling = (await state.getMeta?.(RECONCILING_KEY)) != null
     const joining = !this.joined && !reconciling
-    const prefer = joining ? this.ctx.opts.joinPrefer : undefined
+    const joinReview = await readReconciliation(state)
+    const prefer =
+      joining && (!joinReview || joinReview.phase === 'complete')
+        ? this.ctx.opts.joinPrefer
+        : undefined
     if (joining && !marked) await this.markJoin(true)
     if (prefer !== undefined) log(`sync: joining the vault; where both hold a file, ${prefer} wins`)
 
@@ -378,6 +382,7 @@ export class SyncCycle {
     // A batch the last run never finished recording goes first: a scan taken over it would
     // describe a disk the state does not know about yet.
     const replayed = await resumeJournal(client, fs, state, { ...common, onCommitted: tally })
+    if (replayed?.reconciliationRequired) return this.cycle()
     this.liveJournalKey = undefined
     for (const path of replayed?.kept ?? []) this.kept.add(path)
     if (!reconciliation || reconciliation.phase === 'complete') await client.syncDirectories?.()

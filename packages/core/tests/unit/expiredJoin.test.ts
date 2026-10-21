@@ -9,7 +9,7 @@ import {
   type VaultClient,
 } from '../legacy/index.js'
 
-it('keeps an expired prefer-mine journal for recovery instead of replaying it on an older server', async () => {
+it('archives an expired prefer-mine journal for recovery without replaying it on an older server', async () => {
   const state = new MemoryStateStore()
   const journal = {
     batchId: 'b',
@@ -31,9 +31,10 @@ it('keeps an expired prefer-mine journal for recovery instead of replaying it on
   const client = { commitRaw } as unknown as VaultClient
   await expect(
     resumeJournal(client, new MemoryFileSystem(), state, { expected: new ExpectedWrites() })
-  ).rejects.toMatchObject({ code: 'conflict' })
+  ).resolves.toMatchObject({ reconciliationRequired: true })
   expect(commitRaw).not.toHaveBeenCalled()
-  expect(await state.getJournal()).toEqual(journal)
+  expect(await state.getJournal()).toBeNull()
+  expect(JSON.parse((await state.getMeta('expired-journal:k'))!)).toEqual(journal)
 })
 
 it('does not refresh the first attempt time when an offline replay fails before receipt expiry', async () => {
@@ -70,7 +71,10 @@ it('does not refresh the first attempt time when an offline replay fails before 
     await expect(resumeJournal(client, fs, state, opts)).rejects.toThrow('not sent')
     expect(await state.getJournal()).toEqual(journal)
     vi.setSystemTime(new Date('2026-01-02T03:00:00Z'))
-    await expect(resumeJournal(client, fs, state, opts)).rejects.toMatchObject({ code: 'conflict' })
+    await expect(resumeJournal(client, fs, state, opts)).resolves.toMatchObject({
+      reconciliationRequired: true,
+    })
+    expect(JSON.parse((await state.getMeta('expired-journal:k'))!)).toEqual(journal)
     expect(putBlob).toHaveBeenCalledTimes(1)
   } finally {
     vi.useRealTimers()

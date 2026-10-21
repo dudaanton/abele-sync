@@ -24,6 +24,7 @@ import { VerdictPlanner } from './pushVerdicts.js'
 import type { StateStore, Journal } from './state.js'
 import { checkCancellation } from './cancellation.js'
 import { isFinalForBatch } from './commitErrors.js'
+import { requestReconciliation } from './reconciliation.js'
 export { batches } from './pushBatches.js'
 
 /**
@@ -68,6 +69,8 @@ export interface Refusal {
  */
 
 export interface PushReport {
+  /** A retired unsafe request needs a fresh reconciliation/scan before new publication. */
+  reconciliationRequired?: true
   /**
    * The last commit's answer, whose `head_seq` is where the vault stands after this push,
    * or null when there was nothing to commit.
@@ -184,6 +187,7 @@ export async function push(
   opts: PushOptions
 ): Promise<PushReport> {
   const report = (await resumeJournal(client, fs, state, opts)) ?? emptyReport()
+  if (report.reconciliationRequired) return report
   const pusher = new Pusher(client, fs, state, opts, report, scan.diskPaths)
   await pusher.refresh(scan)
   const newKey = opts.keys ?? (() => crypto.randomUUID())
@@ -222,7 +226,7 @@ export async function resumeJournal(
   // Older servers discarded receipts after a day. They cannot distinguish a
   // never-applied join from an applied one whose answer was lost. Do not repeat
   // a destructive user choice after that window, even against an upgraded server
-  // whose old receipt may already be gone. Keep the journal for explicit recovery.
+  // whose old receipt may already be gone. Archive the choice and reconcile neutrally.
   const report = emptyReport(),
     pusher = new Pusher(client, fs, state, opts, report, new Map())
   for (const journal of units) {
@@ -231,10 +235,30 @@ export async function resumeJournal(
       (!Number.isFinite(age) || age >= 24 * 60 * 60 * 1000) &&
       journal.ops.some((op) => op.op === 'create' && op.prefer === 'mine')
     ) {
-      throw new EngineError(
-        'conflict',
-        'an old local-preferred join needs recovery: preserve the local files and journal, then reconcile with current server history before starting a new join'
+      if (!state.getMeta || !state.setMeta)
+        throw new EngineError(
+          'conflict',
+          'an expired local-preferred join requires durable review metadata'
+        )
+      // Request neutral reconciliation first: a crash after retirement must never start
+      // a fresh prefer-mine batch under another key. Preserve the immutable old choice.
+      await requestReconciliation(
+        state,
+        'expired local-preferred join requires current-state reconciliation'
       )
+      await state.transaction(async () => {
+        const key = `expired-journal:${journal.idempotencyKey}`
+        const saved = await state.getMeta!(key),
+          raw = JSON.stringify(journal)
+        if (saved !== null && saved !== raw)
+          throw new EngineError('protocol', 'expired journal review identity mismatch')
+        await state.setMeta!(key, raw)
+        await state.setJournal(null)
+        await state.setCursor(0)
+        await state.setMeta!('pull-manifest-progress', null)
+        await state.setMeta!('pull-manifest-page', null)
+      })
+      return { ...emptyReport(), reconciliationRequired: true }
     }
     opts.log?.(`push: replaying ${journal.ops.length} ops under ${journal.idempotencyKey}`)
 
