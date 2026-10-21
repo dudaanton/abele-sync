@@ -413,89 +413,93 @@ class Pusher {
       )
     }
     const verdicts = await this.planner.plan(sending, results)
-    if (verdicts.staged.size > 0) {
-      const heads = [...verdicts.staged.values()]
-      for (const { change } of heads) {
-        this.opts.log?.(
-          `push: the vault keeps ${change.actor.name}'s ${change.path}; staged, not written`
-        )
-      }
-      const fresh = await this.opts.onDefer?.(heads)
-      this.report.deferred =
-        (this.report.deferred ?? 0) + (typeof fresh === 'number' ? fresh : heads.length)
-    }
-    const applied: AppliedChange[] = []
-    let recorded = 0
-    let interrupted = false
-    await this.state.transaction(async () => {
-      for (const [k, run] of verdicts.runs.entries()) {
-        if (k > 0) {
-          if (this.opts.signal?.aborted) {
-            interrupted = true
-            return
-          }
-          try {
-            await this.planner.fetchRun(run, verdicts)
-          } catch (error) {
-            // Download cancellation must not roll back files already recorded by this batch.
-            if (!this.opts.signal?.aborted) throw error
-            interrupted = true
-            return
-          }
+    try {
+      if (verdicts.staged.size > 0) {
+        const heads = [...verdicts.staged.values()]
+        for (const { change } of heads) {
+          this.opts.log?.(
+            `push: the vault keeps ${change.actor.name}'s ${change.path}; staged, not written`
+          )
         }
-        for (const at of run) {
-          // Commit completed ledger entries even when the remaining verdicts are cancelled.
-          // Keep the journal: resume replays the same server receipt for the rest.
-          if (recorded > 0 && this.opts.signal?.aborted) {
-            interrupted = true
-            return
+        const fresh = await this.opts.onDefer?.(heads)
+        this.report.deferred =
+          (this.report.deferred ?? 0) + (typeof fresh === 'number' ? fresh : heads.length)
+      }
+      const applied: AppliedChange[] = []
+      let recorded = 0
+      let interrupted = false
+      await this.state.transaction(async () => {
+        for (const [k, run] of verdicts.runs.entries()) {
+          if (k > 0) {
+            if (this.opts.signal?.aborted) {
+              interrupted = true
+              return
+            }
+            try {
+              await this.planner.fetchRun(run, verdicts)
+            } catch (error) {
+              // Download cancellation must not roll back files already recorded by this batch.
+              if (!this.opts.signal?.aborted) throw error
+              interrupted = true
+              return
+            }
           }
-          const op = sending[at]
-          if (op !== undefined) {
-            const previous =
-              this.opts.onApplied === undefined || op.op === 'create'
-                ? null
-                : await this.state.byFileId(op.file_id)
-            const keptBefore = this.report.kept.length
-            await this.recorder.take(op, results[at], at, verdicts)
-            recorded++
-            const result = results[at]!
-            if (
-              this.opts.onApplied !== undefined &&
-              result.status !== 'rejected' &&
-              !verdicts.bad.has(at) &&
-              !verdicts.staged.has(at) &&
-              !verdicts.stale.has(at) &&
-              !touchesDeferred(
-                this.opts.defer,
-                result.path,
-                previous?.wirePath,
-                result.status === 'conflict' ? result.conflict_path : null
-              ) &&
-              !verdicts.aside.has(at) &&
-              this.report.kept.length === keptBefore
-            ) {
-              applied.push({
-                path: result.path,
-                kind:
-                  op.op === 'delete' && result.status === 'applied'
-                    ? 'delete'
-                    : op.op === 'move'
-                      ? 'move'
-                      : 'upsert',
-                ...(op.op === 'move' && previous !== null ? { from: previous.wirePath } : {}),
-                origin: 'local',
-                fileId: result.file_id,
-              })
+          for (const at of run) {
+            // Commit completed ledger entries even when the remaining verdicts are cancelled.
+            // Keep the journal: resume replays the same server receipt for the rest.
+            if (recorded > 0 && this.opts.signal?.aborted) {
+              interrupted = true
+              return
+            }
+            const op = sending[at]
+            if (op !== undefined) {
+              const previous =
+                this.opts.onApplied === undefined || op.op === 'create'
+                  ? null
+                  : await this.state.byFileId(op.file_id)
+              const keptBefore = this.report.kept.length
+              await this.recorder.take(op, results[at], at, verdicts)
+              recorded++
+              const result = results[at]!
+              if (
+                this.opts.onApplied !== undefined &&
+                result.status !== 'rejected' &&
+                !verdicts.bad.has(at) &&
+                !verdicts.staged.has(at) &&
+                !verdicts.stale.has(at) &&
+                !touchesDeferred(
+                  this.opts.defer,
+                  result.path,
+                  previous?.wirePath,
+                  result.status === 'conflict' ? result.conflict_path : null
+                ) &&
+                !verdicts.aside.has(at) &&
+                this.report.kept.length === keptBefore
+              ) {
+                applied.push({
+                  path: result.path,
+                  kind:
+                    op.op === 'delete' && result.status === 'applied'
+                      ? 'delete'
+                      : op.op === 'move'
+                        ? 'move'
+                        : 'upsert',
+                  ...(op.op === 'move' && previous !== null ? { from: previous.wirePath } : {}),
+                  origin: 'local',
+                  fileId: result.file_id,
+                })
+              }
             }
           }
         }
-      }
-      await this.opts.onCommitted?.(sending)
-      await this.state.setJournal(null)
-    })
-    for (const change of applied) await notifyApplied(this.opts, change)
-    if (interrupted) checkCancellation(this.opts.signal)
+        await this.opts.onCommitted?.(sending)
+        await this.state.setJournal(null)
+      })
+      for (const change of applied) await notifyApplied(this.opts, change)
+      if (interrupted) checkCancellation(this.opts.signal)
+    } finally {
+      await this.planner.discardStages(verdicts)
+    }
   }
 
   /**

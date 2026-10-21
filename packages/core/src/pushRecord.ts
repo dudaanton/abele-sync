@@ -157,6 +157,7 @@ export class VerdictRecorder {
       if (stage !== undefined) {
         if (!(await this.disk.untouched(op, sent, target))) {
           await stage.discard()
+          verdicts.stages.delete(at)
           await this.keepBase(op, result, previous, target)
           this.count(result)
           return
@@ -169,6 +170,7 @@ export class VerdictRecorder {
           throw error
         }
         await stage.discard()
+        verdicts.stages.delete(at)
       }
       const bytes = verdicts.fetched.get(incoming)
       if (bytes !== undefined) {

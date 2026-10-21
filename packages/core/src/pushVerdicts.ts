@@ -238,8 +238,27 @@ export class VerdictPlanner {
       aside,
       staged,
     }
-    await this.fetchRun(runs[0] ?? [], verdicts)
+    try {
+      await this.fetchRun(runs[0] ?? [], verdicts)
+    } catch (error) {
+      await this.discardStages(verdicts)
+      throw error
+    }
     return verdicts
+  }
+
+  /** Receipt stages are disposable caches, not durable journal-owned pull stages. */
+  async discardStages(verdicts: Verdicts): Promise<void> {
+    const failures: unknown[] = []
+    for (const [at, stage] of verdicts.stages) {
+      try {
+        await stage.discard()
+        verdicts.stages.delete(at)
+      } catch (error) {
+        failures.push(error)
+      }
+    }
+    if (failures.length) throw new AggregateError(failures, 'receipt stages could not be discarded')
   }
 
   /**
@@ -265,15 +284,21 @@ export class VerdictPlanner {
             : await fingerprintFile(this.fs, sourcePath, this.hash)
         const stage = await this.fs.beginAtomicWrite(target, result.mtime, base)
         try {
-          const source = await this.client.openVersion(result.file_id, result.version_id, {
-            sha,
-            size: result.size,
-          })
+          const source = await this.client.openVersion(
+            result.file_id,
+            result.version_id,
+            {
+              sha,
+              size: result.size,
+            },
+            this.opts.signal
+          )
           await receiveToStage(
             source,
             stage,
             { sha, size: result.size },
-            this.opts.transferBudget ?? this.budget
+            this.opts.transferBudget ?? this.budget,
+            this.opts.signal
           )
           verdicts.stages.set(at, stage)
         } catch (error) {
