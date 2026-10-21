@@ -383,6 +383,7 @@ export async function scan(
     const entry = entries.get(wirePath)
     const observed = opts.known?.infos.get(wirePath)
     const known =
+      opts.revalidate !== 'all' &&
       !opts.verifyPaths?.has(wirePath) &&
       observed?.path === info.path &&
       observed.size === info.size &&
@@ -411,6 +412,7 @@ export async function scan(
     try {
       const hint =
         opts.persistHints &&
+        opts.revalidate !== 'all' &&
         !opts.verifyPaths?.has(wirePath) &&
         !(typeof opts.revalidate === 'number' && revalidate.has(wirePath))
           ? await readScanHint(state, info, hintEpoch)

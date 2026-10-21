@@ -10,6 +10,29 @@ import { encodeAccessToken } from '@abele/sync-protocol'
 import { V2EngineClient } from '../../src/v2Client.js'
 import { reconciliationScan } from '../../src/reconciliation.js'
 
+it('full revalidation ignores persisted hints after a same-stat edit', async () => {
+  const fs = new MemoryFileSystem(),
+    state = new MemoryStateStore()
+  const original = new Uint8Array([1])
+  await fs.writeAtomic('file.md', original, 1)
+  await state.put({
+    path: 'file.md',
+    wirePath: 'file.md',
+    fileId: 'file',
+    versionId: 'v1',
+    sha: await sha256(original),
+    size: 1,
+    mtime: 1,
+  })
+  const options = { persistHints: true, revalidate: 'all' as const }
+  const first = await scan(fs, state, { excluded: () => false }, options)
+  expect(first.ops).toHaveLength(0)
+  await fs.writeAtomic('file.md', new Uint8Array([2]), 1)
+  const resumed = await scan(fs, state, { excluded: () => false }, options)
+  expect(resumed.ops).toHaveLength(1)
+  expect(resumed.hashes.get('file.md')).toBe(await sha256(new Uint8Array([2])))
+})
+
 it('D-031 hands rounded-metadata edits from preflight to the final scan without hashing twice', async () => {
   const fs = new MemoryFileSystem(),
     state = new MemoryStateStore()
