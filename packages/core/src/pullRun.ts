@@ -210,6 +210,7 @@ export class Puller {
           (await this.state.getMeta?.(MANIFEST_PAGE_DATA)) ?? 'null'
         ) as ManifestResponse
         if (progress.page === null) throw new Error('missing manifest checkpoint page')
+        this.client.rememberManifest?.(progress.page.items)
         this.firstHeld = progress.firstHeld
         for (const id of progress.seen) this.seen.add(id)
       }

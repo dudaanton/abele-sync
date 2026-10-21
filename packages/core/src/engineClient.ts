@@ -37,6 +37,8 @@ export interface EngineClient {
   ): Promise<void>
   state(): Promise<VaultState>
   manifest(cursor: string | null, limit?: number, signal?: AbortSignal): Promise<ManifestResponse>
+  /** Restore transport membership/content lookup caches from a durable manifest snapshot. */
+  rememberManifest?(items: readonly import('@abele/sync-protocol').ManifestItem[]): void
   changes(since: number, limit?: number, signal?: AbortSignal): Promise<ChangesResponse>
   commitRaw(ops: CommitOp[], key: string): Promise<CommitOutcome>
   commit(ops: CommitOp[], key: string): Promise<CommitResponse>

@@ -308,6 +308,13 @@ export class V2EngineClient implements EngineClient {
     this.byteSources.set(item.sha, item)
     return { ...item, seq }
   }
+  rememberManifest(items: readonly ManifestItem[]): void {
+    for (const item of items) {
+      this.departed.delete(item.path)
+      this.files.set(item.path, item)
+      this.byteSources.set(item.sha, item)
+    }
+  }
   async manifest(cursor: string | null, limit?: number, signal?: AbortSignal) {
     const page = await this.http.json(V2ManifestSchema, 'GET', '/v2/manifest', {
       query: { next: cursor, limit },
