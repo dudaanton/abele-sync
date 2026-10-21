@@ -161,10 +161,10 @@ export class ScopeMarks {
           await this.state.setCursor(0)
           rewound = true
         }
-        await this.state.delete(entry.path)
-        marks.delete(entry.fileId)
-        changed = true
-        review.forgotten.push(entry.wirePath)
+        // A missing source may have been renamed and edited offline. Keep its
+        // baseline until scanning can classify the destination; absence is not
+        // permission to turn matching intermediate remote bytes into a clean base.
+        review.recheck.add(entry.fileId)
       } else {
         review.recheck.add(entry.fileId)
       }

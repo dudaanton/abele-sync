@@ -24,7 +24,7 @@ const everything = { excluded: () => false }
  * cursor still past the file's last change leaves the file missing here with nothing to fetch it.
  */
 describe('ScopeMarks.review', () => {
-  it('rewinds the cursor before it drops an entry', async () => {
+  it('rewinds while retaining a missing source baseline for offline rename classification', async () => {
     const state = new MemoryStateStore()
     const fs = new MemoryFileSystem()
     await state.put(entry('Burst/x.md', 'f1'))
@@ -40,8 +40,10 @@ describe('ScopeMarks.review', () => {
       throw new Error('killed')
       return drop(path)
     }
-    await expect(new ScopeMarks(state).review(fs, everything)).rejects.toThrow('killed')
-    expect(cursorAtDrop).toEqual([0])
+    const review = await new ScopeMarks(state).review(fs, everything)
+    expect(cursorAtDrop).toEqual([])
+    expect(await state.get('Burst/x.md')).toEqual(entry('Burst/x.md', 'f1'))
+    expect(review.recheck).toEqual(new Set(['f1']))
     expect(await state.getCursor()).toBe(0)
   })
 })
