@@ -119,8 +119,11 @@ export class PullPlacer {
     const have = await this.fs.stat(pending.target)
     if (have === null || have.size !== change.size) return notWritten()
     try {
-      if ((await fingerprintFile(this.fs, pending.target, this.hash)).sha !== change.sha)
-        return notWritten()
+      const sha = (await fingerprintFile(this.fs, pending.target, this.hash)).sha
+      // The rename landed, but the following write did not. Keep its exact intent so
+      // recovery can replace only the proven old base at the new target.
+      if (sha !== change.sha && pending.from !== null && pending.base?.sha === sha) return false
+      if (sha !== change.sha) return notWritten()
     } catch {
       return notWritten()
     }
@@ -283,7 +286,17 @@ export class PullPlacer {
       return this.streamPlace(change, sha, entry, target, from, firstTarget, beforeFrom, local)
     }
     if (entry !== null && (await this.edited(entry))) return false
-    const state = await this.clear(target, from, change, sha)
+    const movedBase =
+      pending !== null &&
+      !pending.stageId &&
+      entry !== null &&
+      from !== null &&
+      pending.from === from &&
+      beforeFrom === null &&
+      firstTarget !== null &&
+      (await fingerprintFile(this.fs, target, this.hash)).sha === entry.sha &&
+      sameStat(firstTarget, await this.fs.stat(target))
+    const state = movedBase ? { free: firstTarget } : await this.clear(target, from, change, sha)
     if (state === 'held') return false
     if (state === 'aside') {
       this.opts.log?.(

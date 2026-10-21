@@ -142,12 +142,16 @@ export async function recoverPendingPullWrites(
     if ((await placer.pending.matching(change, entry)) === null)
       throw new ExternalStateError('recovery-required')
     await placer.adopt(change, entry)
-    if (intent.stageId !== undefined && (await state.getMeta?.(`pull-write:${fileId}`)) != null) {
-      if (!client?.openVersion || !fs.reopenStage) throw new ExternalStateError('recovery-required')
+    if (
+      (intent.stageId !== undefined || (intent.from !== null && client !== undefined)) &&
+      (await state.getMeta?.(`pull-write:${fileId}`)) != null
+    ) {
+      if (intent.stageId !== undefined && (!client?.openVersion || !fs.reopenStage))
+        throw new ExternalStateError('recovery-required')
       try {
         await placer.place(change, intent.sha!, entry, new Map(), new Map())
       } catch (error) {
-        if (!stageMissing(error)) throw error
+        if (!stageMissing(error) || intent.stageId === undefined) throw error
         await discardPullStage(fs, intent.stageId)
         await placer.pending.clear(fileId)
       }

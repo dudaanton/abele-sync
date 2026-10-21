@@ -8,6 +8,49 @@ import { sha256 } from '../../src/hash.js'
 import { SyncEngine } from '../../src/engine.js'
 import { selectiveDefaults } from '../../src/selective.js'
 import type { EngineClient } from '../../src/engineClient.js'
+import { recoverPendingPullWrites } from '../../src/pullRecovery.js'
+
+it('D-015 resumes a buffered move interrupted before its content replacement', async () => {
+  const f = await fixture()
+  const old = new Uint8Array([1])
+  const base = {
+    path: 'before.bin',
+    wirePath: 'before.bin',
+    fileId: 'file',
+    versionId: 'old',
+    sha: await sha256(old),
+    size: 1,
+    mtime: 1,
+  }
+  await f.state.put(base)
+  await f.fs.writeAtomic('file.bin', old, 1)
+  await f.state.setMeta(
+    'pull-write:file',
+    JSON.stringify({
+      fileId: 'file',
+      versionId: 'new',
+      wirePath: 'file.bin',
+      sha: f.sha,
+      size: 1,
+      mtime: 2,
+      target: 'file.bin',
+      from: 'before.bin',
+      base,
+    })
+  )
+  let downloads = 0
+  await recoverPendingPullWrites(f.fs, f.state, ['file'], {
+    getBlob: async () => {
+      downloads++
+      return f.bytes
+    },
+  })
+  expect(await f.fs.read('file.bin')).toEqual(f.bytes)
+  expect(await f.state.get('before.bin')).toBeNull()
+  expect(await f.state.get('file.bin')).toMatchObject({ versionId: 'new' })
+  expect(await f.state.getMeta('pull-write:file')).toBeNull()
+  expect(downloads).toBe(1)
+})
 
 async function fixture() {
   const fs: FileSystem = new MemoryFileSystem(),
