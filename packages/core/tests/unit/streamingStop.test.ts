@@ -3,6 +3,37 @@ import { stoppableClient } from '../../src/guard.js'
 import type { EngineClient } from '../../src/engineClient.js'
 import { downloadToStage, TransferBudget } from '../../src/streaming.js'
 
+it('closes an upload source acquired just before cancellation before refusing the request', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  let closed = 0,
+    sent = 0
+  const client = stoppableClient(
+    {
+      putBlobSource: async () => {
+        sent++
+      },
+    } as unknown as EngineClient,
+    () => controller.signal,
+    { count: 0 }
+  )
+  await expect(
+    client.putBlobSource!(
+      { size: 0, sha: '' },
+      {
+        size: 0,
+        read: async () => new Uint8Array(),
+        assertUnchanged: async () => {},
+        close: async () => {
+          closed++
+        },
+      }
+    )
+  ).rejects.toMatchObject({ code: 'offline' })
+  expect(closed).toBe(1)
+  expect(sent).toBe(0)
+})
+
 it('cancellation while sealing prevents publication and closes the source', async () => {
   const controller = new AbortController()
   let release!: () => void
