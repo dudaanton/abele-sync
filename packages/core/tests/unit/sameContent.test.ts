@@ -23,22 +23,20 @@ it('holds an unseen offline edit matching an intermediate feed page', async () =
     mtime: 1,
   })
   await state.setCursor(1)
-  const changes = hashes
-    .slice(1)
-    .map((sha, n): ChangeItem => ({
-      seq: n + 2,
-      file_id: 'file',
-      version_id: `v${n}`,
-      path: 'file.bin',
-      prev_path: null,
-      op: 'modify',
-      sha,
-      size: 1,
-      mtime: 1,
-      kind: 'attachment',
-      actor: { kind: 'system', id: 'server', name: 'server' },
-      at: '',
-    }))
+  const changes = hashes.slice(1).map((sha, n): ChangeItem => ({
+    seq: n + 2,
+    file_id: 'file',
+    version_id: `v${n}`,
+    path: 'file.bin',
+    prev_path: null,
+    op: 'modify',
+    sha,
+    size: 1,
+    mtime: 1,
+    kind: 'attachment',
+    actor: { kind: 'system', id: 'server', name: 'server' },
+    at: '',
+  }))
   const getBlob = vi.fn(async (sha: string) => bytes[hashes.indexOf(sha)]!)
   const client = {
     changes: async (since: number) => ({
