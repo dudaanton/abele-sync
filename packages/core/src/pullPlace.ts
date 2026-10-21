@@ -75,14 +75,21 @@ export class PullPlacer {
    * ever send the edit. A touch that changed no bytes is held once: the scan hashes it, the
    * push repairs the entry's mtime, and the pull after that writes through.
    */
-  async edited(entry: StateEntry): Promise<boolean> {
-    const have = await this.fs.stat(entry.path)
+  async edited(entry: StateEntry, target = entry.path): Promise<boolean> {
+    let path = entry.path
+    let have = await this.fs.stat(path)
+    // A missing source can be an offline rename. Its untracked destination must
+    // prove the old base, not merely equality with an intermediate remote version.
+    if (have === null && target !== path) {
+      path = target
+      have = await this.fs.stat(path)
+    }
     if (have === null) return this.opts.preserveMissing?.has(entry.fileId) ?? false
     if (have.size !== entry.size || have.mtime !== entry.mtime) return true
     // Metadata can be preserved by an editor (or rounded by a filesystem).
     // Never overwrite a target on that evidence alone.
     try {
-      return (await fingerprintFile(this.fs, entry.path, this.hash)).sha !== entry.sha
+      return (await fingerprintFile(this.fs, path, this.hash)).sha !== entry.sha
     } catch {
       return true
     }
@@ -139,7 +146,6 @@ export class PullPlacer {
     if (change.op === 'delete' || change.sha === null) return false
     // Equal remote bytes can be an offline edit matching an intermediate version.
     // Only an exact pending-write intent can authorize adopting over an edited base.
-    if (entry !== null && (await this.edited(entry))) return false
     let target: string
     try {
       target = await resolveLocalFile(
@@ -151,6 +157,7 @@ export class PullPlacer {
     } catch {
       return false
     }
+    if (entry !== null && (await this.edited(entry, target))) return false
     const from = entry === null || entry.path === target ? null : entry.path
     if (from !== null && (await this.fs.stat(from)) !== null) return false
     const before = await this.fs.stat(target)
@@ -294,7 +301,7 @@ export class PullPlacer {
         return false
       return this.streamPlace(change, sha, entry, target, from, firstTarget, beforeFrom, local)
     }
-    if (entry !== null && (await this.edited(entry))) return false
+    if (entry !== null && (await this.edited(entry, target))) return false
     const movedBase =
       pending !== null &&
       !pending.stageId &&
@@ -347,7 +354,7 @@ export class PullPlacer {
     if (!sameStat(beforeTarget, await this.fs.stat(target))) return false
     if (from !== null && !sameStat(beforeFrom, await this.fs.stat(from))) return false
     // Even a same-size, same-mtime write while the download was in flight is local work.
-    if (entry !== null && (await this.edited(entry))) return false
+    if (entry !== null && (await this.edited(entry, target))) return false
 
     // What the file will be once this is done: as it was, or exactly what gets written.
     let wrote: { size: number; mtime: number }
@@ -358,12 +365,18 @@ export class PullPlacer {
         if (
           !sameStat(beforeFrom, await this.fs.stat(from)) ||
           !sameStat(beforeTarget, await this.fs.stat(target)) ||
-          (entry !== null && (await this.edited(entry)))
+          (entry !== null && (await this.edited(entry, target)))
         ) {
           await this.pending.clear(change.file_id)
           return false
         }
         await this.fs.move(from, target)
+      }
+      // A host move can yield while an editor saves at the destination, including
+      // when the remote version carries the old bytes and no replacement is planned.
+      if (entry !== null && (await this.edited(entry, target))) {
+        await this.pending.clear(change.file_id)
+        return false
       }
       const have = await this.fs.stat(target)
       const current =
@@ -383,7 +396,7 @@ export class PullPlacer {
         // Saving intent is awaited too; a local edit made during it is not ours to overwrite.
         if (
           !sameStat(have, await this.fs.stat(target)) ||
-          (from === null && entry !== null && (await this.edited(entry)))
+          (entry !== null && (await this.edited(entry, target)))
         ) {
           await this.pending.clear(change.file_id)
           return false
@@ -443,7 +456,7 @@ export class PullPlacer {
         if (
           !sameStat(beforeTarget, await this.fs.stat(target)) ||
           !sameStat(beforeFrom, from === null ? null : await this.fs.stat(from)) ||
-          (!pending?.stageId && entry !== null && (await this.edited(entry)))
+          (!pending?.stageId && entry !== null && (await this.edited(entry, target)))
         )
           throw new EngineError('conflict', 'pull target changed during transfer')
         if (from !== null && beforeFrom !== null) await this.fs.move(from, target)
