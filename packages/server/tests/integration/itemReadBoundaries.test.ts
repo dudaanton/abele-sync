@@ -94,6 +94,71 @@ for (const dialect of ['sqlite', 'pg'] as const)
       }
     })
 
+    it('bounds hidden-item denial queries for group issuers independently of group size', async () => {
+      let first = 0
+      for (const size of [16, 48]) {
+        const f = await tokenFixture(dialect)
+        try {
+          const g = success(await f.root.create('G.md', 'G'))
+          for (let i = 0; i < size; i++)
+            success(await f.root.create(`member-${i}.md`, '---\ngroups: ["[[G]]"]\n---\nnote'))
+          const privateFile = success(await f.root.create('Private/secret.md', 'secret'))
+          const issued = await f.root.json('/tokens', 'POST', {
+            scope: { kind: 'group', id: g.file_id },
+            label: 'G',
+          })
+          const group = new V2SyncClient(issued.token)
+          const child = await group.json('/tokens', 'POST', {
+            scope: { kind: 'group', id: g.file_id },
+            label: 'child',
+          })
+          const hidden = await f.root.json(`/tokens/${child.info.id}/items`, 'POST', {
+            scope: { kind: 'file', id: privateFile.file_id },
+          })
+          let queries = 0
+          const sql: string[] = []
+          const db = f.t.db.withPlugin({
+            transformQuery({ node }) {
+              queries++
+              sql.push(JSON.stringify(node))
+              return node
+            },
+            async transformResult({ result }) {
+              return result
+            },
+          })
+          for (const id of ['unknown', hidden.id]) {
+            queries = 0
+            sql.length = 0
+            await expect(
+              previewTokenContent(
+                { db, pepper: f.t.config.tokenPepper, dialect },
+                group.key,
+                child.info.id,
+                1,
+                id
+              )
+            ).rejects.toMatchObject({ code: 'forbidden', message: 'scope_removed' })
+            expect(sql.some((q) => q.includes('versions') || q.includes('scope_members'))).toBe(
+              false
+            )
+            expect(queries).toBeLessThan(40)
+            if (id === hidden.id) {
+              if (size === 16) first = queries
+              else expect(queries).toBeLessThanOrEqual(first)
+            }
+          }
+          // The early check must still admit a selector in the caller's group.
+          expect(
+            (await group.json(`/tokens/${child.info.id}/items/primary:${child.info.id}/preview`))
+              .file_count
+          ).toBe(size + 1)
+        } finally {
+          await f.close()
+        }
+      }
+    })
+
     it('keeps query growth linear when each group note has its own inherited file grant', async () => {
       let first = 0
       for (const size of [16, 48]) {
@@ -323,16 +388,21 @@ for (const dialect of ['sqlite', 'pg'] as const)
         )
         const deps = { db: f.t.db, pepper: f.t.config.tokenPepper, dialect }
         const snapshot = await readCoverage(deps, f.space)
+        const selectors = await readCoverage(deps, f.space, 'selectors')
         for (const scope of await f.t.db
           .selectFrom('access_scopes')
           .selectAll()
           .where('space_id', '=', f.space)
           .execute())
-          for (const file of snapshot.files)
+          for (const file of snapshot.files) {
             expect(
               await snapshot.covers(scope.id, file.path, file.file_id),
               `${scope.kind}: ${file.path}`
             ).toBe(await covers(deps, scope, file.path, file.file_id))
+            expect(await selectors.covers(scope.id, file.path, file.file_id)).toBe(
+              await snapshot.covers(scope.id, file.path, file.file_id)
+            )
+          }
       } finally {
         await f.close()
       }

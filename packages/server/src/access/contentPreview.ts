@@ -28,7 +28,7 @@ export async function previewTokenContent(
     const forbidden = () =>
       new AbeleError('forbidden', 'scope_removed', { reason: 'scope_removed' })
     if (!targetItems.length) throw forbidden()
-    // Direct-item denial must precede bulk graph/member reads and enumeration.
+    // Direct-item denial must precede content/projection reads and grant enumeration.
     // Whole-token reads retain snapshot-based filtering for many-item sets.
     if (itemId !== undefined && !root) {
       const scope = await deps.db
@@ -40,10 +40,21 @@ export async function previewTokenContent(
       // Do not walk the target's inherited bounds just to reject a selector
       // the caller cannot cover. Accepted selectors are rechecked in the snapshot.
       const selected = await selector(deps, p.space.id, { kind: scope.kind, id: scope.target_id })
+      // Group/file grants may inherit group bounds. Resolve their closures once
+      // in bulk, including path restrictions, instead of walking each member
+      // (and its attachments) through the query-based covers(). Folder-only
+      // callers keep the cheap direct path check.
+      const selectors = callerScopes.some((caller) => caller.kind !== 'folder')
+        ? await readCoverage(deps, p.space.id, 'selectors')
+        : undefined
       let visible = false
       if (selected !== null)
         for (const caller of callerScopes)
-          if (await covers(deps, caller, selected.path, selected.id)) {
+          if (
+            selectors
+              ? await selectors.covers(caller.id, selected.path, selected.id)
+              : await covers(deps, caller, selected.path, selected.id)
+          ) {
             visible = true
             break
           }

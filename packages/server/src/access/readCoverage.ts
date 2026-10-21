@@ -3,7 +3,11 @@ import type { V2Scope } from '@abele/sync-protocol'
 import { isConfigurationPath } from '../configurationDirectories.js'
 
 /** Read under the vault lock. Load graph/member data once; never query per file. */
-export async function readCoverage(deps: AccessDeps, space: string) {
+export async function readCoverage(
+  deps: AccessDeps,
+  space: string,
+  mode: 'content' | 'selectors' = 'content'
+) {
   const rows = await deps.db
     .selectFrom('access_scopes')
     .selectAll()
@@ -18,15 +22,27 @@ export async function readCoverage(deps: AccessDeps, space: string) {
     .execute()
   const directories = new Map(directoryRows.map((row) => [row.id, row]))
   const directoryPaths = new Map(directoryRows.map((row) => [row.path, row.id]))
-  const fileRows = await deps.db
-    .selectFrom('files')
-    .innerJoin('versions', 'versions.id', 'files.head_version_id')
-    .select(['files.id as file_id', 'files.path', 'files.kind', 'versions.size as bytes'])
-    .where('files.vault_id', '=', space)
-    .where('files.deleted_at', 'is', null)
-    .orderBy('files.path')
-    .orderBy('files.id')
-    .execute()
+  // Authorization needs live selectors and the graph, not heads or projections.
+  // Keep the same cached inheritance/path checks in both modes.
+  const fileRows =
+    mode === 'selectors'
+      ? (
+          await deps.db
+            .selectFrom('files')
+            .select(['id as file_id', 'path', 'kind'])
+            .where('vault_id', '=', space)
+            .where('deleted_at', 'is', null)
+            .execute()
+        ).map((row) => ({ ...row, bytes: 0 }))
+      : await deps.db
+          .selectFrom('files')
+          .innerJoin('versions', 'versions.id', 'files.head_version_id')
+          .select(['files.id as file_id', 'files.path', 'files.kind', 'versions.size as bytes'])
+          .where('files.vault_id', '=', space)
+          .where('files.deleted_at', 'is', null)
+          .orderBy('files.path')
+          .orderBy('files.id')
+          .execute()
   const fileById = new Map(fileRows.map((row) => [row.file_id, row]))
   const files = fileRows.map(({ file_id, path, bytes }) => ({ file_id, path, bytes }))
   const live = new Set(files.map((file) => file.file_id))
@@ -84,12 +100,15 @@ export async function readCoverage(deps: AccessDeps, space: string) {
     }
     return result
   }
-  const memberRows = await deps.db
-    .selectFrom('scope_members')
-    .innerJoin('access_scopes', 'access_scopes.id', 'scope_members.scope_id')
-    .select(['scope_id', 'file_id'])
-    .where('access_scopes.space_id', '=', space)
-    .execute()
+  const memberRows =
+    mode === 'selectors'
+      ? []
+      : await deps.db
+          .selectFrom('scope_members')
+          .innerJoin('access_scopes', 'access_scopes.id', 'scope_members.scope_id')
+          .select(['scope_id', 'file_id'])
+          .where('access_scopes.space_id', '=', space)
+          .execute()
   const members = new Map<string, Set<string>>()
   for (const row of memberRows) {
     const set = members.get(row.scope_id) ?? new Set<string>()
