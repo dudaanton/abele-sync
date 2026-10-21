@@ -23,6 +23,7 @@ import { TransferBudget } from './streaming.js'
 import { VerdictPlanner } from './pushVerdicts.js'
 import type { StateStore, Journal } from './state.js'
 import { checkCancellation } from './cancellation.js'
+import { isFinalForBatch } from './commitErrors.js'
 export { batches } from './pushBatches.js'
 
 /**
@@ -65,12 +66,6 @@ export interface Refusal {
  * which the engine halts on). A batch refused so is not journalled: replaying it would only
  * be refused again, before every pull, for ever.
  */
-const isFinalForBatch = (error: AbeleError): boolean =>
-  error.status >= 400 &&
-  error.status < 500 &&
-  error.code !== 'rate_limited' &&
-  error.code !== 'unauthorized' &&
-  error.code !== 'forbidden'
 
 export interface PushReport {
   /**

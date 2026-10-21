@@ -46,6 +46,7 @@ import { z } from 'zod'
 import { sha256 as incrementalSha256 } from '@noble/hashes/sha256'
 import { MAX_CHUNK_BYTES, type ChunkSource, type ContentIdentity } from './streaming.js'
 import { negotiateExternalFiles, checkedExternalVerification } from './externalVerification.js'
+import { isFinalForBatch } from './commitErrors.js'
 
 /** One production transport for root, folder and group token connections.
  * Wire authority is always v2. Engine-local file/version shapes are not v1 routes. */
@@ -447,26 +448,37 @@ export class V2EngineClient implements EngineClient {
     let cursor = 0
     let replayed = false
     if (regular.length) {
-      const sent = await this.sendCommit(regular, `${key}:files`)
-      cursor = sent.body.cursor
-      replayed = sent.replayed
-      regular.forEach((op, i) => results.set(op, sent.body.results[i]!))
+      try {
+        const sent = await this.sendCommit(regular, `${key}:files`)
+        cursor = sent.body.cursor
+        replayed = sent.replayed
+        regular.forEach((op, i) => results.set(op, sent.body.results[i]!))
+      } catch (error) {
+        if (!isFinalForBatch(error)) throw error
+        for (const op of regular)
+          results.set(op, { status: 'rejected', code: error.code, message: error.message })
+      }
     }
     for (const [index, op] of assets.entries()) {
       if (op.op !== 'create') continue
-      const response = await this.http.send('POST', '/v2/group-assets', {
-        json: { path: op.path, sha: op.sha, size: op.size, mtime: op.mtime },
-        ...idempotency(`${key}:asset:${index}`),
-      })
-      const body = await this.http.decode(
-        V2CommitResponseSchema,
-        response,
-        'POST',
-        '/v2/group-assets'
-      )
-      cursor = body.cursor
-      replayed ||= response.headers.get('idempotent-replayed') === 'true'
-      results.set(op, body.results[0]!)
+      try {
+        const response = await this.http.send('POST', '/v2/group-assets', {
+          json: { path: op.path, sha: op.sha, size: op.size, mtime: op.mtime },
+          ...idempotency(`${key}:asset:${index}`),
+        })
+        const body = await this.http.decode(
+          V2CommitResponseSchema,
+          response,
+          'POST',
+          '/v2/group-assets'
+        )
+        cursor = Math.max(cursor, body.cursor)
+        replayed ||= response.headers.get('idempotent-replayed') === 'true'
+        results.set(op, body.results[0]!)
+      } catch (error) {
+        if (!isFinalForBatch(error)) throw error
+        results.set(op, { status: 'rejected', code: error.code, message: error.message })
+      }
     }
     return { body: { cursor, results: ops.map((op) => results.get(op)!) }, replayed }
   }
