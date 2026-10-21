@@ -4,6 +4,7 @@ import { MemoryFileSystem, MemoryStateStore, sha256, ExpectedWrites } from '../.
 import { PullPlacer } from '../../src/pullPlace.js'
 import { ScopeMarks } from '../../src/scope.js'
 import { recoverPendingPullWrites } from '../../src/pullRecovery.js'
+import { reconcileGeneration } from '../../src/restoreGeneration.js'
 
 async function fixture() {
   const fs = new MemoryFileSystem(),
@@ -132,6 +133,15 @@ it('retains removal provenance when a new equal save appears during ledger retir
   expect(await f.placer.place(incoming, incoming.sha!, null, new Map(), new Map())).toBe(false)
   // Retry must not classify the newly created local B as a completed remote B.
   expect(await f.placer.adoptExisting(incoming, null)).toBe(false)
+  expect(await f.fs.read('old.bin')).toEqual(f.b)
+})
+
+it('keeps local path protection when a server restore retires remote authority', async () => {
+  const f = await fixture()
+  await f.state.setMeta('pull-base:old.bin', JSON.stringify({ base: f.base }))
+  await f.fs.writeAtomic('old.bin', f.b, 1)
+  await reconcileGeneration(f.state, 'restored')
+  expect(await f.placer.adoptExisting(f.change, await f.state.byFileId('file'))).toBe(false)
   expect(await f.fs.read('old.bin')).toEqual(f.b)
 })
 
