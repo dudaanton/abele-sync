@@ -1,0 +1,12 @@
+{
+  "seed": 1,
+  "actions": [
+    {
+      "kind": "fault",
+      "fault": "lost"
+    },
+    {
+      "kind": "sync"
+    }
+  ]
+}

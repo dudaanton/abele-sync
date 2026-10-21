@@ -1,0 +1,10 @@
+{
+  "seed": 10,
+  "actions": [
+    { "kind": "write", "path": "f3.md", "text": "" },
+    { "kind": "sync" },
+    { "kind": "move", "path": "f3.md", "to": "m20.md" },
+    { "kind": "restart" },
+    { "kind": "remote", "path": "remote22.md", "text": "" }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "seed": 17,
+  "actions": [
+    { "kind": "write", "path": "note.md", "text": "bytes" },
+    { "kind": "sync" },
+    { "kind": "crash" },
+    { "kind": "sync" }
+  ]
+}

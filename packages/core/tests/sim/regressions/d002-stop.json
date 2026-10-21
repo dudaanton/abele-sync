@@ -1,0 +1,34 @@
+{
+  "seed": 4,
+  "bug": "D-002",
+  "actions": [
+    {
+      "kind": "remote",
+      "path": "r0.md",
+      "text": ""
+    },
+    {
+      "kind": "remote",
+      "path": "r1.md",
+      "text": ""
+    },
+    {
+      "kind": "remote",
+      "path": "r2.md",
+      "text": ""
+    },
+    {
+      "kind": "remote",
+      "path": "r3.md",
+      "text": ""
+    },
+    {
+      "kind": "remote",
+      "path": "r4.md",
+      "text": ""
+    },
+    {
+      "kind": "stopPull"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "seed": 2,
+  "bug": "D-001",
+  "actions": [
+    {
+      "kind": "write",
+      "path": "same.md",
+      "text": "x"
+    },
+    {
+      "kind": "sync"
+    },
+    {
+      "kind": "sameSha",
+      "path": "same.md"
+    }
+  ]
+}
