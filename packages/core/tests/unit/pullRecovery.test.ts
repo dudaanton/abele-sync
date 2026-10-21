@@ -17,13 +17,19 @@ async function fixture() {
     wirePath: 'a.bin',
     fileId: 'file',
     versionId: 'old',
-    sha: 'a'.repeat(64),
+    sha: await sha256(new Uint8Array([0, 0, 0])),
     size: 3,
     mtime: 1,
   }
   await state.put(base)
-  await fs.writeAtomic('a.bin', bytes, 2)
+  await fs.writeAtomic('a.bin', new Uint8Array([0, 0, 0]), 1)
+  await fs.conditionalFile({
+    path: 'a.bin',
+    expected: base,
+    effect: { kind: 'write', bytes, mtime: 2, receipt: 'installation' },
+  })
   const intent = {
+    receiptId: 'installation',
     fileId: 'file',
     versionId: 'new',
     wirePath: 'a.bin',

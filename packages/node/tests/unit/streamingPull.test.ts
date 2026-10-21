@@ -128,10 +128,12 @@ for (const phase of ['download', 'seal', 'move', 'publish'] as const) {
           },
         })
       }
-      const move = fs.move.bind(fs)
-      fs.move = async (...args) => {
-        await move(...args)
-        if (phase === 'move' && interrupt) throw new Error('crash')
+      const conditional = fs.conditionalFile.bind(fs)
+      fs.conditionalFile = async (op) => {
+        const done = await conditional(op)
+        if (done && op.effect.kind === 'move' && phase === 'move' && interrupt)
+          throw new Error('crash')
+        return done
       }
       const change: ChangeItem = {
         seq: 1,

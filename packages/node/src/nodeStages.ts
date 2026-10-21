@@ -7,6 +7,7 @@ import {
   MAX_CHUNK_BYTES,
   type AtomicStage,
   type ContentIdentity,
+  type ConditionalFileOperation,
 } from '@abele/sync-core'
 import { containedIn, isMissing, ownTempFolder } from './nodeFsGuard.js'
 import { syncParents, syncPath } from './nodeFsDurability.js'
@@ -15,13 +16,14 @@ interface Metadata {
   id: string
   target: string
   mtime: number
-  base: ContentIdentity | null
+  base: (ContentIdentity & { mtime?: number }) | null
   offset: number
   sealed: ContentIdentity | null
   phase: 'receiving' | 'sealed' | 'installing' | 'committed'
 }
 interface Host {
   fingerprint(path: string): Promise<ContentIdentity>
+  conditionalFile(operation: ConditionalFileOperation): Promise<boolean>
 }
 const same = (a: ContentIdentity, b: ContentIdentity) => a.size === b.size && a.sha === b.sha
 
@@ -131,6 +133,24 @@ export class NodeStages {
     let offset = meta.offset
     return {
       id,
+      installed: async () => {
+        const current = await this.load(id)
+        if (!current.sealed || !['installing', 'committed'].includes(current.phase)) return false
+        try {
+          const [a, b] = await Promise.all([
+            lstat(await this.path(id, 'data')),
+            lstat(await containedIn(this.root, current.target)),
+          ])
+          return (
+            a.dev === b.dev &&
+            a.ino === b.ino &&
+            same(await this.host.fingerprint(current.target), current.sealed)
+          )
+        } catch (error) {
+          if (isMissing(error)) return false
+          throw error
+        }
+      },
       get offset() {
         return offset
       },
@@ -207,7 +227,6 @@ export class NodeStages {
           const current = await this.load(id)
           if (!current.sealed || current.phase === 'receiving')
             throw new EngineError('conflict', 'stage is not sealed')
-          if (current.phase === 'committed') return
           if (!same(await this.host.fingerprint(this.relative(id)), current.sealed))
             throw new EngineError('conflict', 'sealed stage changed')
           const data = await this.path(id, 'data')
@@ -228,7 +247,7 @@ export class NodeStages {
           const sourceInfo = await lstat(data)
           const named = await statOrNull(target)
           if (
-            current.phase === 'installing' &&
+            (current.phase === 'installing' || current.phase === 'committed') &&
             named?.dev === sourceInfo.dev &&
             named.ino === sourceInfo.ino
           ) {
@@ -241,51 +260,30 @@ export class NodeStages {
             await this.persist(current)
             return
           }
-          if (current.phase === 'sealed') {
-            if (current.base === null) {
-              if (named !== null) throw new EngineError('conflict', 'stage target is occupied')
-            } else {
-              if (
-                named === null ||
-                !named.isFile() ||
-                !same(await this.host.fingerprint(current.target), current.base)
-              )
-                throw new EngineError('conflict', 'stage base changed')
-            }
-            current.phase = 'installing'
-            await this.persist(current)
-          }
-          if (current.base !== null && (await statOrNull(backup)) === null) {
-            // rename(data, target) would atomically replace the name, but destroy an editor's
-            // replacement inode saved after base validation. Node offers no conditional rename
-            // or atomic exchange. Capture the actual displaced inode, then verify it instead.
-            this.check()
-            signal?.throwIfAborted()
-            await rename(await containedIn(this.root, current.target), await this.path(id, 'base'))
-            await syncParents([backup, target], this.root)
-          }
-          if (
+          if (current.phase === 'committed')
+            throw new EngineError('conflict', 'published stage was replaced by a local save')
+          current.phase = 'installing'
+          await this.persist(current)
+          // Upgrade recovery of an older adapter's already-displaced base.
+          const legacyBase =
+            named === null &&
             current.base !== null &&
-            !same(await this.host.fingerprint(`.abele-sync/stages/${id}/base`), current.base)
-          ) {
-            this.check()
-            // Exclusive restore cannot destroy a new save at the temporarily free target.
-            await link(backup, await containedIn(this.root, current.target)).catch((error) => {
-              if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-            })
-            throw new EngineError('conflict', 'displaced stage base changed; original preserved')
-          }
-          this.check()
-          signal?.throwIfAborted()
-          try {
-            await link(await this.path(id, 'data'), await containedIn(this.root, current.target))
-          } catch (error) {
-            if (current.base !== null)
-              await link(backup, await containedIn(this.root, current.target)).catch(() => {})
-            if ((error as NodeJS.ErrnoException).code === 'EEXIST')
-              throw new EngineError('conflict', 'stage target became occupied')
-            throw error
-          }
+            (await statOrNull(backup)) !== null &&
+            same(await this.host.fingerprint(`.abele-sync/stages/${id}/base`), current.base)
+          if (
+            !(await this.host.conditionalFile({
+              path: current.target,
+              expected:
+                current.base === null || legacyBase
+                  ? null
+                  : {
+                      ...current.base,
+                      mtime: current.base.mtime ?? Math.max(0, Math.round(named?.mtimeMs ?? 0)),
+                    },
+              effect: { kind: 'install', stageId: id },
+            }))
+          )
+            throw new EngineError('conflict', 'stage target changed; displaced bytes preserved')
           await syncParents(target, this.root)
           current.phase = 'committed'
           await this.persist(current)

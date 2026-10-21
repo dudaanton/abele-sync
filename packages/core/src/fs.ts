@@ -3,6 +3,22 @@ import { EngineError } from './errors.js'
 import type { StreamingFileSystem } from './streaming.js'
 import { fingerprintSource } from './streaming.js'
 import { checkCancellation } from './cancellation.js'
+import { sha256 as digest } from '@noble/hashes/sha256'
+
+export interface FileVersion {
+  size: number
+  mtime: number
+  sha: string
+}
+export interface ConditionalFileOperation {
+  path: string
+  expected: FileVersion | null
+  effect:
+    | { kind: 'remove' }
+    | { kind: 'move'; to: string }
+    | { kind: 'write'; bytes: Uint8Array; mtime: number; receipt?: string }
+    | { kind: 'install'; stageId: string }
+}
 
 /** A regular file as the host sees it. `path` is on-disk form, `/`-separated and vault-relative. */
 export interface FileInfo {
@@ -16,6 +32,14 @@ export interface FileInfo {
  * the daemon over Node's `fs`; the engine and its tests use `MemoryFileSystem`.
  */
 export interface FileSystem extends Partial<StreamingFileSystem> {
+  /** Atomic compare-and-effect. Compare stat AND bytes of the actual displaced file.
+   * Quarantine before verification; never overwrite a concurrent save when restoring
+   * or installing. False preserves all user bytes. Absence means pull fails closed. */
+  conditionalFile?(operation: ConditionalFileOperation): Promise<boolean>
+  /** Publication evidence, not equality: the named file is the installation's inode/object. */
+  installedFile?(receipt: string, path: string, sha: string): Promise<boolean>
+  discardInstallation?(receipt: string): Promise<void>
+  recoverConditionalFiles?(): Promise<void>
   /** Every regular file. Symlinks are skipped, directories are never yielded. */
   list(): AsyncIterable<FileInfo>
   /** Stable local directory identities let a rename preserve its server selector. */
@@ -86,6 +110,7 @@ export interface MemoryFileSystemOptions {
  * are copied in and out, so no caller can reach into the store through an array it still holds.
  */
 export class MemoryFileSystem implements FileSystem {
+  private readonly installations = new Map<string, Entry>()
   private readonly files = new Map<string, Entry>()
   private readonly watchers = new Set<(paths: string[]) => void>()
   private readonly fold: (path: string) => string
@@ -123,6 +148,50 @@ export class MemoryFileSystem implements FileSystem {
 
   async remove(path: string): Promise<void> {
     this.files.delete(this.fold(path))
+  }
+
+  async conditionalFile(op: ConditionalFileOperation): Promise<boolean> {
+    // No await between comparison and mutation: one indivisible in-memory operation.
+    const key = this.fold(op.path),
+      current = this.files.get(key)
+    if (!current && op.effect.kind === 'remove') return true
+    if (
+      op.expected === null
+        ? current !== undefined
+        : !current ||
+          current.bytes.length !== op.expected.size ||
+          current.mtime !== op.expected.mtime ||
+          Array.from(digest(current.bytes), (b) => b.toString(16).padStart(2, '0')).join('') !==
+            op.expected.sha
+    )
+      return false
+    if (op.effect.kind === 'remove') this.files.delete(key)
+    else if (op.effect.kind === 'move') {
+      if (!current || (this.fold(op.effect.to) !== key && this.files.has(this.fold(op.effect.to))))
+        return false
+      this.files.delete(key)
+      this.files.set(this.fold(op.effect.to), { ...current, path: op.effect.to })
+    } else if (op.effect.kind === 'write') {
+      const installed = {
+        path: current?.path ?? op.path,
+        bytes: op.effect.bytes.slice(),
+        mtime: op.effect.mtime,
+      }
+      this.files.set(key, installed)
+      if (op.effect.receipt) this.installations.set(op.effect.receipt, installed)
+    } else return false
+    return true
+  }
+  async installedFile(receipt: string, path: string, sha: string): Promise<boolean> {
+    const entry = this.files.get(this.fold(path))
+    return (
+      entry !== undefined &&
+      this.installations.get(receipt) === entry &&
+      Array.from(digest(entry.bytes), (b) => b.toString(16).padStart(2, '0')).join('') === sha
+    )
+  }
+  async discardInstallation(receipt: string): Promise<void> {
+    this.installations.delete(receipt)
   }
 
   async stat(path: string): Promise<FileInfo | null> {

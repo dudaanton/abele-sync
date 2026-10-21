@@ -28,6 +28,8 @@ import {
 import { caseKey } from '@abele/sync-protocol'
 import { syncParents, syncPath } from './nodeFsDurability.js'
 import { NodeStages } from './nodeStages.js'
+import { conditionalFile, installedFile, recoverConditionalFiles } from './nodeConditional.js'
+import type { ConditionalFileOperation } from '@abele/sync-core'
 import type { AtomicStage } from '@abele/sync-core'
 import {
   containedIn,
@@ -83,6 +85,15 @@ export interface NodeFileSystemOptions {
  * is swept by `sweepTemp`, which the daemon calls once it holds the lock and nobody else does.
  */
 export class NodeFileSystem implements FileSystem {
+  conditionalFile(operation: ConditionalFileOperation): Promise<boolean> {
+    return conditionalFile(this.base, operation, () => this.checkEffect())
+  }
+  installedFile(receipt: string, path: string, sha: string): Promise<boolean> {
+    return installedFile(this.base, receipt, path, sha)
+  }
+  recoverConditionalFiles(): Promise<void> {
+    return recoverConditionalFiles(this.base, () => this.checkEffect())
+  }
   private readonly ignoreDirs: ReadonlySet<string>
   private readonly skipHidden: boolean
   private readonly preserveEmptyDirectories: boolean
@@ -114,6 +125,10 @@ export class NodeFileSystem implements FileSystem {
     )
     if (options.effectTracker) {
       const track = options.effectTracker
+      const mutate = this.conditionalFile.bind(this),
+        recover = this.recoverConditionalFiles.bind(this)
+      this.conditionalFile = (...args) => track(() => mutate(...args))
+      this.recoverConditionalFiles = () => track(() => recover())
       const write = this.writeAtomic.bind(this),
         move = this.move.bind(this),
         remove = this.remove.bind(this),

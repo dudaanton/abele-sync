@@ -42,6 +42,7 @@ export async function reconcileGeneration(state: StateStore, generation: string 
     ...entries.map((entry) => `pull-write:${entry.fileId}`),
     ...((await state.metadataKeys?.('pull-write:')) ?? []),
     ...((await state.metadataKeys?.('pull-evict:')) ?? []),
+    ...((await state.metadataKeys?.('pull-base:')) ?? []),
   ])
   const recovering =
     old !== null ||

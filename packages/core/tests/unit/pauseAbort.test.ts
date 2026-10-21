@@ -103,6 +103,20 @@ it('D-022 retains completed manifest coverage when one local edit stays held', a
     head_seq: 14,
   })
   await f.engine.sync()
+  // An equal intermediate version cannot acknowledge unsent typing. Only a
+  // successful publication may establish its clean base before held feed resumes.
+  expect(await f.state.getCursor()).toBe(0)
+  expect(await f.state.get('0.md')).toMatchObject({ versionId: 'old' })
+  await f.state.put({
+    path: item.path,
+    wirePath: item.path,
+    fileId: item.file_id,
+    versionId: 'acknowledged',
+    sha,
+    size: typing.length,
+    mtime: 2,
+  })
+  await f.engine.sync()
   expect(await f.state.getCursor()).toBe(14)
   expect(await f.state.getMeta('pull-manifest-progress')).toBeNull()
   expect(await f.state.get('0.md')).toMatchObject({ versionId: 'latest' })
@@ -130,14 +144,15 @@ it('D-035 resumes later manifest pages while unchanged scope recheck marks remai
     next: cursor === null ? 'later' : null,
     head_seq: 13,
   }))
-  const write = f.fs.writeAtomic.bind(f.fs)
+  const write = f.fs.conditionalFile.bind(f.fs)
   let paused = false
-  f.fs.writeAtomic = async (...args) => {
-    await write(...args)
-    if (args[0] === '4.md' && !paused) {
+  f.fs.conditionalFile = async (...args) => {
+    const done = await write(...args)
+    if (args[0].path === '4.md' && !paused) {
       paused = true
       f.engine.pause()
     }
+    return done
   }
   await expect(f.engine.sync()).rejects.toMatchObject({ code: 'offline' })
   expect(await f.state.getMeta('pull-manifest-progress')).not.toBeNull()
@@ -156,15 +171,16 @@ for (const verb of ['pause', 'stop'] as const) {
     await f.state.setCursor(1)
     const entered = gate(),
       release = gate()
-    const write = f.fs.writeAtomic.bind(f.fs)
+    const write = f.fs.conditionalFile.bind(f.fs)
     let writes = 0
-    f.fs.writeAtomic = async (...args) => {
+    f.fs.conditionalFile = async (...args) => {
       writes++
-      await write(...args)
+      const done = await write(...args)
       if (writes === 1) {
         entered.release()
         await release.promise
       }
+      return done
     }
     const running = f.engine.sync().catch((e) => e)
     await entered.promise
@@ -281,14 +297,15 @@ it('resumes an interrupted initial manifest from its durable page checkpoint', a
   f.client.versionBytes = async (fileId) => f.bytes[Number(fileId.slice(1))]!
   const entered = gate(),
     release = gate()
-  const write = f.fs.writeAtomic.bind(f.fs)
+  const write = f.fs.conditionalFile.bind(f.fs)
   let writes = 0
-  f.fs.writeAtomic = async (...args) => {
-    await write(...args)
+  f.fs.conditionalFile = async (...args) => {
+    const done = await write(...args)
     if (++writes === 1) {
       entered.release()
       await release.promise
     }
+    return done
   }
   const running = f.engine.sync().catch((e) => e)
   await entered.promise

@@ -25,10 +25,11 @@ it.each([1, 3])(
       size: 1,
       mtime: 1,
     })
-    const move = fs.move.bind(fs)
-    fs.move = async (from, to) => {
-      await move(from, to)
-      await fs.writeAtomic(to, edit, 1)
+    const conditional = fs.conditionalFile.bind(fs)
+    fs.conditionalFile = async (op) => {
+      const done = await conditional(op)
+      if (done && op.effect.kind === 'move') await fs.writeAtomic(op.effect.to, edit, 1)
+      return done
     }
     const change: ChangeItem = {
       seq: 2,

@@ -141,11 +141,17 @@ it('D-016 engine startup settles a completed old-version pull before scan or a n
     mtime: 1,
   }
   await f.state.put(base)
-  await f.fs.writeAtomic('file.bin', f.bytes, 2)
+  await f.fs.writeAtomic('file.bin', new Uint8Array([1]), 1)
+  await f.fs.conditionalFile!({
+    path: 'file.bin',
+    expected: base,
+    effect: { kind: 'write', bytes: f.bytes, mtime: 2, receipt: 'completed-pull' },
+  })
   await f.state.setCursor(1)
   await f.state.setMeta(
     'pull-write:file',
     JSON.stringify({
+      receiptId: 'completed-pull',
       fileId: 'file',
       versionId: 'new',
       wirePath: 'file.bin',

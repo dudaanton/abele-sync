@@ -116,6 +116,16 @@ function deviceOn(client: VaultClient, delay = 0): Device {
   const hashed = { count: 0 }
   const fails: Device['fails'] = { get: null, write: null }
 
+  const conditional = fs.conditionalFile.bind(fs)
+  fs.conditionalFile = async (op) => {
+    if (op.effect.kind === 'write') {
+      writes.push(op.path)
+      if (fails.write?.(op.path, writes.length))
+        throw new EngineError('io', `the disk refused ${op.path}`)
+    }
+    return conditional(op)
+  }
+
   const write = fs.writeAtomic.bind(fs)
   fs.writeAtomic = async (path, bytes, mtime) => {
     writes.push(path)
@@ -627,11 +637,12 @@ describe('the puller over the device facet', () => {
       const d = vault.device()
       // The person types into the file the moment the pull has written it, before the pull
       // has looked at what it wrote.
-      const write = d.fs.writeAtomic.bind(d.fs)
-      d.fs.writeAtomic = async (path, bytes, mtime) => {
-        await write(path, bytes, mtime)
-        if (path === 'a.md')
-          await MemoryFileSystem.prototype.writeAtomic.call(d.fs, path, encodeText(typed), 5000)
+      const conditional = d.fs.conditionalFile.bind(d.fs)
+      d.fs.conditionalFile = async (op) => {
+        const done = await conditional(op)
+        if (done && op.path === 'a.md' && op.effect.kind === 'write')
+          await MemoryFileSystem.prototype.writeAtomic.call(d.fs, op.path, encodeText(typed), 5000)
+        return done
       }
 
       await d.pull()
@@ -945,15 +956,11 @@ describe('the puller over the device facet', () => {
     ])
     // A folder has taken `a.md` and a link `b.md`: the adapter refuses both with `conflict`,
     // which is what the memory disk is made to say here.
-    const write = d.fs.writeAtomic.bind(d.fs)
-    d.fs.writeAtomic = async (path, bytes, mtime) => {
-      if (path === 'a.md') throw new EngineError('conflict', 'a folder is at a.md')
-      await write(path, bytes, mtime)
-    }
-    const remove = d.fs.remove.bind(d.fs)
-    d.fs.remove = async (path) => {
-      if (path === 'b.md') throw new EngineError('conflict', 'a link is at b.md')
-      await remove(path)
+    const conditional = d.fs.conditionalFile.bind(d.fs)
+    d.fs.conditionalFile = async (op) => {
+      if (op.path === 'a.md') throw new EngineError('conflict', 'a folder is at a.md')
+      if (op.path === 'b.md') throw new EngineError('conflict', 'a link is at b.md')
+      return conditional(op)
     }
     const log: string[] = []
 
@@ -968,8 +975,7 @@ describe('the puller over the device facet', () => {
     expect(log.join('\n')).toContain('a link is at b.md')
 
     // Once the disk is clear, the next pull finishes the job.
-    d.fs.writeAtomic = write
-    d.fs.remove = remove
+    d.fs.conditionalFile = conditional
     const again = await d.pull()
     expect(again.held).toEqual([])
     expect(again.applied).toBe(2)
@@ -988,10 +994,11 @@ describe('the puller over the device facet', () => {
       { op: 'move', file_id: a.file_id, base_version_id: a.version_id, to_path: 'b.md' },
     ])
     // The user has made a folder called `b.md`: the adapter refuses the rename with `conflict`.
-    const move = d.fs.move.bind(d.fs)
-    d.fs.move = async (from, to) => {
-      if (to === 'b.md') throw new EngineError('conflict', 'a folder is at b.md')
-      await move(from, to)
+    const conditional = d.fs.conditionalFile.bind(d.fs)
+    d.fs.conditionalFile = async (op) => {
+      if (op.effect.kind === 'move' && op.effect.to === 'b.md')
+        throw new EngineError('conflict', 'a folder is at b.md')
+      return conditional(op)
     }
     const log: string[] = []
 
@@ -1004,7 +1011,7 @@ describe('the puller over the device facet', () => {
     expect(await d.state.get('a.md')).toMatchObject({ versionId: a.version_id })
     expect(log.join('\n')).toContain('a folder is at b.md')
 
-    d.fs.move = move
+    d.fs.conditionalFile = conditional
     const again = await d.pull()
     expect(again.held).toEqual([])
     expect(again.applied).toBe(1)

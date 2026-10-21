@@ -236,6 +236,7 @@ export class SyncCycle {
       this.ctx.log('sync: server generation observed; reconciling with local files preserved')
     }
     const log = this.ctx.log
+    await fs.recoverConditionalFiles?.()
     await recoverPullEvictions(fs, state, this.ctx.signal?.())
     const pendingFiles = new Set(
       ((await state.metadataKeys?.('pull-write:')) ?? []).map((key) =>

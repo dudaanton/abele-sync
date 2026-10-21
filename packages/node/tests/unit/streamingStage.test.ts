@@ -1,4 +1,13 @@
-import { mkdtemp, rm, writeFile, readFile, rename, link, appendFile } from 'node:fs/promises'
+import {
+  mkdtemp,
+  rm,
+  writeFile,
+  readFile,
+  rename,
+  link,
+  appendFile,
+  readdir,
+} from 'node:fs/promises'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
 import { sha256, type FileSystem } from '@abele/sync-core'
@@ -35,22 +44,22 @@ it('preserves a replacement save made after base validation but before publicati
     const stage = await fs.beginAtomicWrite('file', 1000, base)
     await stage.append(0, new Uint8Array([2]))
     await stage.seal({ size: 1, sha: await sha256(new Uint8Array([2])) })
-    const fingerprint = fs.fingerprint.bind(fs)
+    const conditional = fs.conditionalFile.bind(fs)
     let saved = false
-    fs.fingerprint = async (...args) => {
-      const result = await fingerprint(...args)
-      if (args[0] === 'file' && !saved) {
+    fs.conditionalFile = async (op) => {
+      if (op.path === 'file' && !saved) {
         saved = true
         // Simulate an editor's atomic save after the last base read completed.
         await writeFile(join(root, 'editor-save'), new Uint8Array([3]))
         await rename(join(root, 'editor-save'), join(root, 'file'))
       }
-      return result
+      return conditional(op)
     }
-    await expect(stage.commit()).rejects.toThrow('displaced stage base changed')
+    await expect(stage.commit()).rejects.toThrow('displaced bytes preserved')
     expect(saved).toBe(true)
     expect(await readFile(join(root, 'file'))).toEqual(Buffer.from([3]))
-    expect(await readFile(join(root, '.abele-sync/stages', stage.id, 'base'))).toEqual(
+    const [quarantine] = await readdir(join(root, '.abele-sync/conditional'))
+    expect(await readFile(join(root, '.abele-sync/conditional', quarantine!, 'victim'))).toEqual(
       Buffer.from([3])
     )
   } finally {
@@ -96,6 +105,25 @@ it('does not reseal a published stage after an independent editor changed its li
   }
 })
 
+it('does not treat an equal independent replacement as stage installation evidence', async () => {
+  const root = await mkdtemp(join(process.cwd(), '.stage-evidence-'))
+  try {
+    const fs = new NodeFileSystem(root),
+      bytes = new Uint8Array([2])
+    const stage = await fs.beginAtomicWrite('file', 1000, null)
+    await stage.append(0, bytes)
+    await stage.seal({ size: 1, sha: await sha256(bytes) })
+    await stage.commit()
+    expect(await stage.installed!()).toBe(true)
+    await fs.writeAtomic('file', bytes, 1000)
+    expect(await stage.installed!()).toBe(false)
+    await expect(stage.commit()).rejects.toThrow('local save')
+    expect(await fs.read('file')).toEqual(bytes)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 for (const phase of ['installing', 'displaced', 'published'] as const) {
   it(`reopens an atomic replacement after a crash at ${phase}`, async () => {
     const root = await mkdtemp(join(process.cwd(), '.stage-crash-'))
@@ -117,7 +145,12 @@ for (const phase of ['installing', 'displaced', 'published'] as const) {
       await reopened.commit()
       await reopened.commit()
       expect(await readFile(join(root, 'file'))).toEqual(Buffer.from(next))
-      expect(await readFile(join(dir, 'base'))).toEqual(Buffer.from(base))
+      if (phase === 'installing') {
+        const [quarantine] = await readdir(join(root, '.abele-sync/conditional-complete'))
+        expect(
+          await readFile(join(root, '.abele-sync/conditional-complete', quarantine!, 'victim'))
+        ).toEqual(Buffer.from(base))
+      } else expect(await readFile(join(dir, 'base'))).toEqual(Buffer.from(base))
     } finally {
       await rm(root, { recursive: true, force: true })
     }

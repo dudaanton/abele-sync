@@ -10,6 +10,7 @@ import { checkCancellation } from './cancellation.js'
 import { discardPullStage, stageMissing } from './pullStages.js'
 
 interface Intent {
+  receiptId?: string
   stageId?: string
   owner?: string
   fileId: string

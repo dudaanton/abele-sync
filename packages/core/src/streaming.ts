@@ -22,6 +22,8 @@ export interface ChunkSource {
 }
 
 export interface AtomicStage {
+  /** True only when this stage installed the named inode/object, not equal user bytes. */
+  installed?(): Promise<boolean>
   readonly id: string
   readonly offset: number
   append(offset: number, bytes: Uint8Array, signal?: AbortSignal): Promise<void>
@@ -36,7 +38,7 @@ export interface StreamingFileSystem {
   beginAtomicWrite(
     path: string,
     mtime: number,
-    expectedBase: ContentIdentity | null,
+    expectedBase: (ContentIdentity & { mtime?: number }) | null,
     beforeCreate?: (stageId: string) => Promise<void>
   ): Promise<AtomicStage>
   reopenStage(id: string): Promise<AtomicStage>

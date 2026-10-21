@@ -4,6 +4,7 @@ import type { StateEntry, StateStore } from './state.js'
 
 /** Intent saved before a pull touches the disk, retired atomically with its ledger update. */
 interface PendingPullWrite {
+  receiptId?: string
   stageId?: string
   owner?: string
   fileId: string
@@ -31,11 +32,13 @@ export class PendingPullWrites {
     base: StateEntry | null,
     target: string,
     from: string | null,
-    stageId?: string
+    stageId?: string,
+    receiptId?: string
   ): Promise<void> {
     if (this.state.getMeta === undefined || this.state.setMeta === undefined) return
     const owner = this.state.effectOwner?.()
     const pending: PendingPullWrite = {
+      ...(receiptId === undefined ? {} : { receiptId }),
       ...(stageId === undefined ? {} : { stageId }),
       ...(owner === undefined ? {} : { owner }),
       fileId: change.file_id,
@@ -70,6 +73,10 @@ export class PendingPullWrites {
   async stageId(change: ChangeItem): Promise<string | undefined> {
     const pending = await this.read(change.file_id)
     return pending?.versionId === change.version_id ? pending.stageId : undefined
+  }
+  async receiptId(change: ChangeItem): Promise<string | undefined> {
+    const pending = await this.read(change.file_id)
+    return pending?.versionId === change.version_id ? pending.receiptId : undefined
   }
   async settled(change: ChangeItem, discard?: (id: string) => Promise<void>): Promise<void> {
     const pending = await this.read(change.file_id)

@@ -1,9 +1,9 @@
 import { caseKey, normalisePath, type ChangeItem } from '@abele/sync-protocol'
 import { notifyApplied } from './applied.js'
-import { bytesFor, settledStat, writeExpected } from './apply.js'
+import { bytesFor, settledStat } from './apply.js'
 import type { EngineClient } from './engineClient.js'
 import { EngineError } from './errors.js'
-import type { FileInfo, FileSystem } from './fs.js'
+import type { FileInfo, FileSystem, ConditionalFileOperation } from './fs.js'
 import { fingerprintFile } from './fs.js'
 import { downloadToStage, TransferBudget, type ChunkSource } from './streaming.js'
 import type { PullOptions } from './puller.js'
@@ -11,7 +11,7 @@ import { PendingPullWrites } from './pullWrite.js'
 import type { StateEntry, StateStore } from './state.js'
 import { LocalPaths, resolveLocalFile } from './localPaths.js'
 import { checkCancellation } from './cancellation.js'
-import { discardPullStage } from './pullStages.js'
+import { discardPullStage, stageMissing } from './pullStages.js'
 import { evictionKey } from './pullEvictions.js'
 import { scanHintKey } from './scanHints.js'
 
@@ -94,14 +94,17 @@ export class PullPlacer {
       return true
     }
   }
-  settled(change: ChangeItem): Promise<void> {
-    return this.pending.settled(change, (id) => discardPullStage(this.fs, id))
+  async settled(change: ChangeItem): Promise<void> {
+    const receipt = await this.pending.receiptId(change)
+    if (receipt !== undefined) await this.fs.discardInstallation?.(receipt)
+    await this.pending.settled(change, (id) => discardPullStage(this.fs, id))
   }
 
   /**
    * Recover only a write this pull recorded before touching the disk. Content equality alone
    * can be an offline edit matching an intermediate feed version, not a completed pull.
-   * The intent must name this exact version and the still-current pre-write ledger entry.
+   * The intent must name this exact version and the still-current pre-write ledger entry,
+   * and the host must prove publication by stage/receipt identity, never matching bytes alone.
    */
   async adopt(change: ChangeItem, entry: StateEntry | null): Promise<boolean> {
     if (change.op === 'delete' || change.sha === null) return false
@@ -127,12 +130,24 @@ export class PullPlacer {
     if (pending.from !== null && (await this.fs.stat(pending.from)) !== null) return notWritten()
     const have = await this.fs.stat(pending.target)
     if (have === null) return notWritten()
+    let installed = false
+    try {
+      installed =
+        (pending.receiptId !== undefined
+          ? await this.fs.installedFile?.(pending.receiptId, pending.target, change.sha)
+          : pending.stageId !== undefined
+            ? await (await this.fs.reopenStage?.(pending.stageId))?.installed?.()
+            : false) === true
+    } catch (error) {
+      if (!stageMissing(error)) throw error
+    }
     try {
       const sha = (await fingerprintFile(this.fs, pending.target, this.hash)).sha
       // The rename landed, but the following write did not. Keep its exact intent so
       // recovery can replace only the proven old base at the new target.
       if (sha !== change.sha && pending.from !== null && pending.base?.sha === sha) return false
       if (sha !== change.sha || have.size !== change.size) return notWritten()
+      if (!installed) return notWritten()
     } catch {
       return notWritten()
     }
@@ -145,7 +160,7 @@ export class PullPlacer {
   async adoptExisting(change: ChangeItem, entry: StateEntry | null): Promise<boolean> {
     if (change.op === 'delete' || change.sha === null) return false
     // Equal remote bytes can be an offline edit matching an intermediate version.
-    // Only an exact pending-write intent can authorize adopting over an edited base.
+    // Only proven installation of an exact pending write can adopt over an edited base.
     let target: string
     try {
       target = await resolveLocalFile(
@@ -166,7 +181,14 @@ export class PullPlacer {
     if (occupant !== null && occupant.fileId !== entry?.fileId && (await this.edited(occupant)))
       return false
     try {
-      if ((await fingerprintFile(this.fs, target, this.hash)).sha !== change.sha) return false
+      const sha = (await fingerprintFile(this.fs, target, this.hash)).sha
+      if (
+        sha !== change.sha ||
+        (entry !== null && sha !== entry.sha) ||
+        (occupant !== null && sha !== occupant.sha) ||
+        (await this.unclassified(target, sha))
+      )
+        return false
     } catch {
       return false
     }
@@ -205,7 +227,7 @@ export class PullPlacer {
   async drop(entry: StateEntry): Promise<boolean> {
     if ((await LocalPaths.forFile(this.fs, entry.wirePath, this.state)).blocked(entry.wirePath))
       return false
-    if (!(await this.clearPath(entry.path))) return false
+    if (!(await this.clearPath(entry.path, entry))) return false
     this.opts.expected.clear(entry.path)
     await this.state.transaction(async () => {
       await this.state.delete(entry.path)
@@ -222,10 +244,24 @@ export class PullPlacer {
   }
 
   /** `remove`, with something in the way reported rather than thrown. */
-  private async clearPath(path: string): Promise<boolean> {
+  private async effect(op: ConditionalFileOperation): Promise<boolean> {
+    // A new save at a formerly absent name must not become a clean pull base
+    // on retry before scanning classifies it.
+    await this.state.setMeta?.(`pull-base:${op.path}`, JSON.stringify({ base: op.expected }))
+    return (await this.fs.conditionalFile?.(op)) ?? false
+  }
+
+  private async unclassified(path: string, sha: string): Promise<boolean> {
+    if (await this.state.get(path)) return false
+    const raw = await this.state.getMeta?.(`pull-base:${path}`)
+    if (!raw) return false
+    const saved = JSON.parse(raw) as { base: { sha: string } | null }
+    return saved.base === null || saved.base.sha !== sha
+  }
+
+  private async clearPath(path: string, base: StateEntry): Promise<boolean> {
     try {
-      await this.fs.remove(path)
-      return true
+      return await this.effect({ path, expected: base, effect: { kind: 'remove' } })
     } catch (error) {
       if (!this.inTheWay(error)) throw error
       this.opts.log?.(`pull: ${path} cannot be removed: ${(error as Error).message}`)
@@ -328,7 +364,7 @@ export class PullPlacer {
       // lies: its own size and mtime, the stat its bytes were just hashed under, so filing it
       // does not read and hash it a second time.
       if (from !== null) {
-        if (!(await this.clearPath(from))) return false
+        if (entry === null || !(await this.clearPath(from, entry))) return false
       }
       await this.remember(change, sha, target, state.have, from)
       return true
@@ -337,6 +373,7 @@ export class PullPlacer {
     // The bytes before anything on the disk moves: a server whose blob is not what it says
     // leaves the file where it was, and the change is held with the reason in the log.
     const beforeTarget = state.free
+    await this.state.setMeta?.(`pull-base:${target}`, JSON.stringify({ base: entry }))
     if (!state.removed && !sameStat(firstTarget, beforeTarget)) return false
     if (
       this.fs.beginAtomicWrite &&
@@ -370,7 +407,15 @@ export class PullPlacer {
           await this.pending.clear(change.file_id)
           return false
         }
-        await this.fs.move(from, target)
+        if (
+          entry === null ||
+          !(await this.effect({
+            path: from,
+            expected: entry,
+            effect: { kind: 'move', to: target },
+          }))
+        )
+          return false
       }
       // A host move can yield while an editor saves at the destination, including
       // when the remote version carries the old bytes and no replacement is planned.
@@ -402,11 +447,25 @@ export class PullPlacer {
           return false
         }
         await this.recheckTarget(change.path, target)
-        await writeExpected(this.fs, this.opts.expected, target, sha, bytes, change.mtime ?? 0)
+        const receipt = crypto.randomUUID()
+        await this.pending.prepare(change, entry, target, from, undefined, receipt)
+        this.opts.expected.expect(target, sha)
+        if (
+          !(await this.effect({
+            path: target,
+            expected:
+              have === null ? null : { size: have.size, mtime: have.mtime, sha: entry?.sha ?? sha },
+            effect: { kind: 'write', bytes, mtime: change.mtime ?? 0, receipt },
+          }))
+        ) {
+          this.opts.expected.clear(target)
+          return false
+        }
         wrote = { size: bytes.length, mtime: change.mtime ?? 0 }
       }
     } catch (error) {
       // A handled failure is not a crashed write. Do not leave authority to adopt a future edit.
+      this.opts.expected.clear(target)
       await this.pending.clear(change.file_id)
       if (!this.inTheWay(error)) throw error
       this.opts.log?.(`pull: ${target} cannot be written: ${(error as Error).message}`)
@@ -428,12 +487,13 @@ export class PullPlacer {
   ): Promise<boolean> {
     const identity = { sha, size: change.size! }
     const pending = await this.pending.matching(change, entry)
+    // Persist authority from the ledger, never a fresh read that could already
+    // contain an edit made after our inspection and before stage allocation.
     const base =
-      beforeTarget !== null
-        ? await fingerprintFile(this.fs, target, this.hash)
-        : from !== null && beforeFrom !== null
-          ? await fingerprintFile(this.fs, from, this.hash)
-          : null
+      entry !== null && (beforeTarget !== null || beforeFrom !== null)
+        ? { sha: entry.sha, size: entry.size, mtime: entry.mtime }
+        : null
+    await this.state.setMeta?.(`pull-base:${target}`, JSON.stringify({ base }))
     if (!pending?.stageId) await this.pending.prepare(change, entry, target, from)
     const stage =
       pending?.stageId !== undefined
@@ -459,7 +519,17 @@ export class PullPlacer {
           (!pending?.stageId && entry !== null && (await this.edited(entry, target)))
         )
           throw new EngineError('conflict', 'pull target changed during transfer')
-        if (from !== null && beforeFrom !== null) await this.fs.move(from, target)
+        if (
+          from !== null &&
+          beforeFrom !== null &&
+          (entry === null ||
+            !(await this.effect({
+              path: from,
+              expected: entry,
+              effect: { kind: 'move', to: target },
+            })))
+        )
+          throw new EngineError('conflict', 'pull source changed before move')
         this.opts.expected.expect(target, sha)
       })
       await this.remember(
@@ -536,7 +606,7 @@ export class PullPlacer {
       }
       const intent = evictionKey(occupant.fileId)
       await this.state.setMeta?.(intent, JSON.stringify(occupant))
-      if (!(await this.clearPath(occupant.path))) {
+      if (!(await this.clearPath(occupant.path, occupant))) {
         await this.state.setMeta?.(intent, null)
         return 'held'
       }
@@ -565,6 +635,7 @@ export class PullPlacer {
     // over: held, the change would stand in the cursor's way for good.
     if (this.opts.filter.excluded(change.path, there.size)) return 'aside'
     try {
+      if (await this.unclassified(target, sha)) return 'held'
       return (await fingerprintFile(this.fs, target, this.hash)).sha === sha
         ? { have: there }
         : 'held'
@@ -590,6 +661,7 @@ export class PullPlacer {
   ): Promise<void> {
     const have = await settledStat(this.fs, target, sha, wrote, this.hash)
     const stageId = await this.pending.stageId(change)
+    const receiptId = await this.pending.receiptId(change)
     await this.state.transaction(async () => {
       if (from !== null) await this.state.delete(from)
       await this.state.put({
@@ -602,6 +674,7 @@ export class PullPlacer {
         mtime: have.mtime,
       })
       await this.state.setMeta?.(scanHintKey(target), null)
+      await this.state.setMeta?.(`pull-base:${target}`, null)
       if (from !== null) await this.state.setMeta?.(scanHintKey(from), null)
       if (stageId === undefined) await this.pending.clear(change.file_id)
     })
@@ -609,6 +682,7 @@ export class PullPlacer {
       await discardPullStage(this.fs, stageId)
       await this.pending.clear(change.file_id)
     }
+    if (receiptId !== undefined) await this.fs.discardInstallation?.(receiptId)
     const source = change.prev_path ?? (from === null ? undefined : from.normalize('NFC'))
     await notifyApplied(this.opts, {
       path: change.path,
