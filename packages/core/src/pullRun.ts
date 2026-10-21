@@ -30,7 +30,26 @@ interface ManifestProgress {
   completed: string[]
   seen: string[]
   firstHeld: number | null
+  heldChanges?: ChangeItem[]
+  coverageComplete?: boolean
 }
+type CachedManifestPage = ManifestResponse &
+  Pick<ManifestProgress, 'heldChanges' | 'seen' | 'recheck'>
+const progressHeader = (progress: ManifestProgress) =>
+  JSON.stringify({
+    ...progress,
+    page: undefined,
+    heldChanges: undefined,
+    seen: undefined,
+    recheck: undefined,
+  })
+const progressPage = (progress: ManifestProgress, page: ManifestResponse) =>
+  JSON.stringify({
+    ...page,
+    heldChanges: progress.heldChanges ?? [],
+    seen: progress.seen,
+    recheck: progress.recheck,
+  })
 
 /** Repeated scope marks describe the walk already in progress, not a new rewind. */
 export async function resumesScopeRecheck(
@@ -41,12 +60,15 @@ export async function resumesScopeRecheck(
   const progress = JSON.parse(
     (await state.getMeta?.(MANIFEST_PROGRESS)) ?? 'null'
   ) as ManifestProgress | null
+  const raw = await state.getMeta?.(MANIFEST_PAGE_DATA)
+  if (progress === null || raw == null) return false
+  const payload = JSON.parse(raw) as CachedManifestPage
+  const covered = new Set(progress.recheck ?? payload.recheck ?? [])
   return (
     progress !== null &&
     progress.scope === ((await state.getMeta?.('marked-scope')) ?? null) &&
     (progress.generation ?? null) === ((await state.getMeta?.(GENERATION_KEY)) ?? null) &&
-    [...recheck].every((id) => progress.recheck?.includes(id)) &&
-    (await state.getMeta?.(MANIFEST_PAGE_DATA)) != null
+    [...recheck].every((id) => covered.has(id))
   )
 }
 
@@ -134,6 +156,8 @@ export class Puller {
   private walkAgain = false
   /** Every file id a manifest page or a feed page of this run named, applied or not. */
   private readonly seen = new Set<string>()
+  private readonly heldFiles = new Map<string, ChangeItem>()
+  private bootstrapContext: ManifestProgress | null = null
   /** Set while the manifest is walked. */
   private walking = false
 
@@ -157,7 +181,7 @@ export class Puller {
     this.reached = this.report.cursor
     if (this.reached === 0) await this.bootstrap()
     await this.follow()
-    if (this.report.bootstrapped && !this.walkAgain) await this.recheck()
+    if (this.report.bootstrapped) await this.recheck()
   }
 
   /**
@@ -242,8 +266,27 @@ export class Puller {
           (await this.state.getMeta?.(MANIFEST_PAGE_DATA)) ?? 'null'
         ) as ManifestResponse
         if (progress.page === null) throw new Error('missing manifest checkpoint page')
-        this.client.rememberManifest?.(progress.page.items)
-        this.firstHeld = progress.firstHeld
+        const payload = progress.page as CachedManifestPage
+        progress.heldChanges ??= payload.heldChanges
+        progress.seen ??= payload.seen ?? []
+        progress.recheck ??= payload.recheck ?? []
+        if (progress.firstHeld !== null && !Array.isArray(progress.heldChanges)) progress = null
+      }
+      if (progress !== null) {
+        this.client.rememberManifest?.([
+          ...progress.page.items,
+          ...(progress.heldChanges ?? [])
+            .filter((change) => change.sha !== null)
+            .map((change) => ({
+              ...change,
+              sha: change.sha!,
+              size: change.size ?? 0,
+              mtime: change.mtime ?? 0,
+            })),
+        ])
+        if (!progress.coverageComplete)
+          for (const held of progress.heldChanges ?? []) this.heldFiles.set(held.file_id, held)
+        this.syncHeld()
         for (const id of progress.seen) this.seen.add(id)
       }
       do {
@@ -260,28 +303,37 @@ export class Puller {
           completed: [],
           seen: [],
           firstHeld: this.firstHeld,
+          heldChanges: [...this.heldFiles.values()],
         }
         const checkpoint = progress
+        this.bootstrapContext = checkpoint
         const saveProgress = () => {
           checkpoint.firstHeld = this.firstHeld
-          checkpoint.seen = [...this.seen].filter((id) => this.opts.recheck?.has(id))
-          return this.state.setMeta?.(
-            MANIFEST_PROGRESS,
-            JSON.stringify({ ...checkpoint, page: undefined })
-          )
+          return this.state.setMeta?.(MANIFEST_PROGRESS, progressHeader(checkpoint))
         }
         await this.state.transaction(async () => {
-          await this.state.setMeta?.(MANIFEST_PAGE_DATA, JSON.stringify(page))
+          await this.state.setMeta?.(MANIFEST_PAGE_DATA, progressPage(checkpoint, page))
           await saveProgress()
         })
         const completed = new Set(checkpoint.completed)
+        const pending = checkpoint.coverageComplete
+          ? [...(checkpoint.heldChanges ?? [])]
+          : page.items.map(asCreate)
         await this.page(
-          page.items.filter((item) => !completed.has(item.file_id)).map(asCreate),
+          pending.filter((item) => !completed.has(item.file_id)),
           async (change) => {
-            checkpoint.completed.push(change.file_id)
-            await saveProgress()
+            if (this.heldFiles.get(change.file_id) !== change) {
+              checkpoint.completed.push(change.file_id)
+              await saveProgress()
+            }
           }
         )
+        checkpoint.heldChanges = [...this.heldFiles.values()]
+        checkpoint.seen = [...this.seen].filter((id) => this.opts.recheck?.has(id))
+        await this.state.transaction(async () => {
+          await this.state.setMeta?.(MANIFEST_PAGE_DATA, progressPage(checkpoint, page))
+          await saveProgress()
+        })
         cursor = page.next
         if (cursor !== null) {
           checkCancellation(this.opts.signal)
@@ -295,13 +347,11 @@ export class Puller {
             completed: [],
             seen: checkpoint.seen,
             firstHeld: this.firstHeld,
+            heldChanges: [...this.report.held],
           }
           await this.state.transaction(async () => {
-            await this.state.setMeta?.(MANIFEST_PAGE_DATA, JSON.stringify(next))
-            await this.state.setMeta?.(
-              MANIFEST_PROGRESS,
-              JSON.stringify({ ...progress, page: undefined })
-            )
+            await this.state.setMeta?.(MANIFEST_PAGE_DATA, progressPage(progress!, next))
+            await this.state.setMeta?.(MANIFEST_PROGRESS, progressHeader(progress!))
           })
         }
       } while (cursor !== null)
@@ -315,11 +365,7 @@ export class Puller {
     // did apply is recognised by its version and skipped.
     this.walkAgain = this.firstHeld !== null
     this.reached = head ?? 0
-    await this.state.transaction(async () => {
-      await this.save()
-      await this.state.setMeta?.(MANIFEST_PROGRESS, null)
-      await this.state.setMeta?.(MANIFEST_PAGE_DATA, null)
-    })
+    await this.save()
   }
 
   /** The feed, page after page, until the last one handed out reaches the head. */
@@ -330,7 +376,7 @@ export class Puller {
       const page = await this.client.changes(this.reached, CHANGES_PAGE)
       await this.page(page.items, async (change) => {
         this.reached = change.seq
-        await this.save()
+        if (!this.report.bootstrapped || this.heldFiles.size === 0) await this.save()
       })
       this.reached = page.next_since
       await this.save()
@@ -370,7 +416,11 @@ export class Puller {
       else staged.push(stage)
     }
     await this.stageAll(staged)
-    if (taking.length === 0) return
+    for (const { change } of staged) this.heldFiles.delete(change.file_id)
+    if (taking.length === 0) {
+      this.syncHeld()
+      return
+    }
     const local = await shaIndex(this.state)
     const budget = this.opts.prefetchBytes ?? DEFAULT_PREFETCH_BYTES
     for (const run of runsWithin(taking, downloads, budget)) {
@@ -379,9 +429,11 @@ export class Puller {
       for (const change of run) {
         checkCancellation(this.opts.signal)
         await this.take(change, fetched, local)
+        if (this.heldFiles.get(change.file_id) !== change) this.heldFiles.delete(change.file_id)
         await completed?.(change)
       }
     }
+    this.syncHeld()
   }
 
   /**
@@ -440,6 +492,49 @@ export class Puller {
    * change this run held, so the next run fetches that change again.
    */
   private async save(): Promise<void> {
+    if (this.report.bootstrapped && !this.walking) {
+      this.syncHeld()
+      this.walkAgain = this.report.held.length > 0
+      this.report.cursor = this.nextCursor()
+      await this.state.transaction(async () => {
+        await this.state.setCursor(this.report.cursor)
+        if (this.walkAgain) {
+          const progress =
+            (JSON.parse(
+              (await this.state.getMeta?.(MANIFEST_PROGRESS)) ?? 'null'
+            ) as ManifestProgress | null) ?? this.bootstrapContext
+          if (progress !== null) {
+            const payload = JSON.parse(
+              (await this.state.getMeta?.(MANIFEST_PAGE_DATA)) ?? '{}'
+            ) as CachedManifestPage
+            progress.recheck ??= payload.recheck ?? []
+            progress.seen = [
+              ...new Set([
+                ...(progress.seen ?? payload.seen ?? []),
+                ...[...this.seen].filter((id) => progress.recheck.includes(id)),
+              ]),
+            ]
+            Object.assign(progress, {
+              head: this.reached,
+              firstHeld: null,
+              completed: [],
+              heldChanges: this.report.held,
+              coverageComplete: true,
+            })
+            this.bootstrapContext = progress
+            await this.state.setMeta?.(MANIFEST_PROGRESS, progressHeader(progress))
+            await this.state.setMeta?.(
+              MANIFEST_PAGE_DATA,
+              progressPage(progress, { items: [], next: null, head_seq: this.reached })
+            )
+          }
+        } else {
+          await this.state.setMeta?.(MANIFEST_PROGRESS, null)
+          await this.state.setMeta?.(MANIFEST_PAGE_DATA, null)
+        }
+      })
+      return
+    }
     this.report.cursor = this.nextCursor()
     await this.state.setCursor(this.report.cursor)
   }
@@ -594,9 +689,16 @@ export class Puller {
   }
 
   private hold(change: ChangeItem): void {
-    this.report.held.push(change)
+    this.heldFiles.set(change.file_id, change)
     this.firstHeld = this.firstHeld === null ? change.seq : Math.min(this.firstHeld, change.seq)
     this.opts.log?.(`pull: holding ${change.op} of ${change.path} at ${change.seq}`)
+  }
+  private syncHeld(): void {
+    this.report.held = [...this.heldFiles.values()]
+    this.firstHeld = this.report.held.reduce<number | null>(
+      (min, change) => (min === null ? change.seq : Math.min(min, change.seq)),
+      null
+    )
   }
 
   /* ── Bytes ───────────────────────────────────────────────────────────── */

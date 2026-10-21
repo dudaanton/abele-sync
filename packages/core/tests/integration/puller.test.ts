@@ -555,7 +555,8 @@ describe('the puller over the device facet', () => {
 
     expect(after.bootstrapped).toBe(true)
     expect(after.applied).toBe(1)
-    expect(after.skipped).toBe(2)
+    // Completed coverage is retained: clean files are no longer revisited on this retry.
+    expect(after.skipped).toBe(0)
     expect(after.cursor).toBe(await headOf(vault))
     expect(d.writes).toEqual(['c.md'])
     expect(await d.text('c.md')).toBe('first c')

@@ -6,6 +6,7 @@ import { selectiveDefaults } from '../../src/selective.js'
 import { sha256 } from '../../src/hash.js'
 import type { EngineClient } from '../../src/engineClient.js'
 import { ScopeMarks } from '../../src/scope.js'
+import { AbeleError } from '@abele/sync-protocol'
 
 function gate() {
   let release!: () => void
@@ -53,6 +54,61 @@ async function fixture() {
   const engine = new SyncEngine({ fs, state, client, selective: selectiveDefaults() })
   return { fs, state, client, engine, items, bytes }
 }
+
+it('D-022 retains completed manifest coverage when one local edit stays held', async () => {
+  const f = await fixture()
+  const item = f.items[0]!
+  await f.state.put({
+    path: item.path,
+    wirePath: item.path,
+    fileId: item.file_id,
+    versionId: 'old',
+    sha: item.sha,
+    size: item.size,
+    mtime: 1,
+  })
+  await f.fs.writeAtomic('0.md', new TextEncoder().encode('local typing'), 2)
+  await f.state.setCursor(13)
+  await new ScopeMarks(f.state).review(f.fs, { excluded: () => true })
+  f.client.putBlob = async () => {
+    throw new AbeleError('too_large', 'held local upload')
+  }
+  await f.engine.sync()
+  await f.engine.sync()
+  expect(f.client.manifest).toHaveBeenCalledTimes(1)
+  expect(await f.state.getMeta('out-of-scope-files')).toBeNull()
+  expect(f.fs.snapshot().size).toBe(12)
+  const typing = new TextEncoder().encode('local typing'),
+    sha = await sha256(typing)
+  f.client.state = async () =>
+    ({ head_seq: 14, settings: { max_file_bytes: 1e9, quota_bytes: null } }) as Awaited<
+      ReturnType<EngineClient['state']>
+    >
+  f.client.changes = async (since) => ({
+    items:
+      since < 14
+        ? [
+            {
+              ...item,
+              seq: 14,
+              version_id: 'latest',
+              sha,
+              size: typing.length,
+              mtime: 2,
+              op: 'modify',
+            },
+          ]
+        : [],
+    next_since: 14,
+    head_seq: 14,
+  })
+  await f.engine.sync()
+  expect(await f.state.getCursor()).toBe(14)
+  expect(await f.state.getMeta('pull-manifest-progress')).toBeNull()
+  expect(await f.state.get('0.md')).toMatchObject({ versionId: 'latest' })
+  expect(f.client.manifest).toHaveBeenCalledTimes(1)
+  await f.engine.stop()
+})
 
 it('D-035 resumes later manifest pages while unchanged scope recheck marks remain', async () => {
   const f = await fixture()

@@ -412,7 +412,7 @@ export class SyncCycle {
     this.ctx.set({ cursor: first.cursor })
     await this.staging.tidy(protect)
     // A walk that finished has confirmed every file back in scope, or taken it.
-    if (first.bootstrapped && first.cursor > 0) await this.scope.settle(scope.recheck)
+    if (first.bootstrapped) await this.scope.settle(scope.recheck)
 
     // Paths reported before the scan are taken in by it; anything reported while it reads
     // the tree may or may not be, and stays for the next run.
