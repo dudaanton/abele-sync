@@ -77,6 +77,8 @@ export interface ScanOptions {
   signal?: AbortSignal
   /** Durable scan hints only; uploads and pull writes still verify their actual bytes. */
   persistHints?: boolean
+  /** Observations from this cycle's read phase, invalidated by intervening disk effects. */
+  known?: Pick<ScanResult, 'hashes' | 'infos'>
   /** Status can inspect collisions while another process owns the write lock. */
   readOnly?: boolean
   /** Extra tracked files to hash per scan; `all` forces content reconciliation. */
@@ -379,6 +381,14 @@ export async function scan(
   for (const [wirePath, info] of files) {
     checkCancellation(opts.signal)
     const entry = entries.get(wirePath)
+    const observed = opts.known?.infos.get(wirePath)
+    const known =
+      !opts.verifyPaths?.has(wirePath) &&
+      observed?.path === info.path &&
+      observed.size === info.size &&
+      observed.mtime === info.mtime
+        ? opts.known?.hashes.get(wirePath)
+        : undefined
     const twin = entry ? undefined : synced.get(caseKey(wirePath))
     if (twin !== undefined) {
       collisions.push({ path: info.path, wirePath, with: twin })
@@ -386,6 +396,7 @@ export async function scan(
     }
     if (
       entry &&
+      known === undefined &&
       !revalidate.has(wirePath) &&
       !opts.verifyPaths?.has(wirePath) &&
       entry.size === info.size &&
@@ -404,7 +415,8 @@ export async function scan(
         !(typeof opts.revalidate === 'number' && revalidate.has(wirePath))
           ? await readScanHint(state, info, hintEpoch)
           : null
-      if (hint !== null) sha = hint
+      if (known !== undefined) sha = known
+      else if (hint !== null) sha = hint
       else {
         const fingerprint = await fingerprintFile(fs, info.path, hash, opts.signal)
         if (fingerprint.size !== info.size) throw new Error('file changed during scan')

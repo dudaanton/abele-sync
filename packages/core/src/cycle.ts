@@ -429,13 +429,21 @@ export class SyncCycle {
     await this.scanWork(
       () => client.scanLocal?.(scanningFs, this.ctx.signal?.(), reported) ?? Promise.resolve()
     )
+    const observed =
+      earlyPull !== null || (first.applied === 0 && replayed === null && !reconciling)
+        ? inspection.found
+        : undefined
     const found = await this.scanWork(() =>
       scan(scanningFs, state, this.scanFilter, {
         signal: this.ctx.signal?.(),
         persistHints: true,
+        known: observed,
         log,
         previous,
-        verifyPaths: new Set([...inspection.found.dirty, ...reported]),
+        verifyPaths: new Set([
+          ...(observed === undefined ? inspection.found.dirty : []),
+          ...reported,
+        ]),
         pairMoves: !reconciliation || reconciliation.phase === 'complete',
       })
     )

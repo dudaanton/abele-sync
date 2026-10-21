@@ -13,6 +13,7 @@ import { LocalPaths, resolveLocalFile } from './localPaths.js'
 import { checkCancellation } from './cancellation.js'
 import { discardPullStage } from './pullStages.js'
 import { evictionKey } from './pullEvictions.js'
+import { scanHintKey } from './scanHints.js'
 
 /**
  * A change put onto this disk: its file carried to where the change says, its bytes written or
@@ -195,6 +196,7 @@ export class PullPlacer {
     this.opts.expected.clear(entry.path)
     await this.state.transaction(async () => {
       await this.state.delete(entry.path)
+      await this.state.setMeta?.(scanHintKey(entry.path), null)
       await this.pending.clear(entry.fileId)
     })
     await notifyApplied(this.opts, {
@@ -580,6 +582,8 @@ export class PullPlacer {
         size: have.size,
         mtime: have.mtime,
       })
+      await this.state.setMeta?.(scanHintKey(target), null)
+      if (from !== null) await this.state.setMeta?.(scanHintKey(from), null)
       if (stageId === undefined) await this.pending.clear(change.file_id)
     })
     if (stageId !== undefined) {

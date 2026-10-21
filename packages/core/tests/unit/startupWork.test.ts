@@ -8,6 +8,65 @@ import type { EngineClient } from '../../src/engineClient.js'
 import { scan } from '../../src/scanner.js'
 import { encodeAccessToken } from '@abele/sync-protocol'
 import { V2EngineClient } from '../../src/v2Client.js'
+import { reconciliationScan } from '../../src/reconciliation.js'
+
+it('D-031 hands rounded-metadata edits from preflight to the final scan without hashing twice', async () => {
+  const fs = new MemoryFileSystem(),
+    state = new MemoryStateStore()
+  await state.put({
+    path: 'file.md',
+    wirePath: 'file.md',
+    fileId: 'file',
+    versionId: 'v1',
+    sha: await sha256(new Uint8Array([1])),
+    size: 1,
+    mtime: 1,
+  })
+  await fs.writeAtomic('file.md', new Uint8Array([2]), 1)
+  let reads = 0
+  const read = fs.read.bind(fs)
+  fs.read = async (path) => {
+    reads++
+    return read(path)
+  }
+  const inspected = await reconciliationScan(fs, state, { excluded: () => false }, 0)
+  expect(inspected.found.ops).toHaveLength(1)
+  const final = await scan(fs, state, { excluded: () => false }, { known: inspected.found })
+  expect(final.ops).toHaveLength(1)
+  expect(reads).toBe(1)
+})
+
+it('D-031 preflight reuses unchanged hints outside its bounded content sweep', async () => {
+  const fs = new MemoryFileSystem(),
+    state = new MemoryStateStore()
+  const old = new Uint8Array([1]),
+    changed = new Uint8Array([2]),
+    sha = await sha256(old)
+  for (let n = 0; n < 40; n++) {
+    const path = `${n}.md`
+    await state.put({
+      path,
+      wirePath: path,
+      fileId: `f${n}`,
+      versionId: `v${n}`,
+      sha,
+      size: 1,
+      mtime: 1,
+    })
+    await fs.writeAtomic(path, changed, 2)
+  }
+  await state.setCursor(1)
+  await scan(fs, state, { excluded: () => false }, { persistHints: true })
+  let reads = 0
+  const read = fs.read.bind(fs)
+  fs.read = async (path) => {
+    reads++
+    return read(path)
+  }
+  const inspected = await reconciliationScan(fs, state, { excluded: () => false }, 1)
+  expect(inspected.found.ops).toHaveLength(40)
+  expect(reads).toBe(16)
+})
 
 it('D-031 reuses persisted group eligibility fingerprints after client reconstruction', async () => {
   const fs = new MemoryFileSystem(),

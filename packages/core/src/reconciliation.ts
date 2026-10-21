@@ -11,6 +11,7 @@ import { StagedChanges } from './defer.js'
 import { DeleteHolds, DEFAULT_DELETE_WINDOW_MS } from './deletes.js'
 import { checkCancellation } from './cancellation.js'
 import { authoredJournal } from './journalOrigin.js'
+import { scanHintEpoch, readScanHint, writeScanHint } from './scanHints.js'
 
 async function stagedPaths(state: StateStore): Promise<Set<string>> {
   const paths = new Set<string>()
@@ -485,6 +486,7 @@ export async function reconciliationScan(
       collisions: [],
     }
     const selected = await revalidationPaths(files, state, { revalidate: 16 })
+    const epoch = await scanHintEpoch(state)
     for (const [path, info] of files) {
       checkCancellation(signal)
       const entry = entries.get(path)!
@@ -492,9 +494,18 @@ export async function reconciliationScan(
       if (changed) found.dirty.add(path)
       if (!selected.has(path) && !changed) continue
       try {
-        const fingerprint = await fingerprintFile(fs, info.path, sha256, signal)
+        const cached = !selected.has(path) ? await readScanHint(state, info, epoch) : null
+        const fingerprint =
+          cached === null
+            ? await fingerprintFile(fs, info.path, sha256, signal)
+            : { sha: cached, size: info.size }
         if (fingerprint.size !== info.size)
           throw new Error('file changed during content revalidation')
+        if (cached === null) {
+          const after = await fs.stat(info.path)
+          if (after?.size === info.size && after.mtime === info.mtime)
+            await writeScanHint(state, info, epoch, fingerprint.sha)
+        }
         found.hashes.set(path, fingerprint.sha)
         found.diskPaths.set(path, info.path)
         found.infos.set(path, info)
