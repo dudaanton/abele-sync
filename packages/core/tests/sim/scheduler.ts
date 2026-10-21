@@ -1,5 +1,7 @@
 export class EpochError extends Error {
-  constructor() { super('abandoned epoch') }
+  constructor() {
+    super('abandoned epoch')
+  }
 }
 
 /** Named, replayable boundaries. A cut invalidates every handle from the old process. */
@@ -8,6 +10,8 @@ export class SimScheduler {
   time = 1_700_000_000_000
   readonly points: string[] = []
   private counts = new Map<string, number>()
+  private ready: Array<() => void> = []
+  private scheduled = false
   cut: string | undefined
   hook: ((point: string) => Promise<void>) | undefined
   constructor(private seed: number) {}
@@ -16,9 +20,17 @@ export class SimScheduler {
     return this.seed / 0x100000000
   }
   now = (): number => ++this.time
-  uuid = (): string => '00000000-0000-4000-8000-' + Math.floor(this.random() * 2 ** 48).toString(16).padStart(12, '0')
-  crash(): void { this.epoch++ }
-  fence(epoch: number): void { if (epoch !== this.epoch) throw new EpochError() }
+  uuid = (): string =>
+    '00000000-0000-4000-8000-' +
+    Math.floor(this.random() * 2 ** 48)
+      .toString(16)
+      .padStart(12, '0')
+  crash(): void {
+    this.epoch++
+  }
+  fence(epoch: number): void {
+    if (epoch !== this.epoch) throw new EpochError()
+  }
   async point(label: string, epoch = this.epoch): Promise<void> {
     this.fence(epoch)
     const occurrence = (this.counts.get(label) ?? 0) + 1
@@ -27,7 +39,20 @@ export class SimScheduler {
     this.points.push(point)
     if (point === this.cut) this.crash()
     await this.hook?.(point)
-    await Promise.resolve()
+    await new Promise<void>((resolve) => {
+      this.ready.push(resolve)
+      this.drain()
+    })
     this.fence(epoch)
+  }
+  private drain() {
+    if (this.scheduled) return
+    this.scheduled = true
+    queueMicrotask(() => {
+      this.scheduled = false
+      const index = Math.floor(this.random() * this.ready.length)
+      this.ready.splice(index, 1)[0]?.()
+      if (this.ready.length) this.drain()
+    })
   }
 }
