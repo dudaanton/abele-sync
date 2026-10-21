@@ -243,7 +243,8 @@ export async function resumeJournal(
       journal.idempotencyKey,
       await sourcesFromOps(fs, state, journal.ops),
       journal.batchId,
-      journal.startedAt
+      journal.startedAt,
+      journal.origin
     )
   }
   return report
@@ -357,11 +358,12 @@ class Pusher {
     key: string,
     sources: Sources,
     batchId?: string,
-    startedAt?: string
+    startedAt?: string,
+    origin?: Journal['origin']
   ): Promise<void> {
     // Refused or recorded, a batch's ops are through once it has returned.
     const after = this.left - ops.length
-    await this.sendBatch(ops, key, sources, batchId, startedAt)
+    await this.sendBatch(ops, key, sources, batchId, startedAt, origin)
     this.fall(this.left - after)
   }
 
@@ -370,10 +372,21 @@ class Pusher {
     key: string,
     sources: Sources,
     batchId?: string,
-    startedAt?: string
+    startedAt?: string,
+    origin?: Journal['origin']
   ): Promise<void> {
     checkCancellation(this.opts.signal)
     const journal: Journal = {
+      ...(startedAt === undefined
+        ? {
+            origin: {
+              cursor: await this.state.getCursor(),
+              generation: (await this.state.getMeta?.('server-restore-generation')) ?? null,
+            },
+          }
+        : origin === undefined
+          ? {}
+          : { origin }),
       batchId: batchId ?? crypto.randomUUID(),
       ops,
       idempotencyKey: key,

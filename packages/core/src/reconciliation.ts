@@ -10,6 +10,7 @@ import { isEngineOwn } from './selective.js'
 import { StagedChanges } from './defer.js'
 import { DeleteHolds, DEFAULT_DELETE_WINDOW_MS } from './deletes.js'
 import { checkCancellation } from './cancellation.js'
+import { authoredJournal } from './journalOrigin.js'
 
 async function stagedPaths(state: StateStore): Promise<Set<string>> {
   const paths = new Set<string>()
@@ -75,7 +76,8 @@ export async function fenceRestoredJournal(
   if (!journal?.ops.some((op) => op.op === 'delete' || op.op === 'move')) return
   let reconciliation = await readReconciliation(state)
   if (
-    journal.idempotencyKey === liveJournalKey &&
+    (journal.idempotencyKey === liveJournalKey ||
+      (fs !== undefined && (await authoredJournal(state, journal, fs)))) &&
     (!reconciliation || reconciliation.phase === 'complete')
   )
     return
@@ -401,7 +403,9 @@ export async function reconciliationScan(
   await state.setMeta?.('content-missing', JSON.stringify(missing))
   const journal = await state.getJournal()
   const destructive = journal?.ops.some((op) => op.op === 'delete' || op.op === 'move') ?? false
-  const liveJournal = journal !== null && journal.idempotencyKey === liveJournalKey
+  const liveJournal =
+    journal !== null &&
+    (journal.idempotencyKey === liveJournalKey || (await authoredJournal(state, journal, fs)))
   let unexplainedAbsence = missing.length > 0
   if (
     client &&

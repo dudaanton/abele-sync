@@ -15,6 +15,8 @@ export interface StateEntry {
 
 /** A commit in flight. Written before the request, cleared once its results are recorded. */
 export interface Journal {
+  /** Namespace and feed position where this core instance authored the immutable request. */
+  origin?: { generation: string | null; cursor: number }
   batchId: string
   ops: CommitOp[]
   idempotencyKey: string
