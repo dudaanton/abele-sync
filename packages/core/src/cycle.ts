@@ -350,6 +350,13 @@ export class SyncCycle {
         first.held,
         this.scanFilter
       )
+    // Content inspection and conflict preservation are durable independently of upload.
+    // A later network failure must not request another full content sweep on restart.
+    if (reconciliation?.phase === 'requested') {
+      reconciliation.phase = 'review'
+      await state.setMeta?.(RECONCILIATION_KEY, JSON.stringify(reconciliation))
+      this.ctx.set({ reconciliation })
+    }
     this.ctx.set({ cursor: first.cursor })
     await this.staging.tidy(protect)
     // A walk that finished has confirmed every file back in scope, or taken it.
