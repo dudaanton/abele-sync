@@ -467,6 +467,10 @@ export class Puller {
       this.report.skipped++
       return
     }
+    if (await this.placer.adoptExisting(change, entry)) {
+      this.report.applied++
+      return
+    }
     if (touchesDeferred(this.opts.defer, change.path, change.prev_path, entry?.wirePath)) {
       // An earlier equality probe permits metadata adoption only, never a later disk write.
       if (await this.placer.adoptExisting(change, entry)) this.report.applied++
@@ -618,6 +622,7 @@ export class Puller {
         (await this.state.get(change.path)) === null
       )
         continue
+      if (await this.placer.matchesTarget(change, entry)) continue
       seen.add(sha)
       wanted.set(sha, change)
     }

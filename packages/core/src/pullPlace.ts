@@ -5,7 +5,7 @@ import type { EngineClient } from './engineClient.js'
 import { EngineError } from './errors.js'
 import type { FileInfo, FileSystem } from './fs.js'
 import { fingerprintFile } from './fs.js'
-import { downloadToStage, TransferBudget } from './streaming.js'
+import { downloadToStage, TransferBudget, type ChunkSource } from './streaming.js'
 import type { PullOptions } from './puller.js'
 import { PendingPullWrites } from './pullWrite.js'
 import type { StateEntry, StateStore } from './state.js'
@@ -141,8 +141,6 @@ export class PullPlacer {
     }
     const from = entry === null || entry.path === target ? null : entry.path
     if (from !== null && (await this.fs.stat(from)) !== null) return false
-    const occupant = await this.state.get(target)
-    if (occupant !== null && occupant.fileId !== change.file_id) return false
     const before = await this.fs.stat(target)
     if (before === null) return false
     try {
@@ -153,6 +151,28 @@ export class PullPlacer {
     if (!sameStat(before, await this.fs.stat(target))) return false
     await this.remember(change, change.sha, target, before, from)
     return true
+  }
+
+  /** Equality of actual target bytes makes a prefetch unnecessary regardless of ledger age. */
+  async matchesTarget(change: ChangeItem, entry: StateEntry | null): Promise<boolean> {
+    if (change.sha === null || change.op === 'delete') return false
+    try {
+      const target = await resolveLocalFile(
+        this.fs,
+        this.state,
+        change.path,
+        entry?.wirePath === change.path ? entry.path : undefined,
+        await this.paths(change.path)
+      )
+      const before = await this.fs.stat(target)
+      return (
+        before !== null &&
+        (await fingerprintFile(this.fs, target, this.hash)).sha === change.sha &&
+        sameStat(before, await this.fs.stat(target))
+      )
+    } catch {
+      return false
+    }
   }
 
   /**
@@ -256,7 +276,7 @@ export class PullPlacer {
         caseKey(from) !== caseKey(target)
       )
         return false
-      return this.streamPlace(change, sha, entry, target, from, firstTarget, beforeFrom)
+      return this.streamPlace(change, sha, entry, target, from, firstTarget, beforeFrom, local)
     }
     if (entry !== null && (await this.edited(entry))) return false
     const state = await this.clear(target, from, change, sha)
@@ -291,7 +311,7 @@ export class PullPlacer {
       this.client.openVersion &&
       change.size !== null
     ) {
-      return this.streamPlace(change, sha, entry, target, from, beforeTarget, beforeFrom)
+      return this.streamPlace(change, sha, entry, target, from, beforeTarget, beforeFrom, local)
     }
     let bytes: Uint8Array | null = null
     if (entry === null || entry.sha !== sha) {
@@ -364,7 +384,8 @@ export class PullPlacer {
     target: string,
     from: string | null,
     beforeTarget: FileInfo | null,
-    beforeFrom: FileInfo | null
+    beforeFrom: FileInfo | null,
+    local: Map<string, StateEntry>
   ): Promise<boolean> {
     const identity = { sha, size: change.size! }
     const pending = await this.pending.matching(change, entry)
@@ -380,12 +401,14 @@ export class PullPlacer {
         : await this.fs.beginAtomicWrite!(target, change.mtime ?? 0, base)
     if (!pending?.stageId) await this.pending.prepare(change, entry, target, from, stage.id)
     try {
-      const source = await this.client.openVersion!(
-        change.file_id,
-        change.version_id,
-        identity,
-        this.opts.signal
-      )
+      const source =
+        (await this.localSource(sha, local)) ??
+        (await this.client.openVersion!(
+          change.file_id,
+          change.version_id,
+          identity,
+          this.opts.signal
+        ))
       await downloadToStage(source, stage, identity, this.budget, this.opts.signal, async () => {
         await this.recheckTarget(change.path, target)
         if (
@@ -413,6 +436,31 @@ export class PullPlacer {
       await stage.discard()
       this.opts.log?.(`pull: holding ${target}: ${(error as Error).message}`)
       return false
+    }
+  }
+
+  private async localSource(
+    sha: string,
+    local: Map<string, StateEntry>
+  ): Promise<ChunkSource | null> {
+    const entry = local.get(sha)
+    if (entry === undefined) return null
+    try {
+      if (this.fs.openRead) {
+        if ((await fingerprintFile(this.fs, entry.path, this.hash, this.opts.signal)).sha !== sha)
+          return null
+        return await this.fs.openRead(entry.path)
+      }
+      const bytes = await this.fs.read(entry.path)
+      if ((await this.hash(bytes)) !== sha) return null
+      return {
+        size: bytes.length,
+        read: async (at, length) => bytes.slice(at, at + length),
+        assertUnchanged: async () => {},
+        close: async () => {},
+      }
+    } catch {
+      return null
     }
   }
 
