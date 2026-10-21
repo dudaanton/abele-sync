@@ -1,11 +1,64 @@
 import { expect, it, vi } from 'vitest'
 import type { ChangeItem } from '@abele/sync-protocol'
-import { applyStaged } from '../../src/puller.js'
+import { applyStaged, pull } from '../../src/puller.js'
 import { MemoryFileSystem, type FileSystem } from '../../src/fs.js'
 import { MemoryStateStore } from '../../src/state.js'
 import { ExpectedWrites } from '../../src/echo.js'
 import { sha256 } from '../../src/hash.js'
 import type { EngineClient } from '../../src/engineClient.js'
+
+it('holds an unseen offline edit matching an intermediate feed page', async () => {
+  const fs = new MemoryFileSystem(),
+    state = new MemoryStateStore()
+  const bytes = [1, 2, 3].map((n) => new Uint8Array([n]))
+  const hashes = await Promise.all(bytes.map(sha256))
+  await fs.writeAtomic('file.bin', bytes[1]!, 1)
+  await state.put({
+    path: 'file.bin',
+    wirePath: 'file.bin',
+    fileId: 'file',
+    versionId: 'a',
+    sha: hashes[0]!,
+    size: 1,
+    mtime: 1,
+  })
+  await state.setCursor(1)
+  const changes = hashes
+    .slice(1)
+    .map((sha, n): ChangeItem => ({
+      seq: n + 2,
+      file_id: 'file',
+      version_id: `v${n}`,
+      path: 'file.bin',
+      prev_path: null,
+      op: 'modify',
+      sha,
+      size: 1,
+      mtime: 1,
+      kind: 'attachment',
+      actor: { kind: 'system', id: 'server', name: 'server' },
+      at: '',
+    }))
+  const getBlob = vi.fn(async (sha: string) => bytes[hashes.indexOf(sha)]!)
+  const client = {
+    changes: async (since: number) => ({
+      items: changes.filter((c) => c.seq > since).slice(0, 1),
+      next_since: since < 2 ? 2 : 3,
+      head_seq: 3,
+    }),
+    getBlob,
+  } as unknown as EngineClient
+  const report = await pull(client, fs, state, {
+    expected: new ExpectedWrites(),
+    dirty: new Set(),
+    protectMissing: true,
+    filter: { excluded: () => false },
+  })
+  expect(await fs.read('file.bin')).toEqual(bytes[1])
+  expect(report.held.map((c) => c.seq)).toContain(3)
+  expect(await state.get('file.bin')).toMatchObject({ versionId: 'a', sha: hashes[0] })
+  expect(await state.getCursor()).toBeLessThan(3)
+})
 
 it('R2 streams known equal bytes from another synced local file instead of HTTP', async () => {
   const fs: FileSystem = new MemoryFileSystem(),
@@ -51,6 +104,7 @@ it('R2 streams known equal bytes from another synced local file instead of HTTP'
   fs.reopenStage = async () => {
     throw new Error('no restart')
   }
+  fs.discardStage = async () => {}
   const getBlob = vi.fn(async () => bytes),
     openVersion = vi.fn(async () => {
       throw new Error('local bytes must be reused')
@@ -122,7 +176,7 @@ for (const streaming of [false, true])
         actor: { kind: 'system', id: 'server', name: 'server' },
         at: '',
       }
-      await applyStaged(
+      const report = await applyStaged(
         { getBlob, ...(streaming ? { openVersion } : {}) } as unknown as EngineClient,
         fs,
         state,
@@ -131,6 +185,11 @@ for (const streaming of [false, true])
       )
       expect(getBlob).not.toHaveBeenCalled()
       expect(openVersion).not.toHaveBeenCalled()
-      expect(await state.get('file.bin')).toMatchObject({ fileId: 'file', versionId: 'new', sha })
+      if (ledger === 'same-sha')
+        expect(await state.get('file.bin')).toMatchObject({ fileId: 'file', versionId: 'new', sha })
+      else {
+        expect(report.held).toHaveLength(1)
+        expect(await state.get('file.bin')).toMatchObject({ versionId: 'old' })
+      }
       expect(await fs.read('file.bin')).toEqual(bytes)
     })

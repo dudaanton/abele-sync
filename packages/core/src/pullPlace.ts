@@ -137,6 +137,9 @@ export class PullPlacer {
   /** A deferred path may adopt bytes already present, but never mutate the filesystem. */
   async adoptExisting(change: ChangeItem, entry: StateEntry | null): Promise<boolean> {
     if (change.op === 'delete' || change.sha === null) return false
+    // Equal remote bytes can be an offline edit matching an intermediate version.
+    // Only an exact pending-write intent can authorize adopting over an edited base.
+    if (entry !== null && (await this.edited(entry))) return false
     let target: string
     try {
       target = await resolveLocalFile(
@@ -152,6 +155,9 @@ export class PullPlacer {
     if (from !== null && (await this.fs.stat(from)) !== null) return false
     const before = await this.fs.stat(target)
     if (before === null) return false
+    const occupant = await this.state.get(target)
+    if (occupant !== null && occupant.fileId !== entry?.fileId && (await this.edited(occupant)))
+      return false
     try {
       if ((await fingerprintFile(this.fs, target, this.hash)).sha !== change.sha) return false
     } catch {
