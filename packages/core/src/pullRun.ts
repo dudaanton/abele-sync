@@ -273,7 +273,7 @@ export class Puller {
         if (progress.firstHeld !== null && !Array.isArray(progress.heldChanges)) progress = null
       }
       if (progress !== null) {
-        this.client.rememberManifest?.([
+        await this.client.rememberManifest?.([
           ...progress.page.items,
           ...(progress.heldChanges ?? [])
             .filter((change) => change.sha !== null)
