@@ -54,6 +54,24 @@ it('installation receipts distinguish a publication from a later equal user save
   }
 })
 
+it('retires a successful already-absent removal instead of revisiting it at every startup', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'conditional-'))
+  try {
+    const fs = new NodeFileSystem(root)
+    expect(
+      await fs.conditionalFile({
+        path: 'missing.bin',
+        expected: { size: 1, mtime: 1, sha: await sha256(new Uint8Array([1])) },
+        effect: { kind: 'remove' },
+      })
+    ).toBe(true)
+    expect(await readdir(join(root, '.abele-sync/conditional'))).toEqual([])
+    await fs.recoverConditionalFiles()
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 it('exclusive publication preserves a save made while the victim is quarantined', async () => {
   const root = await mkdtemp(join(tmpdir(), 'conditional-'))
   try {

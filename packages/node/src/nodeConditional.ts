@@ -83,7 +83,11 @@ export async function conditionalFile(
         await rename(await containedIn(root, op.path), victim)
         captured = true
       } catch (error) {
-        if (isMissing(error)) return op.effect.kind === 'remove'
+        if (isMissing(error)) {
+          if (op.effect.kind !== 'remove') return false
+          await completed()
+          return true
+        }
         throw error
       }
       await syncParents([victim, target], root)
