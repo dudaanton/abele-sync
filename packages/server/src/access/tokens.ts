@@ -481,8 +481,7 @@ async function listedTokens(deps: AccessDeps, principal: TokenPrincipal): Promis
         (caller.active &&
           (await effectiveScope(deps, { scope, space: principal.space })).active &&
           (await contained(deps, principal.space.id, resolved, caller.scope)) &&
-          (resolved.kind !== 'group' ||
-            (await covers(deps, principal.scope, resolved.path, resolved.id)))))
+          (await covers(deps, principal.scope, resolved.path, resolved.id))))
     // Direct issuers retain credential metadata for cleanup, never an escaped target's path.
     if (!root && !visible && token.issued_by_token_id !== principal.token.id) continue
     result.push(

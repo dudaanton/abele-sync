@@ -1,4 +1,5 @@
-import { effectiveScope, type AccessDeps } from './tokens.js'
+import type { AccessDeps } from './tokens.js'
+import type { V2Scope } from '@abele/sync-protocol'
 import { isConfigurationPath } from '../configurationDirectories.js'
 
 /** Read under the vault lock. Load graph/member data once; never query per file. */
@@ -9,15 +10,25 @@ export async function readCoverage(deps: AccessDeps, space: string) {
     .where('space_id', '=', space)
     .execute()
   const scopes = new Map(rows.map((row) => [row.id, row]))
-  const files = await deps.db
+  const directoryRows = await deps.db
+    .selectFrom('directories')
+    .select(['id', 'path', 'parent_id'])
+    .where('space_id', '=', space)
+    .where('deleted_at', 'is', null)
+    .execute()
+  const directories = new Map(directoryRows.map((row) => [row.id, row]))
+  const directoryPaths = new Map(directoryRows.map((row) => [row.path, row.id]))
+  const fileRows = await deps.db
     .selectFrom('files')
     .innerJoin('versions', 'versions.id', 'files.head_version_id')
-    .select(['files.id as file_id', 'files.path', 'versions.size as bytes'])
+    .select(['files.id as file_id', 'files.path', 'files.kind', 'versions.size as bytes'])
     .where('files.vault_id', '=', space)
     .where('files.deleted_at', 'is', null)
     .orderBy('files.path')
     .orderBy('files.id')
     .execute()
+  const fileById = new Map(fileRows.map((row) => [row.file_id, row]))
+  const files = fileRows.map(({ file_id, path, bytes }) => ({ file_id, path, bytes }))
   const live = new Set(files.map((file) => file.file_id))
   const edges = await deps.db
     .selectFrom('group_links')
@@ -54,6 +65,7 @@ export async function readCoverage(deps: AccessDeps, space: string) {
     attachments.set(row.root_id, set)
   }
   const groups = new Map<string, Set<string>>()
+  const groupNotes = new Map<string, Set<string>>()
   const group = (root: string) => {
     let result = groups.get(root)
     if (!result) {
@@ -66,6 +78,7 @@ export async function readCoverage(deps: AccessDeps, space: string) {
         queue.push(...(children.get(id) ?? []))
       }
       result = new Set(notes)
+      groupNotes.set(root, notes)
       for (const id of notes) for (const file of attachments.get(id) ?? []) result.add(file)
       groups.set(root, result)
     }
@@ -83,12 +96,66 @@ export async function readCoverage(deps: AccessDeps, space: string) {
     set.add(row.file_id)
     members.set(row.scope_id, set)
   }
+  const selector = (id: string): V2Scope | null => {
+    const scope = scopes.get(id)
+    if (!scope) return null
+    if (scope.kind === 'folder') {
+      const dir = directories.get(scope.target_id)
+      return dir ? { kind: 'folder', id: dir.id, path: dir.path } : null
+    }
+    const file = fileById.get(scope.target_id)
+    return file && (scope.kind !== 'group' || file.kind === 'note')
+      ? { kind: scope.kind, id: file.file_id, path: file.path }
+      : null
+  }
+  // Match contained()/effectiveScope() using this snapshot's cached selectors,
+  // directory ancestry and graph closure, including inherited group-file grants.
+  const contained = (child: V2Scope, parent: V2Scope) => {
+    if (child.kind === parent.kind && child.id === parent.id) return true
+    if (parent.kind === 'file') return false
+    if (parent.kind === 'group') {
+      const ids = group(parent.id)
+      return child.kind === 'file'
+        ? !isConfigurationPath(child.path, deps.configurationDirectories) && ids.has(child.id)
+        : child.kind === 'group' && groupNotes.get(parent.id)!.has(child.id)
+    }
+    const slash = child.path.lastIndexOf('/')
+    let id: string | undefined =
+      child.kind === 'folder'
+        ? child.id
+        : directoryPaths.get(slash < 0 ? '/' : child.path.slice(0, slash))
+    const seen = new Set<string>()
+    while (id !== undefined && !seen.has(id)) {
+      seen.add(id)
+      const dir = directories.get(id)
+      if (!dir) return false
+      if (id === parent.id) return true
+      id = dir.parent_id ?? undefined
+    }
+    return false
+  }
+  const resolve = (id: string) => {
+    const scope = scopes.get(id)!
+    const selected = selector(id)
+    const fallback: V2Scope = { kind: scope.kind, id: scope.target_id, path: '(unavailable)' }
+    if (!selected) return { scope: fallback, active: false }
+    let boundary = scope.boundary_scope_id
+    const seen = new Set([id])
+    while (boundary !== null) {
+      if (seen.has(boundary)) return { scope: fallback, active: false }
+      seen.add(boundary)
+      const parent = selector(boundary)
+      if (!parent || !contained(selected, parent)) return { scope: fallback, active: false }
+      boundary = scopes.get(boundary)!.boundary_scope_id
+    }
+    return { scope: selected, active: true }
+  }
   const load = async (id: string) => {
     const scope = scopes.get(id)
     if (!scope) throw new Error('scope outside read snapshot')
     return {
       scope,
-      resolved: await effectiveScope(deps, { scope, space: { id: space } }),
+      resolved: resolve(id),
       members: members.get(id) ?? new Set<string>(),
     }
   }

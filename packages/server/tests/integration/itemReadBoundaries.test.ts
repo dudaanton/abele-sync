@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { createHash, randomUUID } from 'node:crypto'
 import { tokenFixture, success } from '../helpers/tokenFixture.js'
 import { V2SyncClient } from '../helpers/v2SyncClient.js'
 import { hasPgTestDb } from '../helpers/tempDb.js'
@@ -8,6 +9,188 @@ import { covers } from '../../src/access/visibility.js'
 
 for (const dialect of ['sqlite', 'pg'] as const)
   describe.skipIf(dialect === 'pg' && !hasPgTestDb)(`item read boundaries (${dialect})`, () => {
+    it('redacts file and folder token paths after their issuer moves into configuration content', async () => {
+      const f = await tokenFixture(dialect)
+      try {
+        const nested = success(
+          (await f.root.commit([{ op: 'mkdir', path: 'Agents/Sub' }])).results[0]!
+        )
+        const note = success(await f.root.create('Agents/secret.md', 'secret'))
+        const file = await f.guest.json('/tokens', 'POST', {
+          scope: { kind: 'file', id: note.file_id },
+          label: 'file',
+        })
+        const folder = await f.guest.share(nested.file_id)
+        const head = (await f.root.manifest()).items.find(
+          (item) => item.file_id === f.share.info.scope.id
+        )!
+        success(
+          (
+            await f.root.commit([
+              {
+                op: 'move_directory',
+                file_id: head.file_id,
+                base_version_id: head.version_id,
+                to_path: '.obsidian/Agents',
+              },
+            ])
+          ).results[0]!
+        )
+        expect((await f.guest.request(`/files/${note.file_id}/content`)).status).toBe(404)
+        const listing = await f.guest.json('/tokens')
+        for (const child of [file, folder])
+          expect(
+            listing.items.find((item: { id: string }) => item.id === child.info.id).scope.path
+          ).toBe('(unavailable)')
+      } finally {
+        await f.close()
+      }
+    })
+
+    it('rejects unknown and hidden item previews before any bulk snapshot or grant enumeration', async () => {
+      const f = await tokenFixture(dialect)
+      try {
+        const child = await f.guest.share(f.share.info.scope.id)
+        const note = success(await f.root.create('Private/secret.md', 'secret'))
+        const hidden = await f.root.json(`/tokens/${child.info.id}/items`, 'POST', {
+          scope: { kind: 'file', id: note.file_id },
+        })
+        const sql: string[] = []
+        // Capture query trees through transactions; compare work, not wall time.
+        for (const id of ['unknown', hidden.id]) {
+          sql.length = 0
+          let queries = 0
+          const counted = f.t.db.withPlugin({
+            transformQuery({ node }) {
+              queries++
+              sql.push(JSON.stringify(node))
+              return node
+            },
+            async transformResult({ result }) {
+              return result
+            },
+          })
+          await expect(
+            previewTokenContent(
+              { db: counted, pepper: f.t.config.tokenPepper, dialect },
+              f.guest.key,
+              child.info.id,
+              1,
+              id
+            )
+          ).rejects.toMatchObject({ code: 'forbidden', message: 'scope_removed' })
+          expect(
+            sql.some(
+              (query) =>
+                query.includes('group_links') ||
+                query.includes('scope_members') ||
+                query.includes('versions')
+            )
+          ).toBe(false)
+          expect(queries).toBeLessThan(40)
+        }
+      } finally {
+        await f.close()
+      }
+    })
+
+    it('keeps query growth linear when each group note has its own inherited file grant', async () => {
+      let first = 0
+      for (const size of [16, 48]) {
+        const f = await tokenFixture(dialect)
+        try {
+          const g = success(await f.root.create('G.md', 'G'))
+          const files = []
+          for (let i = 0; i < size; i++)
+            files.push(
+              success(await f.root.create(`member-${i}.md`, '---\ngroups: ["[[G]]"]\n---\nnote'))
+            )
+          const issued = await f.root.json('/tokens', 'POST', {
+            scope: { kind: 'group', id: g.file_id },
+            label: 'G',
+          })
+          const group = new V2SyncClient(issued.token)
+          const grant = await group.json('/tokens', 'POST', {
+            scope: { kind: 'file', id: files[0]!.file_id },
+            label: 'file',
+          })
+          // Clone one real grant and its projection to isolate preview cost from
+          // the unrelated issuance/refresh work of building a large fixture.
+          const template = await f.t.db
+            .selectFrom('access_tokens')
+            .selectAll()
+            .where('id', '=', grant.info.id)
+            .executeTakeFirstOrThrow()
+          const scope = await f.t.db
+            .selectFrom('access_scopes')
+            .selectAll()
+            .where('id', '=', template.scope_id)
+            .executeTakeFirstOrThrow()
+          const members = await f.t.db
+            .selectFrom('scope_members')
+            .selectAll()
+            .where('scope_id', '=', scope.boundary_scope_id!)
+            .execute()
+          for (const file of files.slice(1)) {
+            const id = randomUUID(),
+              scopeId = randomUUID()
+            await f.t.db
+              .insertInto('access_scopes')
+              .values({
+                ...scope,
+                id: scopeId,
+                target_id: file.file_id,
+                effective_key: `file:${file.file_id}:${scope.boundary_scope_id}`,
+              })
+              .execute()
+            await f.t.db
+              .insertInto('access_tokens')
+              .values({
+                ...template,
+                id,
+                scope_id: scopeId,
+                secret_hash: createHash('sha256').update(id).digest('hex'),
+              })
+              .execute()
+            const member = members.find((row) => row.file_id === file.file_id)!
+            await f.t.db
+              .insertInto('scope_members')
+              .values({ ...member, scope_id: scopeId })
+              .execute()
+            await f.t.db
+              .insertInto('scope_versions')
+              .values({
+                scope_id: scopeId,
+                file_id: file.file_id,
+                version_id: JSON.parse(member.item).version_id,
+              })
+              .execute()
+          }
+          let queries = 0
+          const db = f.t.db.withPlugin({
+            transformQuery({ node }) {
+              queries++
+              return node
+            },
+            async transformResult({ result }) {
+              return result
+            },
+          })
+          const preview = await previewTokenContent(
+            { db, pepper: f.t.config.tokenPepper, dialect },
+            f.root.key,
+            issued.info.id,
+            1
+          )
+          expect(preview.file_count).toBe(size + 1)
+          expect(queries).toBeLessThan(3 * size + 150)
+          if (size === 16) first = queries
+          else expect(queries).toBeLessThanOrEqual(first + 3 * 32 + 10)
+        } finally {
+          await f.close()
+        }
+      }
+    })
     it('omits private child items and filters group files and totals to the scoped issuer', async () => {
       const f = await tokenFixture(dialect)
       try {

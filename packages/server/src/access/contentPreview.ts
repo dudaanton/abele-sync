@@ -3,7 +3,8 @@ import {
   V2_PREVIEW_OVERLAP_LIMIT,
   type V2TokenContentPreview,
 } from '@abele/sync-protocol'
-import { mutation, rootAuthority, type AccessDeps } from './tokens.js'
+import { mutation, rootAuthority, selector, type AccessDeps } from './tokens.js'
+import { covers } from './visibility.js'
 import { requireItemOwner, tokenItems, callerItemScopes } from './items.js'
 import { readCoverage } from './readCoverage.js'
 
@@ -22,12 +23,34 @@ export async function previewTokenContent(
     const targetItems = (await tokenItems(deps, target)).filter(
       (item) => itemId === undefined || item.id === itemId
     )
-    if (!targetItems.length)
-      throw new AbeleError('forbidden', 'scope_removed', { reason: 'scope_removed' })
-    const snapshot = await readCoverage(deps, p.space.id)
-    const { files, context: getScope } = snapshot
     const callerScopes = await callerItemScopes(deps, p)
     const root = await rootAuthority(deps, p)
+    const forbidden = () =>
+      new AbeleError('forbidden', 'scope_removed', { reason: 'scope_removed' })
+    if (!targetItems.length) throw forbidden()
+    // Direct-item denial must precede bulk graph/member reads and enumeration.
+    // Whole-token reads retain snapshot-based filtering for many-item sets.
+    if (itemId !== undefined && !root) {
+      const scope = await deps.db
+        .selectFrom('access_scopes')
+        .selectAll()
+        .where('id', '=', targetItems[0]!.scope_id)
+        .where('space_id', '=', p.space.id)
+        .executeTakeFirstOrThrow()
+      // Do not walk the target's inherited bounds just to reject a selector
+      // the caller cannot cover. Accepted selectors are rechecked in the snapshot.
+      const selected = await selector(deps, p.space.id, { kind: scope.kind, id: scope.target_id })
+      let visible = false
+      if (selected !== null)
+        for (const caller of callerScopes)
+          if (await covers(deps, caller, selected.path, selected.id)) {
+            visible = true
+            break
+          }
+      if (!visible) throw forbidden()
+    }
+    const snapshot = await readCoverage(deps, p.space.id)
+    const { files, context: getScope } = snapshot
     const callerCovers = async (path: string, id: string) => {
       for (const scope of callerScopes) if (await snapshot.covers(scope.id, path, id)) return true
       return false
