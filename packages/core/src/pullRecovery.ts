@@ -6,6 +6,8 @@ import type { FileSystem } from './fs.js'
 import type { EngineClient } from './engineClient.js'
 import { PullPlacer } from './pullPlace.js'
 import type { StateEntry, StateStore } from './state.js'
+import { checkCancellation } from './cancellation.js'
+import { discardPullStage, stageMissing } from './pullStages.js'
 
 interface Intent {
   stageId?: string
@@ -88,7 +90,8 @@ export async function recoverPendingPullWrites(
   fs: FileSystem,
   state: StateStore,
   fileIds: readonly string[],
-  client?: Pick<EngineClient, 'getBlob' | 'openVersion'>
+  client?: Pick<EngineClient, 'getBlob' | 'openVersion'>,
+  opts: { signal?: AbortSignal; expected?: ExpectedWrites } = {}
 ): Promise<void> {
   const placer = new PullPlacer(
     client ?? {
@@ -98,10 +101,16 @@ export async function recoverPendingPullWrites(
     },
     fs,
     state,
-    { expected: new ExpectedWrites(), dirty: new Set(), filter: { excluded: () => false } },
+    {
+      signal: opts.signal,
+      expected: opts.expected ?? new ExpectedWrites(),
+      dirty: new Set(),
+      filter: { excluded: () => false },
+    },
     sha256
   )
   for (const fileId of fileIds) {
+    checkCancellation(opts.signal)
     const raw = await state.getMeta?.(`pull-write:${fileId}`)
     if (raw == null) continue
     const intent = decodePullIntent(raw, fileId),
@@ -127,7 +136,7 @@ export async function recoverPendingPullWrites(
       entry.sha === intent.sha &&
       entry.size === intent.size
     ) {
-      await placer.pending.settled(change)
+      await placer.settled(change)
       continue
     }
     if ((await placer.pending.matching(change, entry)) === null)
@@ -135,7 +144,13 @@ export async function recoverPendingPullWrites(
     await placer.adopt(change, entry)
     if (intent.stageId !== undefined && (await state.getMeta?.(`pull-write:${fileId}`)) != null) {
       if (!client?.openVersion || !fs.reopenStage) throw new ExternalStateError('recovery-required')
-      await placer.place(change, intent.sha!, entry, new Map(), new Map())
+      try {
+        await placer.place(change, intent.sha!, entry, new Map(), new Map())
+      } catch (error) {
+        if (!stageMissing(error)) throw error
+        await discardPullStage(fs, intent.stageId)
+        await placer.pending.clear(fileId)
+      }
     }
     // adopt either recorded the completed installation or preserved both local bytes
     // and the earlier base, retiring only a definite not-written intent.

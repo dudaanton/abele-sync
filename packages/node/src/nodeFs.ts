@@ -371,12 +371,16 @@ export class NodeFileSystem implements FileSystem {
   beginAtomicWrite(
     path: string,
     mtime: number,
-    expectedBase: ContentIdentity | null
+    expectedBase: ContentIdentity | null,
+    beforeCreate?: (stageId: string) => Promise<void>
   ): Promise<AtomicStage> {
-    return this.stages.begin(path, mtime, expectedBase)
+    return this.stages.begin(path, mtime, expectedBase, beforeCreate)
   }
   reopenStage(id: string): Promise<AtomicStage> {
     return this.stages.reopen(id)
+  }
+  discardStage(id: string): Promise<void> {
+    return this.stages.discard(id)
   }
 
   async writeAtomic(path: string, bytes: Uint8Array, mtime: number): Promise<void> {

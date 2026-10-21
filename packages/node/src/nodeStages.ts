@@ -99,12 +99,18 @@ export class NodeStages {
       .catch(() => {})
     return next
   }
-  async begin(target: string, mtime: number, base: ContentIdentity | null): Promise<AtomicStage> {
+  async begin(
+    target: string,
+    mtime: number,
+    base: ContentIdentity | null,
+    beforeCreate?: (id: string) => Promise<void>
+  ): Promise<AtomicStage> {
     return this.track(async () => {
       this.check()
       await containedIn(this.root, target)
       const folder = await ownTempFolder(this.root, '.abele-sync', 'stages', this.check)
       const id = randomBytes(16).toString('hex')
+      await beforeCreate?.(id)
       this.check()
       await mkdir(join(folder, id), { mode: 0o700 })
       const handle = await open(await this.path(id, 'data'), 'wx', 0o600)
@@ -284,27 +290,33 @@ export class NodeStages {
           current.phase = 'committed'
           await this.persist(current)
         }),
-      discard: () =>
-        this.serial(id, async () => {
-          this.check()
-          // A displaced inode may still be held by an independent editor. Retain that copy.
-          try {
-            await lstat(await this.path(id, 'base'))
-            return
-          } catch (error) {
-            if (!isMissing(error)) throw error
-          }
-          for (const name of ['data', 'meta.next', 'meta.json']) {
-            this.check()
-            await unlink(await this.path(id, name)).catch((error) => {
-              if (!isMissing(error)) throw error
-            })
-          }
-          this.check()
-          await rmdir(dirname(await this.path(id, 'data')))
-          // Only the established stages directory lost an entry; its ancestors did not.
-          await syncPath(dirname(dirname(await this.path(id, 'data'))))
-        }),
+      discard: () => this.discard(id),
     }
+  }
+  discard(id: string): Promise<void> {
+    return this.serial(id, async () => {
+      this.check()
+      // A displaced inode may still be held by an independent editor. Retain that copy.
+      try {
+        await lstat(await this.path(id, 'base'))
+        return
+      } catch (error) {
+        if (!isMissing(error)) throw error
+      }
+      for (const name of ['data', 'meta.next', 'meta.json']) {
+        this.check()
+        await unlink(await this.path(id, name)).catch((error) => {
+          if (!isMissing(error)) throw error
+        })
+      }
+      this.check()
+      await rmdir(dirname(await this.path(id, 'data'))).catch((error) => {
+        if (!isMissing(error)) throw error
+      })
+      // Only the established stages directory lost an entry; its ancestors did not.
+      await syncPath(dirname(dirname(await this.path(id, 'data')))).catch((error) => {
+        if (!isMissing(error)) throw error
+      })
+    })
   }
 }

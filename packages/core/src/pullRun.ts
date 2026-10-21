@@ -463,7 +463,7 @@ export class Puller {
     }
     // Already here: a change re-read on the way back to the head, or one this device made.
     if (entry?.versionId === change.version_id) {
-      await this.placer.pending.settled(change)
+      await this.placer.settled(change)
       this.report.skipped++
       return
     }

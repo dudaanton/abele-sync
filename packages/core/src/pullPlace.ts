@@ -11,6 +11,7 @@ import { PendingPullWrites } from './pullWrite.js'
 import type { StateEntry, StateStore } from './state.js'
 import { LocalPaths, resolveLocalFile } from './localPaths.js'
 import { checkCancellation } from './cancellation.js'
+import { discardPullStage } from './pullStages.js'
 
 /**
  * A change put onto this disk: its file carried to where the change says, its bytes written or
@@ -83,6 +84,9 @@ export class PullPlacer {
     } catch {
       return true
     }
+  }
+  settled(change: ChangeItem): Promise<void> {
+    return this.pending.settled(change, (id) => discardPullStage(this.fs, id))
   }
 
   /**
@@ -395,10 +399,13 @@ export class PullPlacer {
         : from !== null && beforeFrom !== null
           ? await fingerprintFile(this.fs, from, this.hash)
           : null
+    if (!pending?.stageId) await this.pending.prepare(change, entry, target, from)
     const stage =
       pending?.stageId !== undefined
         ? await this.fs.reopenStage!(pending.stageId)
-        : await this.fs.beginAtomicWrite!(target, change.mtime ?? 0, base)
+        : await this.fs.beginAtomicWrite!(target, change.mtime ?? 0, base, (id) =>
+            this.pending.prepare(change, entry, target, from, id)
+          )
     if (!pending?.stageId) await this.pending.prepare(change, entry, target, from, stage.id)
     try {
       const source =
@@ -427,13 +434,12 @@ export class PullPlacer {
         { size: identity.size, mtime: change.mtime ?? 0 },
         from
       )
-      await stage.discard()
       return true
     } catch (error) {
       this.opts.expected.clear(target)
       if (!this.inTheWay(error)) throw error
-      await this.pending.clear(change.file_id)
       await stage.discard()
+      await this.pending.clear(change.file_id)
       this.opts.log?.(`pull: holding ${target}: ${(error as Error).message}`)
       return false
     }
@@ -540,6 +546,7 @@ export class PullPlacer {
     from: string | null = null
   ): Promise<void> {
     const have = await settledStat(this.fs, target, sha, wrote, this.hash)
+    const stageId = await this.pending.stageId(change)
     await this.state.transaction(async () => {
       if (from !== null) await this.state.delete(from)
       await this.state.put({
@@ -551,8 +558,12 @@ export class PullPlacer {
         size: have.size,
         mtime: have.mtime,
       })
-      await this.pending.clear(change.file_id)
+      if (stageId === undefined) await this.pending.clear(change.file_id)
     })
+    if (stageId !== undefined) {
+      await discardPullStage(this.fs, stageId)
+      await this.pending.clear(change.file_id)
+    }
     const source = change.prev_path ?? (from === null ? undefined : from.normalize('NFC'))
     await notifyApplied(this.opts, {
       path: change.path,

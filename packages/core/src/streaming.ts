@@ -36,9 +36,12 @@ export interface StreamingFileSystem {
   beginAtomicWrite(
     path: string,
     mtime: number,
-    expectedBase: ContentIdentity | null
+    expectedBase: ContentIdentity | null,
+    beforeCreate?: (stageId: string) => Promise<void>
   ): Promise<AtomicStage>
   reopenStage(id: string): Promise<AtomicStage>
+  /** Idempotently discard a private stage, including an interrupted allocation. */
+  discardStage?(id: string): Promise<void>
 }
 
 /** Retain an authenticated stage without publication, for verdict planning. */

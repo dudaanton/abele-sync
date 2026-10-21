@@ -27,6 +27,7 @@ import { stoppableListings } from './guard.js'
 import { resumesScopeRecheck } from './pullRun.js'
 import { scanSnapshot } from './scanSnapshot.js'
 import { readReconciliation } from './reconciliation.js'
+import { recoverPendingPullWrites } from './pullRecovery.js'
 import { GENERATION_KEY, MEMBERS_KEY, RECONCILING_KEY } from './restoreGeneration.js'
 import {
   reconciliationScan,
@@ -234,6 +235,16 @@ export class SyncCycle {
       this.ctx.log('sync: server generation observed; reconciling with local files preserved')
     }
     const log = this.ctx.log
+    const pendingFiles = new Set(
+      ((await state.metadataKeys?.('pull-write:')) ?? []).map((key) =>
+        key.slice('pull-write:'.length)
+      )
+    )
+    if (!state.metadataKeys) for await (const entry of state.all()) pendingFiles.add(entry.fileId)
+    await recoverPendingPullWrites(fs, state, [...pendingFiles], client, {
+      expected: this.ctx.expected,
+      signal: this.ctx.signal?.(),
+    })
     const common = {
       signal: this.ctx.signal?.(),
       ...(this.ctx.opts.transferBudget === undefined

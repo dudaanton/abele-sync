@@ -112,6 +112,7 @@ export function guarded<T extends { client: EngineClient; fs: FileSystem; state:
     fs: checking(opts.fs, check, {
       beginAtomicWrite: 'write',
       reopenStage: 'write',
+      discardStage: 'write',
       writeAtomic: 'write',
       move: 'write',
       remove: 'write',

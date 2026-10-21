@@ -4,6 +4,28 @@ import { expect, it } from 'vitest'
 import { sha256, type FileSystem } from '@abele/sync-core'
 import { NodeFileSystem } from '../../src/nodeFs.js'
 
+it('D-016 awaits stage ownership before allocation and discards an interrupted allocation idempotently', async () => {
+  const root = await mkdtemp(join(process.cwd(), '.stage-allocation-'))
+  try {
+    const fs = new NodeFileSystem(root)
+    let owned = ''
+    await expect(
+      fs.beginAtomicWrite('file', 1, null, async (id) => {
+        owned = id
+        await expect(readFile(join(root, '.abele-sync/stages', id, 'data'))).rejects.toMatchObject({
+          code: 'ENOENT',
+        })
+        throw new Error('ownership persisted, process stopped')
+      })
+    ).rejects.toThrow('ownership persisted')
+    expect(owned).not.toBe('')
+    await fs.discardStage(owned)
+    await fs.discardStage(owned)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 it('preserves a replacement save made after base validation but before publication', async () => {
   const root = await mkdtemp(join(process.cwd(), '.stage-late-save-'))
   try {

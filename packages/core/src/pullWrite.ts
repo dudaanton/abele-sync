@@ -67,8 +67,14 @@ export class PendingPullWrites {
   }
 
   /** A replay whose ledger already landed needs no recovery, but must retire its own intent. */
-  async settled(change: ChangeItem): Promise<void> {
-    if ((await this.read(change.file_id))?.versionId === change.version_id) {
+  async stageId(change: ChangeItem): Promise<string | undefined> {
+    const pending = await this.read(change.file_id)
+    return pending?.versionId === change.version_id ? pending.stageId : undefined
+  }
+  async settled(change: ChangeItem, discard?: (id: string) => Promise<void>): Promise<void> {
+    const pending = await this.read(change.file_id)
+    if (pending?.versionId === change.version_id) {
+      if (pending.stageId !== undefined && discard) await discard(pending.stageId)
       await this.clear(change.file_id)
     }
   }
