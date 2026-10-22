@@ -4,7 +4,7 @@ import { MemoryFileSystem } from '../../src/fs.js'
 import { MemoryStateStore } from '../../src/state.js'
 import { SyncEngine } from '../../src/engine.js'
 import { selectiveDefaults } from '../../src/selective.js'
-import { applyStaged } from '../../src/puller.js'
+import { pull } from '../../src/puller.js'
 import { ExpectedWrites } from '../../src/echo.js'
 import { sha256 } from '../../src/hash.js'
 import type { EngineClient } from '../../src/engineClient.js'
@@ -58,11 +58,18 @@ it('D-017 recovers an engine eviction before a missing occupant can become a loc
     at: '',
   }
   await expect(
-    applyStaged(client, fs, state, [change], {
-      expected: new ExpectedWrites(),
-      dirty: new Set(),
-      filter: { excluded: () => false },
-    })
+    // A new authoritative feed event can evict a clean occupant. A retained
+    // staged approval cannot: it must preserve a replacement identity (D-149).
+    pull(
+      { ...client, changes: async () => ({ items: [change], next_since: 2, head_seq: 2 }) },
+      fs,
+      state,
+      {
+        expected: new ExpectedWrites(),
+        dirty: new Set(),
+        filter: { excluded: () => false },
+      }
+    )
   ).rejects.toThrow('crash after eviction')
   fs.conditionalFile = remove
   const restarted = new SyncEngine({ fs, state, client, selective: selectiveDefaults() })

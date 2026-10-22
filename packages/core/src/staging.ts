@@ -1,3 +1,4 @@
+import { replayAuthority } from './replayAuthority.js'
 import { transact } from './stateTransaction.js'
 import { normalisePath, type ChangeItem, type CommitOp } from '@abele/sync-protocol'
 import type { EngineClient } from './engineClient.js'
@@ -395,11 +396,27 @@ export class Staging {
       return 'kept'
     }
     const occupant = await state.get(target)
-    if (occupant !== null && occupant.fileId !== change.file_id) {
+    if (
+      !replayAuthority(
+        change.file_id,
+        one.base === null ? null : { fileId: change.file_id, versionId: one.base },
+        entry,
+        occupant
+      )
+    ) {
       this.ctx.log(`sync: ${change.path} is held here by another file; its staged change stays`)
       return 'blocked'
     }
-    await transact(state, async (tx) => {
+    const recorded = await transact(state, async (tx) => {
+      if (
+        !replayAuthority(
+          change.file_id,
+          one.base === null ? null : { fileId: change.file_id, versionId: one.base },
+          await tx.byFileId(change.file_id),
+          await tx.get(target)
+        )
+      )
+        return false
       if (entry !== null && entry.path !== target) await tx.delete(entry.path)
       await tx.put({
         path: target,
@@ -411,7 +428,8 @@ export class Staging {
         // No file has this mtime, so the scan reads the file rather than trust the entry.
         mtime: -1,
       })
+      return true
     })
-    return 'kept'
+    return recorded ? 'kept' : 'blocked'
   }
 }

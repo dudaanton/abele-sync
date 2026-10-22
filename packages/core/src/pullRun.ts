@@ -1,4 +1,5 @@
 import { transact } from './stateTransaction.js'
+import { replayAuthority } from './replayAuthority.js'
 import { isFileFailure } from './fileRetry.js'
 import {
   AbeleError,
@@ -183,6 +184,7 @@ export class Puller {
   private walking = false
   private followedCheckpoint = false
   private latestSnapshot = false
+  private stagedReplay = false
   private feedCache: {
     since: number
     items: ChangeItem[]
@@ -210,6 +212,7 @@ export class Puller {
 
   /** Staged changes, one page's worth of work with no cursor to move. */
   async apply(changes: ChangeItem[]): Promise<void> {
+    this.stagedReplay = true
     await this.refused.load()
     const cursor = await this.state.getCursor()
     await this.page(changes, async () => {
@@ -763,6 +766,13 @@ export class Puller {
     local: Map<string, StateEntry>
   ): Promise<void> {
     const entry = await this.state.byFileId(change.file_id)
+    if (this.stagedReplay && change.op !== 'delete') {
+      const target = await this.placer.targetOf(change, entry)
+      if (!replayAuthority(change.file_id, entry, entry, await this.state.get(target))) {
+        this.hold(change)
+        return
+      }
+    }
     if (this.passedOver(change)) {
       await this.passOver(change, entry)
       return

@@ -1,4 +1,5 @@
 import { transact } from './stateTransaction.js'
+import { replayAuthority } from './replayAuthority.js'
 import { normalisePath, validatePath } from '@abele/sync-protocol'
 import type { FileSystem } from './fs.js'
 import type { StateEntry, StateStore } from './state.js'
@@ -35,14 +36,15 @@ export async function recoverPullEvictions(
     }
     if (retries && !retries.ready(base.wirePath)) continue
     try {
-      const entry = await state.get(base.path)
-      const same =
-        entry !== null &&
-        (['path', 'wirePath', 'fileId', 'versionId', 'sha', 'size', 'mtime'] as const).every(
-          (field) => entry[field] === base[field]
-        )
       const absent = (await fs.stat(base.path)) === null
       await transact(state, async (tx) => {
+        const entry = await tx.get(base.path)
+        const same =
+          replayAuthority(base.fileId, base, await tx.byFileId(base.fileId), entry) &&
+          entry !== null &&
+          (['path', 'wirePath', 'fileId', 'versionId', 'sha', 'size', 'mtime'] as const).every(
+            (field) => entry[field] === base[field]
+          )
         if (same && absent) await tx.delete(base.path)
         await tx.setMeta?.(key, null)
       })

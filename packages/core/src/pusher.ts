@@ -1,3 +1,5 @@
+import { replayAuthority } from './replayAuthority.js'
+import { resolveLocalFile } from './localPaths.js'
 import { transact, savepoint } from './stateTransaction.js'
 import { isFileFailure, retryAttempt } from './fileRetry.js'
 import {
@@ -303,7 +305,11 @@ interface RetainedReceipt {
   base?: StateEntry | null
 }
 const receiptFields = ['path', 'wirePath', 'fileId', 'versionId', 'sha', 'size', 'mtime'] as const
-async function receiptStillCurrent(state: StateStore, row: RetainedReceipt): Promise<boolean> {
+async function receiptStillCurrent(
+  fs: FileSystem,
+  state: StateStore,
+  row: RetainedReceipt
+): Promise<boolean> {
   const id =
     row.result.status !== 'rejected'
       ? row.result.file_id
@@ -314,6 +320,42 @@ async function receiptStillCurrent(state: StateStore, row: RetainedReceipt): Pro
   if (row.result.status !== 'rejected') {
     if (current?.versionId === row.result.version_id) return false // already settled
     if (current === null && (await state.getCursor()) > row.result.seq) return false // later deletion
+  }
+  const expected =
+    row.base !== undefined
+      ? row.base
+      : row.op.op === 'create'
+        ? null
+        : 'base_version_id' in row.op && id !== null
+          ? { fileId: id, versionId: row.op.base_version_id }
+          : null
+  const destinations =
+    row.result.status !== 'rejected'
+      ? [
+          { path: row.result.path, id: row.result.file_id, base: expected },
+          ...(row.result.status === 'conflict'
+            ? [{ path: row.result.conflict_path, id: row.result.conflict_file_id, base: null }]
+            : []),
+        ]
+      : [
+          {
+            path: row.op.op === 'move' ? row.op.to_path : row.path || current?.path || '',
+            id: id ?? '',
+            base: expected,
+          },
+        ]
+  for (const destination of destinations) {
+    if (!destination.path) continue // a rejected operation with no remaining local identity
+    let target: string
+    try {
+      target = await resolveLocalFile(fs, state, destination.path)
+    } catch (error) {
+      if (error instanceof AbeleError && error.code === 'path_taken') return false
+      throw error
+    }
+    const source = destination.id === id ? current : await state.byFileId(destination.id)
+    if (!replayAuthority(destination.id, destination.base, source, await state.get(target)))
+      return false
   }
   if (row.base !== undefined)
     return row.base === null || current === null
@@ -387,7 +429,7 @@ class Pusher {
 
   constructor(
     private readonly client: EngineClient,
-    fs: FileSystem,
+    private readonly fs: FileSystem,
     private readonly state: StateStore,
     private readonly opts: ResumeOptions,
     private readonly report: PushReport,
@@ -404,7 +446,7 @@ class Pusher {
   }
 
   async receipt(key: string, row: RetainedReceipt): Promise<void> {
-    if (!(await receiptStillCurrent(this.state, row))) {
+    if (!(await receiptStillCurrent(this.fs, this.state, row))) {
       await transact(this.state, async (tx) => {
         await tx.setMeta?.(key, null)
         await this.opts.retries?.succeeded(row.path, 'recovery', tx)
@@ -421,7 +463,7 @@ class Pusher {
       if (verdicts.staged.size) await this.opts.onDefer?.([...verdicts.staged.values()])
       let current = false
       await transact(this.state, async (tx) => {
-        current = await receiptStillCurrent(tx, row)
+        current = await receiptStillCurrent(this.fs, tx, row)
         if (current) await this.recorder.withState(tx).take(row.op, row.result, 0, verdicts)
         await tx.setMeta?.(key, null)
         await this.opts.retries?.succeeded(row.path, 'recovery', tx)
@@ -659,11 +701,14 @@ class Pusher {
       else if (result.status === 'merged') this.report.merged++
       else this.report.conflicts++
     }
-    if (outcome.replayed)
+    // A recovered local journal is a replay even if the server had not received
+    // the original request. Its answer cannot authorize an older local baseline.
+    const replay = outcome.replayed || startedAt !== undefined
+    if (replay)
       for (const [at, op] of sending.entries()) {
         const result = results[at]!
         const path = result.status !== 'rejected' ? result.path : op.op === 'create' ? op.path : ''
-        if (!(await receiptStillCurrent(this.state, { op, result, path }))) {
+        if (!(await receiptStillCurrent(this.fs, this.state, { op, result, path }))) {
           superseded.add(at)
           countSuperseded(at)
         }
@@ -710,11 +755,11 @@ class Pusher {
             }
             const op = sending[at]
             if (op !== undefined) {
-              if (outcome.replayed) {
+              if (replay) {
                 const result = results[at]!
                 const path =
                   result.status !== 'rejected' ? result.path : op.op === 'create' ? op.path : ''
-                if (!(await receiptStillCurrent(tx, { op, result, path }))) {
+                if (!(await receiptStillCurrent(this.fs, tx, { op, result, path }))) {
                   countSuperseded(at)
                   recorded++
                   continue

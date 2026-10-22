@@ -1,3 +1,4 @@
+import { replayAuthority } from './replayAuthority.js'
 import { transact } from './stateTransaction.js'
 import { AbeleError, caseKey, normalisePath, type ChangeItem } from '@abele/sync-protocol'
 import { notifyApplied } from './applied.js'
@@ -124,7 +125,7 @@ export class PullPlacer {
     }
     if (normalisePath(pending.target) !== change.path) return notWritten()
     const occupant = await this.state.get(pending.target)
-    if (occupant !== null && occupant.fileId !== change.file_id) return notWritten()
+    if (!replayAuthority(change.file_id, pending.base, entry, occupant)) return notWritten()
     // A moved source recreated since the crash belongs to the user; do not remove it.
     if (pending.from !== null && (await this.fs.stat(pending.from)) !== null) return notWritten()
     const have = await this.fs.stat(pending.target)
@@ -342,10 +343,12 @@ export class PullPlacer {
       )
       return false
     }
+    if (pending) {
+      const occupant = await this.state.get(target)
+      if (!replayAuthority(change.file_id, pending.base, entry, occupant)) return false
+    }
     if (pending?.stageId && this.fs.reopenStage && this.client.openVersion) {
       if (pending.target !== target || pending.from !== from) return false
-      const occupant = await this.state.get(target)
-      if (occupant && occupant.fileId !== change.file_id) return false
       if (
         from !== null &&
         beforeFrom !== null &&

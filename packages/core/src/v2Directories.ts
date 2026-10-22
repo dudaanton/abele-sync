@@ -1,3 +1,4 @@
+import { replayAuthority } from './replayAuthority.js'
 import { transact } from './stateTransaction.js'
 import {
   AbeleError,
@@ -355,10 +356,22 @@ export class V2Directories {
         throw new AbeleError(result.code, `${result.message}: ${JSON.stringify(pending.op)}`)
       }
       const current = doc.directories.find((directory) => directory.file_id === result.file_id)
-      const sameBase =
+      const identity = (d: typeof current) =>
+        d ? { fileId: d.file_id, versionId: d.version_id } : null
+      const expected =
         pending.op.op === 'mkdir'
-          ? current === undefined
-          : 'base_version_id' in pending.op && current?.version_id === pending.op.base_version_id
+          ? null
+          : 'base_version_id' in pending.op
+            ? { fileId: result.file_id, versionId: pending.op.base_version_id }
+            : null
+      const sameBase = replayAuthority(
+        result.file_id,
+        expected,
+        identity(current),
+        identity(
+          doc.directories.find((d) => d.path.normalize('NFC') === result.path.normalize('NFC'))
+        )
+      )
       if (
         current?.version_id === result.version_id ||
         !sameBase ||
