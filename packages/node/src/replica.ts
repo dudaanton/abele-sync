@@ -289,6 +289,9 @@ export async function recoverNodeReplica(vault: NodeReplica, held: () => boolean
       }),
     effectTracker: vault.fence?.track,
   })
+  // Rollback compares public before/after images. Finish any interrupted file
+  // capture/publication first so its victim cannot look like an unrelated deletion.
+  await recoveryDisk.recoverConditionalFiles()
   await CodeGroupDisk.recover({ ...vault, disk: recoveryDisk }, held)
   // Local installation evidence must be checked without HTTP first. Only retained remote
   // effects require a generation handshake here; ordinary sync prepares its client itself.
