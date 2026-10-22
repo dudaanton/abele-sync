@@ -270,13 +270,13 @@ it('does not duplicate or overwrite recovery copies after a write succeeded befo
   const client = {
     versions: async () => [{ version_id: 'new-version', sha: 'different' }],
   } as unknown as EngineClient
-  const write = fs.writeAtomic.bind(fs)
-  fs.writeAtomic = async (path, bytes, mtime) => {
-    await write(path, bytes, mtime)
+  const write = fs.conditionalFile.bind(fs)
+  fs.conditionalFile = async (op) => {
+    await write(op)
     throw new Error('crash after write')
   }
   await expect(preserveRestoredEdits(client, fs, state, found)).rejects.toThrow('crash after write')
-  fs.writeAtomic = write
+  fs.conditionalFile = write
   await preserveRestoredEdits(client, fs, state, found)
   const files = []
   for await (const info of fs.list()) files.push(info.path)
