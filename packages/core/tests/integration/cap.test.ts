@@ -162,6 +162,21 @@ describe('the size cap and the quota', () => {
     expect(d.stats).toMatchObject({ commits: 1 })
     expect(d.engine.status.pending).toBe(0)
   })
+  it('does not invalidate a known size refusal when a retry timer becomes due', async () => {
+    const vault = await ownVault('stable-refusal')
+    let now = 1000
+    const d = new Device(h, vault.vaultId, vault.deviceToken, 'device', { now: () => now })
+    started.push(d)
+    await d.write('big.md', 'x'.repeat(5 * SERVER_CAP))
+    const first = await d.sync()
+    expect(first.push.rejected.map((r) => r.code)).toEqual(['too_large'])
+    const puts = d.stats.blobPuts
+    now += 300001
+    const later = await d.sync()
+    expect(later.push.rejected.map((r) => r.code)).toEqual(['too_large'])
+    expect(d.stats.blobPuts).toBe(puts)
+    expect(d.engine.status.pending).toBe(1)
+  })
   it('asks again about an upload turned away only because other uploads filled the quota', async () => {
     const vault = await ownVault('waiting')
     await settings(vault, { quota_bytes: 100, account_password: TEST_PASSWORD })

@@ -105,6 +105,47 @@ it('persists 5-second exponential backoff capped at five minutes, including subt
   }
 })
 
+it('new server policy invalidates only server refusal backoff across restart', async () => {
+  const state = new MemoryStateStore()
+  const make = () =>
+    new FileRetries(
+      state,
+      () => 100,
+      () => {}
+    )
+  let retries = make()
+  await retries.refreshServerPolicy('cap=4', 10)
+  await retries.failed('big.bin', 'push', new Error('too_large: cap'))
+  await retries.failed('local.bin', 'push', new FileOperationError('local.bin', new Error('EIO')))
+  retries = make()
+  await retries.load()
+  await retries.refreshServerPolicy('cap=4', 10)
+  expect(retries.ready('big.bin', 'push')).toBe(false)
+  await retries.refreshServerPolicy('cap=40', 10)
+  expect(retries.ready('big.bin', 'push')).toBe(true)
+  expect(retries.ready('local.bin', 'push')).toBe(false)
+})
+
+it('new membership and released uncommitted uploads need not wait for the retry timer', async () => {
+  const state = new MemoryStateStore()
+  const retries = new FileRetries(
+    state,
+    () => 100,
+    () => {}
+  )
+  await retries.refreshServerPolicy('same', 10)
+  await retries.failed('child.md', 'push', new Error('leaves_scope: parent not uploaded'))
+  await retries.failed('member.md', 'push', new Error('forbidden: not in group yet'))
+  await retries.failed('waiting.bin', 'push', new Error('quota_waiting: uncommitted uploads'))
+  await retries.refreshServerPolicy('same', 10)
+  expect(retries.ready('child.md', 'push')).toBe(false)
+  expect(retries.ready('member.md', 'push')).toBe(false)
+  expect(retries.ready('waiting.bin', 'push')).toBe(true)
+  await retries.refreshServerPolicy('same', 11)
+  expect(retries.ready('child.md', 'push')).toBe(true)
+  expect(retries.ready('member.md', 'push')).toBe(true)
+})
+
 it('quarantines only the recovery record after three failed attempts', async () => {
   const state = new MemoryStateStore()
   let now = 0

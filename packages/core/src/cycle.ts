@@ -220,7 +220,6 @@ export class SyncCycle {
   async cycle(): Promise<SyncReport> {
     const { client, fs, state } = this.ctx.opts
     await this.retries.load()
-    if (this.retries.list().some((row) => this.retries.ready(row.path))) this.refused.clear()
     if (this.retryRefusedDirectories) this.rewind = true
     const inventory = scanSnapshot(fs, () => this.ctx.signal?.())
     const scanningFs = stoppableListings(inventory.fs, () => this.ctx.signal?.())
@@ -324,6 +323,7 @@ export class SyncCycle {
     const vault = await client.state()
     this.ctx.set({ headSeq: vault.head_seq, cursor: await state.getCursor() })
     this.learnLimits(vault.settings.max_file_bytes, vault.settings.quota_bytes)
+    await this.retries.refreshServerPolicy(this.refusedUnder!, vault.head_seq)
     const comparisonCursor = await state.getCursor()
     let earlyPull: PullReport | null = null
     const priorReconciliation = await readReconciliation(state)
@@ -686,6 +686,11 @@ export class SyncCycle {
       this.refused.clear()
     }
     this.refusedUnder = under
+  }
+
+  /** Explicit host retry may probe a refusal again; an unrelated due timer may not. */
+  retryFileRefusals(): void {
+    this.refused.clear()
   }
 
   /**

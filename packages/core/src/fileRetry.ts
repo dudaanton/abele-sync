@@ -126,6 +126,27 @@ export class FileRetries {
   list(): WaitingFile[] {
     return [...this.rows.values()].map((row) => ({ ...row }))
   }
+  /** Server refusals are conditional on the policy and membership we observed.
+   * A changed policy/head is new evidence, not another attempt against the same
+   * failure. Local I/O and recovery backoff must survive these changes. */
+  async refreshServerPolicy(limits: string, head: number): Promise<void> {
+    const oldLimits = await this.state.getMeta?.('retry-policy-limits')
+    const oldHead = await this.state.getMeta?.('retry-policy-head')
+    for (const row of this.list()) {
+      if (row.phase !== 'push' || row.local) continue
+      const code = row.reason.split(':', 1)[0]
+      const changedLimits = oldLimits !== limits && ['too_large', 'quota_exceeded'].includes(code!)
+      const changedHead =
+        oldHead !== String(head) &&
+        ['quota_exceeded', 'leaves_scope', 'forbidden', 'not_found', 'path_taken'].includes(code!)
+      // Uncommitted uploads can free quota without advancing the feed. The wire
+      // contract explicitly permits quota_waiting to be asked again next cycle.
+      if (code === 'quota_waiting' || changedLimits || changedHead)
+        await this.succeeded(row.path, 'push')
+    }
+    await this.state.setMeta?.('retry-policy-limits', limits)
+    await this.state.setMeta?.('retry-policy-head', String(head))
+  }
   has(path: string, phase?: RetryPhase): boolean {
     const row = this.rows.get(path)
     return row !== undefined && (!phase || row.phase === phase)

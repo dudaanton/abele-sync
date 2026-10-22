@@ -268,6 +268,7 @@ export class SyncEngine implements ExclusiveOperationPort {
     // a normal sync between retryNow's await and the requested rescan.
     return this.exclusive(async () => {
       await this.cycle.retries.retryNow()
+      this.cycle.retryFileRefusals()
       this.cycle.rewind = true
       this.cycle.retryRefusedDirectories = true
       return this.beginRun()
@@ -276,8 +277,11 @@ export class SyncEngine implements ExclusiveOperationPort {
 
   /** Retry file-local failures immediately, including records held for review. */
   async retryNow(): Promise<SyncReport> {
-    await this.exclusive(() => this.cycle.retries.retryNow())
-    return this.sync()
+    return this.exclusive(async () => {
+      await this.cycle.retries.retryNow()
+      this.cycle.retryFileRefusals()
+      return this.beginRun()
+    })
   }
 
   async waitingFiles(): Promise<import('./fileRetry.js').WaitingFile[]> {
