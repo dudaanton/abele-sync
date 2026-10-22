@@ -74,36 +74,53 @@ interface Row {
 export class SqliteStateStore implements StateStore, ExternalStatePort {
   private candidatePaths: Map<string, Set<string>> | undefined
   private candidateVersion: unknown
+  private candidateKey: (path: string) => string = caseKey
   private candidateAdds = 0
+  private dirtyCandidates = new Set<string>()
 
   private indexCandidate(path: string): void {
     if (!this.candidatePaths) return
-    const key = caseKey(path),
-      names = this.candidatePaths.get(key) ?? new Set<string>()
-    names.add(path)
-    this.candidatePaths.set(key, names)
+    // Publication must never call the previous process/host's key capability.
+    this.dirtyCandidates.add(path)
     // Deleted or rolled-back names are harmless (reads below revalidate rows).
     // Bound retained names during long sessions with many renames.
-    if (++this.candidateAdds > 10000) this.candidatePaths = undefined
+    if (++this.candidateAdds > 10000) {
+      this.candidatePaths = undefined
+      this.dirtyCandidates.clear()
+    }
   }
 
-  async *pathCandidates(path: string): AsyncIterable<StateEntry> {
+  async *pathCandidates(path: string, pathKey = caseKey): AsyncIterable<StateEntry> {
     const version = guard('cannot read state revision', () =>
       this.db.pragma('data_version', { simple: true })
     )
-    if (!this.candidatePaths || version !== this.candidateVersion) {
+    if (
+      !this.candidatePaths ||
+      version !== this.candidateVersion ||
+      pathKey !== this.candidateKey
+    ) {
       const rows = guard('cannot index state paths', () => this.selectAll.all() as Row[])
-      this.candidatePaths = new Map()
-      this.candidateVersion = version
-      this.candidateAdds = 0
+      const paths = new Map<string, Set<string>>()
       for (const row of rows) {
-        const key = caseKey(row.path),
-          names = this.candidatePaths.get(key) ?? new Set<string>()
+        const key = pathKey(row.path),
+          names = paths.get(key) ?? new Set<string>()
         names.add(row.path)
-        this.candidatePaths.set(key, names)
+        paths.set(key, names)
       }
+      this.candidatePaths = paths
+      this.candidateVersion = version
+      this.candidateKey = pathKey
+      this.candidateAdds = 0
+      this.dirtyCandidates.clear()
     }
-    for (const name of this.candidatePaths.get(caseKey(path)) ?? []) {
+    for (const name of this.dirtyCandidates) {
+      const key = pathKey(name),
+        names = this.candidatePaths.get(key) ?? new Set<string>()
+      names.add(name)
+      this.candidatePaths.set(key, names)
+    }
+    this.dirtyCandidates.clear()
+    for (const name of this.candidatePaths.get(pathKey(path)) ?? []) {
       const entry = await this.get(name)
       if (entry !== null) yield entry
     }

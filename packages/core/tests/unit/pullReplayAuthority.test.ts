@@ -146,6 +146,15 @@ it('D-154 physical keys preserve distinct names on exact and normalization-only 
   }
 })
 
+it('D-154 candidate indexing follows a host fold broader than protocol caseKey', async () => {
+  const f = await fixture('straße.bin')
+  f.fs.pathKey = (path) => path.normalize('NFC').toLowerCase().replaceAll('ß', 'ss')
+  expect(await pathOccupant(f.fs, f.state, 'strasse.bin', 'A')).toEqual(f.occupant)
+  await f.state.transaction(async (tx) => {
+    expect(await pathOccupant(f.fs, tx, 'strasse.bin', 'A')).toEqual(f.occupant)
+  })
+})
+
 it('D-151 operational failure in staged target resolution remains retryable', async () => {
   const f = await fixture('Café.bin')
   const failure = new Error('temporary inventory read failure')

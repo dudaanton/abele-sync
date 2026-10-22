@@ -37,9 +37,10 @@ export interface StateStore {
   get(path: string): Promise<StateEntry | null>
   byFileId(fileId: string): Promise<StateEntry | null>
   all(): AsyncIterable<StateEntry>
-  /** All possible case/Unicode aliases (caseKey equality), including exact spelling.
-   * Optional index; callers filter using the filesystem's stricter collision key. */
-  pathCandidates?(path: string): AsyncIterable<StateEntry>
+  /** All rows with equal host keys, including exact spelling. The key is stable
+   * for an adapter lifetime; default is protocol caseKey for legacy callers.
+   * An index must use the supplied key, never a narrower prefilter. */
+  pathCandidates?(path: string, key?: (path: string) => string): AsyncIterable<StateEntry>
   /** Upserts by `path` and indexes `fileId`. */
   put(entry: StateEntry): Promise<void>
   delete(path: string): Promise<void>
@@ -75,6 +76,9 @@ export class MemoryStateStore implements StateStore {
   /** Keyed by path. */
   private entries = new Map<string, StateEntry>()
   private paths = new Map<string, Set<string>>()
+  private indexedPaths = new Map<string, string>()
+  private dirtyPaths = new Set<string>()
+  private pathIndexKey: (path: string) => string = caseKey
   /** fileId → the path that file was last put under. */
   private index = new Map<string, string>()
   private cursor = 0
@@ -85,12 +89,15 @@ export class MemoryStateStore implements StateStore {
     this.revision++
     if (map === this.entries) {
       const path = key as string,
-        folded = caseKey(path)
-      const names = this.paths.get(folded) ?? new Set<string>()
-      if (value === undefined) names.delete(path)
-      else names.add(path)
-      if (names.size) this.paths.set(folded, names)
-      else this.paths.delete(folded)
+        folded = this.indexedPaths.get(path)
+      if (folded !== undefined) {
+        const names = this.paths.get(folded)!
+        names.delete(path)
+        if (!names.size) this.paths.delete(folded)
+        this.indexedPaths.delete(path)
+      }
+      this.dirtyPaths.delete(path)
+      if (value !== undefined) this.dirtyPaths.add(path)
     }
     if (value === undefined) map.delete(key)
     else map.set(key, value)
@@ -110,8 +117,33 @@ export class MemoryStateStore implements StateStore {
     for (const entry of [...this.entries.values()]) yield { ...entry }
   }
 
-  async *pathCandidates(path: string): AsyncIterable<StateEntry> {
-    for (const name of this.paths.get(caseKey(path)) ?? []) {
+  async *pathCandidates(path: string, key = caseKey): AsyncIterable<StateEntry> {
+    if (key !== this.pathIndexKey) {
+      const paths = new Map<string, Set<string>>(),
+        indexed = new Map<string, string>()
+      for (const name of this.entries.keys()) {
+        const folded = key(name),
+          names = paths.get(folded) ?? new Set<string>()
+        names.add(name)
+        paths.set(folded, names)
+        indexed.set(name, folded)
+      }
+      this.pathIndexKey = key
+      this.paths = paths
+      this.indexedPaths = indexed
+      this.dirtyPaths.clear()
+    }
+    // Never invoke an old host capability during state publication. After a
+    // restart it may be revoked; only the current read supplies a live key.
+    for (const name of this.dirtyPaths) {
+      const folded = key(name),
+        names = this.paths.get(folded) ?? new Set<string>()
+      names.add(name)
+      this.paths.set(folded, names)
+      this.indexedPaths.set(name, folded)
+    }
+    this.dirtyPaths.clear()
+    for (const name of this.paths.get(key(path)) ?? []) {
       const entry = await this.get(name)
       if (entry !== null) yield entry
     }

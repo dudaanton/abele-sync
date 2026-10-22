@@ -400,6 +400,23 @@ describe('SqliteStateStore', () => {
     expect(await candidates(store)).toEqual([])
   })
 
+  it('D-154 indexes the supplied host key, including broader Unicode folding', async () => {
+    const key = (path: string) => path.normalize('NFC').toLowerCase().replaceAll('ß', 'ss')
+    await store.put({ ...entry(), path: 'straße.md' })
+    const collect = async (state: typeof store | import('@abele/sync-core').StateStore) => {
+      const paths = []
+      for await (const row of state.pathCandidates!('STRASSE.md', key)) paths.push(row.path)
+      return paths
+    }
+    expect(await collect(store)).toEqual(['straße.md'])
+    await store.transaction(async (tx) => {
+      await tx.delete('straße.md')
+      await tx.put({ ...entry(), path: 'Straße.md' })
+      expect(await collect(tx)).toEqual(['Straße.md'])
+    })
+    expect(await collect(store)).toEqual(['Straße.md'])
+  })
+
   it('copies the journal out, ops and all', async () => {
     await store.setJournal(journal())
     const fetched = await store.getJournal()

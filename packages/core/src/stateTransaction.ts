@@ -63,16 +63,16 @@ export class StateTransaction implements StateStore {
       if (entry !== null) yield { ...entry }
     }
   }
-  async *pathCandidates(path: string): AsyncIterable<StateEntry> {
+  async *pathCandidates(path: string, pathKey = caseKey): AsyncIterable<StateEntry> {
     this.check()
-    const key = caseKey(path)
-    for await (const entry of this.parent.pathCandidates?.(path) ?? this.parent.all()) {
+    const key = pathKey(path)
+    for await (const entry of this.parent.pathCandidates?.(path, pathKey) ?? this.parent.all()) {
       this.check()
-      if (!this.entries.has(entry.path) && caseKey(entry.path) === key) yield entry
+      if (!this.entries.has(entry.path) && pathKey(entry.path) === key) yield entry
     }
     for (const entry of this.entries.values()) {
       this.check()
-      if (entry !== null && caseKey(entry.path) === key) yield { ...entry }
+      if (entry !== null && pathKey(entry.path) === key) yield { ...entry }
     }
   }
   async put(entry: StateEntry): Promise<void> {

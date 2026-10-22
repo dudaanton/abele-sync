@@ -260,8 +260,9 @@ keys; independent hard-link names remain distinct.
 
 Preflight, adoption, receipt replay, approval settlement and ledger publication
 look up destination ownership through this key. An exact row cannot hide another
-identity under an alias. Optional `StateStore.pathCandidates(path)` returns all
-rows with equal protocol `caseKey`; core filters by the host key. Transaction
+identity under an alias. Optional `StateStore.pathCandidates(path, key)` returns all
+rows with equal supplied host keys; it must not prefilter by a narrower protocol
+fold. Core checks the key again. Transaction
 handles must include pending puts/deletes. Memory and SQLite provide indexes;
 legacy stores fall back to `all()` and should implement the index for large vaults.
 
