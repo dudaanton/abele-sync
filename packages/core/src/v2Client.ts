@@ -234,8 +234,9 @@ export class V2EngineClient implements EngineClient {
             }
           } else bytes = await fs.read(file.path)
         } catch (error) {
-          if (!(error instanceof EngineError) || error.code !== 'io') throw error
-          continue // An unreadable unrelated/private note cannot stop the group's exchange.
+          // Missing membership is not established by an unreadable note. Keep the
+          // prior membership document and retry before applying scoped feed items.
+          throw error
         }
         const links = parseGroupFrontmatter(new TextDecoder().decode(bytes))
           .groups.map((link) => groupLinkKey(link, file.path))

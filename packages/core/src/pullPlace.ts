@@ -265,7 +265,7 @@ export class PullPlacer {
 
   /** A disk saying something that is not a file holds the path: the adapter's `conflict`. */
   private inTheWay(error: unknown): boolean {
-    return error instanceof EngineError && error.code === 'conflict'
+    return error instanceof EngineError && error.code === 'conflict' && error.cause === undefined
   }
 
   /**
@@ -300,6 +300,8 @@ export class PullPlacer {
         await this.paths(change.path)
       )
     } catch (error) {
+      if (!this.inTheWay(error) && !(error instanceof AbeleError && error.code === 'path_taken'))
+        throw error
       this.opts.log?.(`pull: held ${change.path}: ${(error as Error).message}`)
       return false
     }

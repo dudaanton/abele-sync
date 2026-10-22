@@ -173,9 +173,8 @@ export class SyncCycle {
         this.filter
       )
       .catch((error: unknown) => {
-        // A lapsed claim stops the run here, as at any other guarded step.
-        if (error instanceof EngineError && error.code === 'lost') throw error
         this.ctx.log(`scope: not recorded: ${messageOf(error)}`)
+        throw error
       })
     this.marked = marking
     return marking

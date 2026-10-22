@@ -79,21 +79,14 @@ const sourcesAt = (fs: FileSystem, paths: Map<string, string>): Sources => ({
         open: async (sha: string) => {
           const path = paths.get(sha)
           if (path === undefined) return null
-          try {
-            return await fs.openRead!(path)
-          } catch {
-            return null
-          }
+          if ((await fs.stat(path)) === null) return null
+          return fs.openRead!(path)
         },
       }),
   bytes: async (sha) => {
     const path = paths.get(sha)
     if (path === undefined) return null
-    try {
-      return await fs.read(path)
-    } catch {
-      // The file went between the scan and the upload. The commit will say so.
-      return null
-    }
+    if ((await fs.stat(path)) === null) return null
+    return fs.read(path)
   },
 })

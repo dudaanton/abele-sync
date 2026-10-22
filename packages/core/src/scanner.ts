@@ -477,13 +477,8 @@ export async function scan(
             (infos.get(found)?.size ?? Infinity) > MAX_TEXT_BYTES
           )
             return false
-          try {
-            const before = await opts.previous(lost)
-            return before !== null && alike(before, await fs.read(path))
-          } catch {
-            // Either side unreadable: nothing to judge the likeness by, so they are not paired.
-            return false
-          }
+          const before = await opts.previous(lost)
+          return before !== null && alike(before, await fs.read(path))
         })
 
   const ops: CommitOp[] = []

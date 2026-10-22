@@ -13,7 +13,7 @@ import { resolveLocalFile } from './localPaths.js'
 
 /** A disk saying something that is not a file holds the path: the adapter's `conflict`. */
 export const inTheWay = (error: unknown): boolean =>
-  error instanceof EngineError && error.code === 'conflict'
+  error instanceof EngineError && error.code === 'conflict' && error.cause === undefined
 
 /** What a version holds, as an op sends it and as a result answers with it. */
 export interface Content {
@@ -75,14 +75,10 @@ export class PushDisk {
     if (sent === null || have.size !== sent.size || have.mtime !== sent.mtime) return false
     // A negative holds() read is not replacement authority. Preserved/rounded
     // metadata cannot prove that the bytes still match the submitted operation.
-    try {
-      const fingerprint = await fingerprintFile(this.fs, file, this.hash)
-      if (fingerprint.size !== sent.size || fingerprint.sha !== sent.sha) return false
-      const after = await this.fs.stat(file)
-      return after !== null && after.size === have.size && after.mtime === have.mtime
-    } catch {
-      return false
-    }
+    const fingerprint = await fingerprintFile(this.fs, file, this.hash)
+    if (fingerprint.size !== sent.size || fingerprint.sha !== sent.sha) return false
+    const after = await this.fs.stat(file)
+    return after !== null && after.size === have.size && after.mtime === have.mtime
   }
 
   /**
