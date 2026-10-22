@@ -2,7 +2,7 @@ import { expect, it } from 'vitest'
 import { acceptanceFixture } from './fixture.js'
 import { V2SyncClient } from '@abele/sync-server/tests/helpers/v2SyncClient.js'
 
-it('stop drains scoped page filesystem effects before the host closes the durable ledger', async () => {
+it('stop drains the scoped page request without starting files, then resumes its durable work', async () => {
   const f = await acceptanceFixture()
   const a = f.devices[0]!
   const owner = new V2SyncClient(f.roots[0]!.token)
@@ -28,6 +28,10 @@ it('stop drains scoped page filesystem effects before the host closes the durabl
     await syncing
     await stopping
     expect(stopped).toBe(true)
+    expect(await a.fs.stat('Shared/N.md')).toBeNull()
+    expect(await a.connection('server-1').binding.state.get('Shared/N.md')).toBeNull()
+    a.connection('server-1').binding.engine.resume()
+    await a.sync('server-1')
     expect(await a.text('Shared/N.md')).toBe('bytes\n')
     const recorded = await a.connection('server-1').binding.state.get('Shared/N.md')
     expect(recorded?.sha).toBeDefined()
