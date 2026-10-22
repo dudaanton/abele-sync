@@ -43,7 +43,21 @@ export async function reconcileGeneration(state: StateStore, generation: string 
     ...entries.map((entry) => `pull-write:${entry.fileId}`),
     ...((await state.metadataKeys?.('pull-write:')) ?? []),
     ...((await state.metadataKeys?.('pull-evict:')) ?? []),
+    ...((await state.metadataKeys?.('pull-held:')) ?? []),
   ])
+  // The linked index also supports hosts without metadata enumeration.
+  const held = JSON.parse((await state.getMeta('pull-held-progress')) ?? 'null') as {
+    first?: string | null
+  } | null
+  const seenHolds = new Set<string>()
+  for (let id = held?.first ?? null; id !== null;) {
+    if (seenHolds.has(id)) throw new Error('cyclic pull hold index')
+    seenHolds.add(id)
+    const key = `pull-held:${encodeURIComponent(id)}`
+    pullKeys.add(key)
+    const node = JSON.parse((await state.getMeta(key)) ?? 'null') as { next: string | null } | null
+    id = node?.next ?? null
+  }
   const recovering =
     old !== null ||
     entries.length > 0 ||

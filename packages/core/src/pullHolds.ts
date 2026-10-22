@@ -1,0 +1,237 @@
+import type { ChangeItem } from '@abele/sync-protocol'
+import type { StateStore } from './state.js'
+import { GENERATION_KEY } from './restoreGeneration.js'
+
+export const HELD_PROGRESS = 'pull-held-progress'
+const PREFIX = 'pull-held:'
+export const pullHoldKey = (id: string) => PREFIX + encodeURIComponent(id)
+export interface HeldChange {
+  change: ChangeItem
+  base: string | null
+  firstSeq: number
+}
+interface Node extends HeldChange {
+  next: string | null
+}
+interface Header {
+  format: 2
+  generation: string | null
+  head: number
+  inventoryComplete: boolean
+  first: string | null
+  last: string | null
+}
+interface LegacyHeader {
+  generation: string | null
+  head: number
+  inventoryComplete: boolean
+  holds: HeldChange[]
+}
+
+/** A durable linked index: a changed hold touches at most itself and one neighbor.
+ * No metadata enumeration capability is required from the host. */
+export class PullHolds {
+  readonly files = new Map<string, ChangeItem>()
+  readonly records = new Map<string, Node>()
+  header: Header | null = null
+  private first: string | null = null
+  private last: string | null = null
+  private readonly previous = new Map<string, string | null>()
+  private readonly changed = new Set<string>()
+  private heap: { id: string; seq: number }[] = []
+  private generation: string | null = null
+
+  constructor(private readonly state: StateStore) {}
+
+  async load(): Promise<void> {
+    this.generation = (await this.state.getMeta?.(GENERATION_KEY)) ?? null
+    const raw = JSON.parse((await this.state.getMeta?.(HELD_PROGRESS)) ?? 'null') as
+      Header | LegacyHeader | null
+    if (raw === null || raw.generation !== this.generation) return
+    if ('holds' in raw) {
+      for (const held of raw.holds) this.put(held)
+      // The first array format accidentally filed reached=0 during inventory.
+      // Its inventory checkpoint still has the authoritative snapshot head.
+      if (!raw.inventoryComplete && raw.head === 0) {
+        const checkpoint = JSON.parse(
+          (await this.state.getMeta?.('pull-manifest-progress')) ?? 'null'
+        ) as { head: number; generation?: string | null } | null
+        if (checkpoint !== null && (checkpoint.generation ?? null) === this.generation)
+          raw.head = checkpoint.head
+      }
+      await this.state.transaction(async () => {
+        await this.persist(raw.head, raw.inventoryComplete)
+      })
+      return
+    }
+    this.header = raw
+    this.first = raw.first
+    this.last = raw.last
+    let previous: string | null = null
+    for (let id = raw.first; id !== null;) {
+      if (this.records.has(id)) throw new Error('cyclic pull hold index')
+      const value = await this.state.getMeta?.(pullHoldKey(id))
+      if (value == null) throw new Error('missing durable pull hold')
+      const node = JSON.parse(value) as Node
+      this.records.set(id, node)
+      this.files.set(id, node.change)
+      this.previous.set(id, previous)
+      this.push({ id, seq: node.firstSeq })
+      previous = id
+      id = node.next
+    }
+    if (previous !== raw.last) throw new Error('invalid pull hold tail')
+  }
+
+  put(held: HeldChange): void {
+    const id = held.change.file_id,
+      old = this.records.get(id)
+    if (old !== undefined) {
+      if (held.change.seq < old.change.seq) return
+      const firstSeq = Math.min(old.firstSeq, held.firstSeq)
+      if (old.change === held.change && old.base === held.base && old.firstSeq === firstSeq) return
+      this.records.set(id, { ...held, firstSeq, next: old.next })
+      if (firstSeq !== old.firstSeq) this.push({ id, seq: firstSeq })
+    } else {
+      if (this.last !== null) {
+        this.records.get(this.last)!.next = id
+        this.changed.add(this.last)
+      } else this.first = id
+      this.previous.set(id, this.last)
+      this.last = id
+      this.records.set(id, { ...held, next: null })
+      this.push({ id, seq: held.firstSeq })
+    }
+    this.files.set(id, held.change)
+    this.changed.add(id)
+  }
+
+  setBase(id: string, base: string | null): void {
+    const held = this.records.get(id)
+    if (held !== undefined && held.base !== base) {
+      held.base = base
+      this.changed.add(id)
+    }
+  }
+
+  resolve(change: ChangeItem): void {
+    const id = change.file_id,
+      held = this.records.get(id)
+    if (held === undefined || held.change.seq > change.seq) return
+    const previous = this.previous.get(id) ?? null
+    if (previous !== null) {
+      this.records.get(previous)!.next = held.next
+      this.changed.add(previous)
+    } else this.first = held.next
+    if (held.next !== null) this.previous.set(held.next, previous)
+    else this.last = previous
+    this.previous.delete(id)
+    this.records.delete(id)
+    this.files.delete(id)
+    this.changed.add(id)
+    // Bound the lazy minimum index even when an old hold pins a long-lived run.
+    if (this.heap.length > this.records.size * 2 + 1024) {
+      this.heap = []
+      for (const [key, node] of this.records) this.push({ id: key, seq: node.firstSeq })
+    }
+  }
+
+  earliest(): number | null {
+    while (this.heap.length) {
+      const top = this.heap[0]!
+      if (this.records.get(top.id)?.firstSeq === top.seq) return top.seq
+      const last = this.heap.pop()!
+      if (!this.heap.length) break
+      this.heap[0] = last
+      let at = 0
+      for (;;) {
+        const left = at * 2 + 1,
+          right = left + 1
+        let next = at
+        if (left < this.heap.length && this.heap[left]!.seq < this.heap[next]!.seq) next = left
+        if (right < this.heap.length && this.heap[right]!.seq < this.heap[next]!.seq) next = right
+        if (next === at) break
+        ;[this.heap[at], this.heap[next]] = [this.heap[next]!, this.heap[at]!]
+        at = next
+      }
+    }
+    return null
+  }
+
+  private push(value: { id: string; seq: number }): void {
+    let at = this.heap.length
+    this.heap.push(value)
+    while (at > 0) {
+      const parent = (at - 1) >>> 1
+      if (this.heap[parent]!.seq <= value.seq) break
+      this.heap[at] = this.heap[parent]!
+      at = parent
+    }
+    this.heap[at] = value
+  }
+
+  /** Caller owns the cursor transaction. Changed keys are a constant-size patch. */
+  async persist(head: number, inventoryComplete: boolean): Promise<void> {
+    for (const id of this.changed) {
+      const node = this.records.get(id)
+      await this.state.setMeta?.(pullHoldKey(id), node === undefined ? null : JSON.stringify(node))
+    }
+    this.header =
+      this.first === null
+        ? null
+        : {
+            format: 2,
+            generation: this.generation,
+            head,
+            inventoryComplete,
+            first: this.first,
+            last: this.last,
+          }
+    await this.state.setMeta?.(
+      HELD_PROGRESS,
+      this.header === null ? null : JSON.stringify(this.header)
+    )
+    this.changed.clear()
+  }
+}
+
+/** Legacy inventory holds must become independent before a rewind removes inventory. */
+export async function importLegacyPullHolds(state: StateStore): Promise<void> {
+  const legacy = JSON.parse((await state.getMeta?.('pull-manifest-progress')) ?? 'null') as {
+    generation?: string | null
+    head: number
+    coverageComplete?: boolean
+    heldChanges?: ChangeItem[]
+  } | null
+  if (
+    legacy === null ||
+    (legacy.generation ?? null) !== ((await state.getMeta?.(GENERATION_KEY)) ?? null)
+  )
+    return
+  const payload = JSON.parse((await state.getMeta?.('pull-manifest-page')) ?? '{}') as {
+    heldChanges?: ChangeItem[]
+  }
+  const changes = legacy.heldChanges ?? payload.heldChanges ?? []
+  if (!changes.length) return
+  const holds = new PullHolds(state)
+  await holds.load()
+  for (const change of changes) {
+    if (holds.files.has(change.file_id)) continue
+    holds.put({
+      change,
+      base: (await state.byFileId(change.file_id))?.versionId ?? null,
+      firstSeq: change.seq,
+    })
+  }
+  await state.transaction(async () => {
+    await holds.persist(
+      holds.header?.head ?? legacy.head,
+      holds.header?.inventoryComplete ?? legacy.coverageComplete ?? false
+    )
+    await state.setMeta?.(
+      'pull-manifest-progress',
+      JSON.stringify({ ...legacy, firstHeld: null, heldChanges: undefined })
+    )
+    await state.setMeta?.('pull-manifest-page', JSON.stringify({ ...payload, heldChanges: [] }))
+  })
+}
