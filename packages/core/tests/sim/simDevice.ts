@@ -31,7 +31,13 @@ export class SimDevice {
         if (!methods.has(key))
           methods.set(key, (...args: unknown[]) => {
             scheduler.fence(epoch)
-            if (key === 'includes' || key === 'subscribe') return Reflect.apply(value, target, args)
+            if (
+              key === 'includes' ||
+              key === 'subscribe' ||
+              key === 'pathRefusal' ||
+              key === 'directoryRefusals'
+            )
+              return Reflect.apply(value, target, args)
             return (async () => {
               await scheduler.point(`client.${String(key)}`, epoch)
               if (key === 'openVersion')

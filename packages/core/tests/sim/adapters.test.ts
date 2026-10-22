@@ -3,6 +3,29 @@ import { SimScheduler } from './scheduler.js'
 import { DurableStateStore } from './durableState.js'
 import { MemoryStreamingFS } from './streamingMemoryFs.js'
 import { sha256 } from '../../src/index.js'
+import { SimDevice } from './simDevice.js'
+import { encodeAccessToken } from '@abele/sync-protocol'
+
+it('keeps synchronous refusal queries synchronous in the simulated client', async () => {
+  const device = new SimDevice(
+    new SimScheduler(1),
+    encodeAccessToken({
+      v: 1,
+      address: 'https://example.test',
+      key: 'k'.repeat(43),
+      scope: { kind: 'folder', id: 'root', path: '/' },
+    }),
+    async () => {
+      throw new Error('unexpected request')
+    }
+  )
+  try {
+    expect(device.client.pathRefusal?.('a.bin')).toBeUndefined()
+    expect(device.client.directoryRefusals?.()).toEqual([])
+  } finally {
+    await device.engine.stop()
+  }
+})
 
 it('crash discards uncommitted state and fences stale handles', async () => {
   const scheduler = new SimScheduler(7),
