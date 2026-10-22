@@ -76,6 +76,10 @@ it('keeps malformed scheduling metadata visible without blocking valid rows', as
     quarantined: true,
   })
   expect(await state.getMeta('file-retry:broken.bin')).toBe('{broken')
+  await retries.retryNow()
+  expect(retries.list().map((row) => row.path)).toEqual(['healthy.bin'])
+  expect(await state.getMeta('file-retry-review:broken.bin')).toBe('{broken')
+  expect(await state.getMeta('file-retry:broken.bin')).toBeNull()
 })
 
 it('persists 5-second exponential backoff capped at five minutes, including subtree waits', async () => {

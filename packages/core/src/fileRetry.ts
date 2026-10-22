@@ -149,6 +149,11 @@ export class FileRetries {
       if (row.reason.startsWith('invalid retry metadata: ')) {
         const raw = await this.state.getMeta?.(key(row.path))
         if (raw) await this.state.setMeta!(`file-retry-review:${encodeURIComponent(row.path)}`, raw)
+        // A damaged schedule is not a recovery operation. Retire it after
+        // archiving instead of creating an ownerless, immediately due job.
+        await this.state.setMeta!(key(row.path), null)
+        this.rows.delete(row.path)
+        continue
       }
       row.nextAt = 0
       row.quarantined = false
