@@ -5,11 +5,16 @@ const fault = vi.hoisted(() => ({
   absent: false,
   file: '',
   contents: '{}',
+  namespace: '',
 }))
 vi.mock('node:fs', async (original) => {
   const actual = await original<typeof import('node:fs')>()
   return {
     ...actual,
+    readlinkSync: (...args: Parameters<typeof actual.readlinkSync>) => {
+      if (String(args[0]) === '/proc/self/ns/pid' && fault.namespace) return fault.namespace
+      return actual.readlinkSync(...args)
+    },
     existsSync: (path: import('node:fs').PathLike) =>
       String(path).startsWith('virtual-vault')
         ? String(path).endsWith('config.json')
@@ -57,25 +62,34 @@ import { SqliteStateStore } from '../../src/sqliteState.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { hostname, tmpdir } from 'node:os'
-import { currentBoot, localDaemon } from '../../src/lock.js'
+import { currentBoot, localDaemon, pidNamespace } from '../../src/lock.js'
 
-it.each([2147483648, Number.MAX_SAFE_INTEGER, 1e100])(
-  'D-094 rejects out-of-range lock PID %s before probing the process',
-  (pid) => {
-    fault.contents = `${pid}\n${JSON.stringify({ host: hostname(), daemon: true })}`
+it.each(
+  [2147483648, Number.MAX_SAFE_INTEGER, 1e100].flatMap((pid) => [
+    { pid, namespace: '' },
+    { pid, namespace: 'pid:[4026531836]' },
+  ])
+)(
+  'D-094 rejects out-of-range lock PID $pid before probing the process (namespace $namespace)',
+  ({ pid, namespace }) => {
+    fault.namespace = namespace
+    const ns = pidNamespace()
+    fault.contents = `${pid}\n${JSON.stringify({ host: hostname(), daemon: true, ...(ns === null ? {} : { ns }) })}`
     const kill = vi.spyOn(process, 'kill')
     try {
       expect(localDaemon('virtual-vault')).toBeNull()
       expect(kill).not.toHaveBeenCalled()
     } finally {
       kill.mockRestore()
+      fault.namespace = ''
       fault.contents = '{}'
     }
   }
 )
 
 it('does not infer a dead lock holder from an unknown process probe failure', () => {
-  fault.contents = `424242\n${JSON.stringify({ host: hostname(), daemon: true })}`
+  const ns = pidNamespace()
+  fault.contents = `424242\n${JSON.stringify({ host: hostname(), daemon: true, ...(ns === null ? {} : { ns }) })}`
   const failure = Object.assign(new Error('process probe unavailable'), { code: 'EIO' })
   const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
     throw failure
