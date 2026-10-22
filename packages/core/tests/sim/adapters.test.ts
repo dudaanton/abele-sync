@@ -51,6 +51,8 @@ it('stages survive a crash, authenticate bytes and publish atomically', async ()
   await recovered.seal({ size: bytes.length, sha: await sha256(bytes) })
   await recovered.commit()
   expect(await next.read('a/b')).toEqual(bytes)
+  expect(await recovered.installed!()).toBe(true)
+  await recovered.discard()
   expect(next.stages.size).toBe(0)
 })
 

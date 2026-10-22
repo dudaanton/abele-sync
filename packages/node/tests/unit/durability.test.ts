@@ -58,7 +58,10 @@ it('syncs established stage ancestors only at creation and retains each metadata
     trace.length = 0
     const stage = await fs.beginAtomicWrite('new/a.md', 1234, null)
     const folder = join(root, '.abele-sync/stages', stage.id)
-    const syncs = () => trace.filter((line) => line.startsWith('sync:'))
+    const syncs = () =>
+      trace
+        .filter((line) => line.startsWith('sync:'))
+        .map((line) => line.replace(/\/conditional\/[a-f0-9]{32}/g, '/conditional/operation'))
     expect(syncs()).toEqual([
       `sync:${folder}/data`,
       `sync:${folder}/meta.next`,
@@ -80,6 +83,14 @@ it('syncs established stage ancestors only at creation and retains each metadata
     expect(syncs()).toEqual([
       `sync:${folder}/meta.next`,
       `sync:${folder}`,
+      `sync:${root}/.abele-sync/conditional/operation/intent.json`,
+      `sync:${root}/.abele-sync/conditional/operation`,
+      `sync:${root}/.abele-sync/conditional`,
+      `sync:${root}/.abele-sync`,
+      `sync:${root}`,
+      `sync:${root}/new`,
+      `sync:${root}`,
+      `sync:${root}/.abele-sync/conditional`,
       `sync:${root}/new`,
       `sync:${root}`,
       `sync:${folder}/meta.next`,
