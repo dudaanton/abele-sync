@@ -13,9 +13,26 @@ const crash = vi.hoisted(() => ({
   points: [] as string[],
   exact: '',
   handles: new Set<{ close(): Promise<void> }>(),
+  fold: false,
+  root: '',
 }))
 vi.mock('node:fs/promises', async (original) => {
   const actual = await original<typeof import('node:fs/promises')>()
+  const resolveCase = async (value: unknown) => {
+    if (!crash.fold || typeof value !== 'string' || !value.startsWith(crash.root + '/'))
+      return value
+    let folder = crash.root
+    for (const part of value.slice(crash.root.length + 1).split('/')) {
+      const names = await actual.readdir(folder).catch(() => [] as string[])
+      folder = join(
+        folder,
+        names.find((name) => name === part) ??
+          names.find((name) => name.toLowerCase() === part.toLowerCase()) ??
+          part
+      )
+    }
+    return folder
+  }
   const boundary = async (label: string, call: () => Promise<unknown>) => {
     if (crash.dead) throw new Error('process crashed')
     let value: unknown, error: unknown
@@ -65,7 +82,11 @@ vi.mock('node:fs/promises', async (original) => {
                   await removeEntry(String(args[0]))
                   return
                 }
-                const result = await Reflect.apply(fn, actual, args)
+                const resolved = [...args]
+                resolved[0] = await resolveCase(args[0])
+                if (['rename', 'link', 'copyFile'].includes(name))
+                  resolved[1] = await resolveCase(args[1])
+                const result = await Reflect.apply(fn, actual, resolved)
                 if (name === 'open' || name === 'opendir') crash.handles.add(result)
                 return result
               }
@@ -180,7 +201,10 @@ async function recoverySnapshot(dir: string, state: SqliteStateStore, mode: stri
       metadata,
       entries.map((entry) => ({
         path: entry.path,
-        data: entry.data,
+        data: entry.data?.replace(
+          /"moveIdentity":"(\d+:\d+)"/g,
+          (_match, id: string) => `"moveIdentity":${JSON.stringify(aliases.get(id) ?? 'retired')}`
+        ),
         aliases: aliases.get(entry.inode),
       })),
     ])
@@ -190,11 +214,13 @@ async function recoverySnapshot(dir: string, state: SqliteStateStore, mode: stri
 
 async function run(
   cut = 0,
-  exact: 'capture' | 'publication' | 'first-save' | '' = '',
+  exact: 'capture' | 'publication' | 'first-save' | 'settled-move' | '' = '',
   mode: 'write' | 'remove' | 'move' = 'write',
   recoveryCut: number | 'restoring' | 'discard' = 0,
   nested = false,
-  editMove = false
+  editMove: boolean | 'replacement' = false,
+  caseOnly = false,
+  fold = false
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'group-cut-'))
   const disk = new NodeFileSystem(dir)
@@ -208,6 +234,10 @@ async function run(
     selective: selectiveDefaults(),
   }
   const vault = { dir, disk, state, cfg }
+  crash.fold = fold
+  crash.root = dir
+  const destination = caseOnly ? (mode === 'move' ? 'File.bin' : 'FILE.BIN') : 'moved.bin'
+  const operand = caseOnly && mode !== 'move' ? destination : 'file.bin'
   try {
     await disk.writeAtomic('file.bin', encodeText('original'), 1)
     // Resolve the random allocation names at runtime for exact syscall cuts.
@@ -226,12 +256,14 @@ async function run(
           labels.some((label) =>
             select === 'capture'
               ? label.startsWith(`rename:${join(dir, 'file.bin')}->`) && label.endsWith('/victim')
-              : select === 'first-save'
-                ? label.startsWith('writeFile:') &&
-                  label.includes('/code-approvals/') &&
-                  /\/tmp\/[a-f0-9]{24}$/.test(label)
-                : label.startsWith('link:') &&
-                  label.endsWith(`->${join(dir, mode === 'move' ? 'moved.bin' : 'file.bin')}`)
+              : select === 'settled-move'
+                ? label.startsWith('rm:') && label.includes('/conditional/')
+                : select === 'first-save'
+                  ? label.startsWith('writeFile:') &&
+                    label.includes('/code-approvals/') &&
+                    /\/tmp\/[a-f0-9]{24}$/.test(label)
+                  : label.startsWith('link:') &&
+                    label.endsWith(`->${join(dir, mode === 'move' ? destination : operand)}`)
           )
         )
           crash.cut = length
@@ -242,9 +274,9 @@ async function run(
     try {
       const group = await CodeGroupDisk.create(vault, () => true)
       const draft = await CodeDraft.create(disk, group.work)
-      if (mode === 'write') await draft.writeAtomic('file.bin', encodeText('approved'), 2)
-      else if (mode === 'remove') await draft.remove('file.bin')
-      else await draft.move('file.bin', 'moved.bin')
+      if (mode === 'write') await draft.writeAtomic(operand, encodeText('approved'), 2)
+      else if (mode === 'remove') await draft.remove(operand)
+      else await draft.move('file.bin', destination)
       await state.transaction(() => group.place(draft))
     } catch (error) {
       if (!crash.dead) throw error
@@ -262,12 +294,15 @@ async function run(
     expect(failed).toBe(cut > 0 || !!exact)
     if (exact === 'capture') expect(await disk.stat('file.bin')).toBeNull()
     if (editMove) {
-      await writeFile(join(dir, 'moved.bin'), encodeText('local edit'))
+      if (editMove === 'replacement')
+        await disk.writeAtomic(destination, encodeText('unrelated'), 3)
+      else await writeFile(join(dir, destination), encodeText('local edit'))
       await disk.recoverConditionalFiles()
-      expect(
-        await disk.stat('file.bin'),
-        'a published move must not recreate its source alias'
-      ).toBeNull()
+      if (!caseOnly && editMove !== 'replacement')
+        expect(
+          await disk.stat('file.bin'),
+          'a published move must not recreate its source alias'
+        ).toBeNull()
     }
     if (recoveryCut) {
       crash.points = []
@@ -303,17 +338,33 @@ async function run(
       crash.handles.clear()
     }
     const checkImage = async () => {
+      const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
+      const names = await actual.readdir(dir)
       const read = async (path: string) =>
-        (await disk.stat(path)) ? new TextDecoder().decode(await disk.read(path)) : null
-      const image = [await read('file.bin'), await read('moved.bin')]
+        names.includes(path)
+          ? new TextDecoder().decode(await actual.readFile(join(dir, path)))
+          : null
+      const image = [await read('file.bin'), await read(destination)]
       const before = ['original', null],
         after =
           mode === 'write'
-            ? ['approved', null]
+            ? caseOnly
+              ? [null, 'approved']
+              : ['approved', null]
             : mode === 'remove'
               ? [null, null]
               : [null, 'original']
-      expect(image).toEqual(editMove ? [null, 'local edit'] : failed ? before : after)
+      expect(image).toEqual(
+        editMove === 'replacement'
+          ? caseOnly
+            ? [null, 'unrelated']
+            : ['original', 'unrelated']
+          : editMove
+            ? [null, 'local edit']
+            : failed
+              ? before
+              : after
+      )
     }
     const check = async () => {
       await checkImage()
@@ -334,8 +385,20 @@ async function run(
       }
       await visible()
       const expectedNames = ['.abele-sync']
-      for (const path of ['file.bin', 'moved.bin'])
-        if (await disk.stat(path)) expectedNames.push(path)
+      const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
+      const actualNames = await actual.readdir(dir)
+      for (const path of ['file.bin', destination])
+        if (actualNames.includes(path)) expectedNames.push(path)
+      if (caseOnly && editMove === 'replacement') {
+        const copies = actualNames.filter((name) =>
+          name.startsWith('file.bin.sync-conflict-group-')
+        )
+        expect(copies).toHaveLength(1)
+        expect(new TextDecoder().decode(await actual.readFile(join(dir, copies[0]!)))).toBe(
+          'original'
+        )
+        expectedNames.push(...copies)
+      }
       expect((await readdir(dir)).sort()).toEqual(expectedNames.sort())
       for (const folder of [
         'conditional',
@@ -435,6 +498,8 @@ async function run(
     crash.handles.clear()
     state.close()
     await rm(dir, { recursive: true, force: true })
+    crash.fold = false
+    crash.root = ''
   }
 }
 
@@ -461,19 +526,32 @@ it('D-079 recovers after recursive discard removes journal.json before the draft
 it('D-080 preserves a published move edited in place before recovery with one visible inode name', async () => {
   await run(0, 'publication', 'move', 0, false, true)
 })
+it('D-083 preserves the source backup when the published destination is replaced by an unrelated inode', async () => {
+  await run(0, 'settled-move', 'move', 0, true, 'replacement')
+}, 120_000)
+it('D-083 preserves the backup visibly when a case-only destination replacement occupies the original name', async () => {
+  await run(0, 'settled-move', 'move', 0, true, 'replacement', true, true)
+}, 120_000)
+it('D-084 preserves an in-place edit of a case-only published move on a folding filesystem', async () => {
+  await run(0, 'publication', 'move', 0, true, true, true, true)
+}, 120_000)
 
-for (const mode of ['write', 'remove', 'move'] as const)
-  it(`group ${mode} converges after every lifecycle await and every nested recovery await`, async () => {
-    const count = await run(0, '', mode)
-    expect(count).toBeGreaterThan(0)
-    for (let cut = 1; cut <= count; cut++) {
-      try {
-        await run(cut, '', mode, 0, true)
-      } catch (error) {
-        throw new Error(`group restart failed at await ${cut}/${count}`, { cause: error })
+for (const [caseOnly, fold] of [
+  [false, false],
+  [true, true],
+] as const)
+  for (const mode of ['write', 'remove', 'move'] as const)
+    it(`group ${mode} (${fold ? 'folding case-only' : 'native'}) converges after every lifecycle await and every nested recovery await`, async () => {
+      const count = await run(0, '', mode, 0, false, false, caseOnly, fold)
+      expect(count).toBeGreaterThan(0)
+      for (let cut = 1; cut <= count; cut++) {
+        try {
+          await run(cut, '', mode, 0, true, false, caseOnly, fold)
+        } catch (error) {
+          throw new Error(`group restart failed at await ${cut}/${count}`, { cause: error })
+        }
       }
-    }
-    console.info(
-      `Group ${mode} recovery replayed ${count} lifecycle awaits; ${recoveryImages.size} distinct recovery images`
-    )
-  }, 600_000)
+      console.info(
+        `Group ${mode} recovery replayed ${count} lifecycle awaits; ${recoveryImages.size} distinct recovery images`
+      )
+    }, 600_000)
