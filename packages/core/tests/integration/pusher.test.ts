@@ -796,7 +796,7 @@ describe('the pusher over the device facet', () => {
     expect(await vault.device().resume()).toBeNull()
   })
 
-  it('splits a long batch into commits of a thousand, and keeps a move with its modify', async () => {
+  it('splits a long batch into commits of a hundred, and keeps a move with its modify', async () => {
     const vault = await ownVault('batches')
     const d = vault.device()
     await d.write('moved.md', 'before')
@@ -805,7 +805,7 @@ describe('the pusher over the device facet', () => {
     d.forget()
 
     // 999 creates, then a move and the modify that belongs with it: 1 001 ops, whose
-    // greedy thousandth boundary would fall between the move and its modify.
+    // greedy hundred-operation boundary would fall between the move and its modify.
     const body = 'one body, many names'
     const bulk = await shaOfText(body)
     const edited = 'after'
@@ -850,11 +850,12 @@ describe('the pusher over the device facet', () => {
     const report = await d.pushScan(batch)
 
     expect(report).toMatchObject({ applied: 1001, merged: 0, conflicts: 0, rejected: [] })
-    expect(d.commits).toHaveLength(2)
-    expect(d.commits[0]?.ops).toHaveLength(999)
-    expect(d.commits[1]?.ops.map((op) => op.op)).toEqual(['move', 'modify'])
+    expect(d.commits).toHaveLength(11)
+    expect(d.commits[0]?.ops).toHaveLength(100)
+    expect(d.commits[9]?.ops).toHaveLength(99)
+    expect(d.commits[10]?.ops.map((op) => op.op)).toEqual(['move', 'modify'])
     // A key of its own for each batch, and each one the key its journal named.
-    expect(new Set(d.commits.map((one) => one.key)).size).toBe(2)
+    expect(new Set(d.commits.map((one) => one.key)).size).toBe(11)
     expect(await d.state.getJournal()).toBeNull()
 
     expect(await d.state.get('moved.md')).toBeNull()
@@ -1297,7 +1298,7 @@ describe('the pusher over the device facet', () => {
     })
 
     expect(report).toMatchObject({ applied: 1200, merged: 0, conflicts: 0, rejected: [] })
-    expect(d.commits).toHaveLength(2)
+    expect(d.commits).toHaveLength(12)
     // Every move landed in the same commit as the modify that came with it.
     for (const commit of d.commits) {
       expect(commit.ops.length).toBeLessThanOrEqual(1000)

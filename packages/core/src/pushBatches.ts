@@ -5,8 +5,8 @@ import type { CommitOp, JoinPrefer } from '@abele/sync-protocol'
  * its modify never parted, and every create carrying the side a joining device chose.
  */
 
-/** The largest batch a commit takes, per the protocol. */
-const MAX_OPS = 1000
+/** Bound unrecorded first-upload work; an indivisible file/pair may exceed the byte limit. */
+export const PUSH_BATCH_LIMITS = { operations: 100, bytes: 8 * 1024 * 1024 } as const
 
 /** The ops, with every create carrying the side a joining device chose, if it chose one. */
 export function preferring(ops: CommitOp[], prefer: JoinPrefer | undefined): CommitOp[] {
@@ -29,14 +29,25 @@ export function preferring(ops: CommitOp[], prefer: JoinPrefer | undefined): Com
 export function batches(ops: CommitOp[]): CommitOp[][] {
   const paired = pairUp(ops)
   const out: CommitOp[][] = []
-  let at = 0
-  while (at < paired.length) {
-    let end = Math.min(at + MAX_OPS, paired.length)
-    // Never cut a pair in half; a pair is two ops, so a chunk of 1 000 can always spare one.
-    if (end < paired.length && isPair(paired[end - 1], paired[end]) && end - 1 > at) end -= 1
-    out.push(paired.slice(at, end))
-    at = end
+  let batch: CommitOp[] = [],
+    bytes = 0
+  for (let at = 0; at < paired.length;) {
+    const group = paired.slice(at, at + (isPair(paired[at], paired[at + 1]) ? 2 : 1))
+    const size = group.reduce((sum, op) => sum + ('size' in op ? op.size : 0), 0)
+    if (
+      batch.length &&
+      (batch.length + group.length > PUSH_BATCH_LIMITS.operations ||
+        bytes + size > PUSH_BATCH_LIMITS.bytes)
+    ) {
+      out.push(batch)
+      batch = []
+      bytes = 0
+    }
+    batch.push(...group)
+    bytes += size
+    at += group.length
   }
+  if (batch.length) out.push(batch)
   return out
 }
 
