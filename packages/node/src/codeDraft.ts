@@ -109,6 +109,27 @@ export class CodeDraft implements FileSystem {
     await this.load(path)
     return this.view.read(path)
   }
+  async conditionalFile(
+    op: Parameters<NonNullable<FileSystem['conditionalFile']>>[0]
+  ): Promise<boolean> {
+    if (op.effect.kind === 'install') return false
+    const paths = op.effect.kind === 'move' ? [op.path, op.effect.to] : [op.path]
+    await this.preload(paths)
+    const before: Images = {}
+    for (const path of paths) before[path] = await imageOf(this.view, path, this.blobs)
+    if (!(await this.view.conditionalFile(op))) return false
+    const after: Images = {}
+    for (const path of paths) after[path] = await imageOf(this.view, path, this.blobs)
+    const effect = op.effect
+    const recorded: GroupOp =
+      effect.kind === 'write'
+        ? { kind: 'write', path: op.path, image: after[op.path]! }
+        : effect.kind === 'move'
+          ? { kind: 'move', from: op.path, to: effect.to }
+          : { kind: 'remove', path: op.path }
+    this.steps.push({ op: recorded, before, after })
+    return true
+  }
   async writeAtomic(path: string, bytes: Uint8Array, mtime: number): Promise<void> {
     await this.load(path)
     const before = { [path]: await imageOf(this.view, path, this.blobs) }

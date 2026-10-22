@@ -44,6 +44,46 @@ async function prepared() {
 }
 
 describe('grouped code placement recovery', () => {
+  it('refuses a save at the final group publication boundary', async () => {
+    const { group, draft } = await prepared()
+    const write = disk.writeAtomic.bind(disk),
+      conditional = disk.conditionalFile.bind(disk)
+    let injected = false
+    const save = async (path: string) => {
+      if (path === MAIN && !injected) {
+        injected = true
+        await write(MAIN, encodeText('local edit'), 1)
+      }
+    }
+    disk.writeAtomic = async (path, bytes, mtime) => {
+      await save(path)
+      await write(path, bytes, mtime)
+    }
+    disk.conditionalFile = async (op) => {
+      await save(op.path)
+      return conditional(op)
+    }
+    await expect(state.transaction(() => group.place(draft))).rejects.toMatchObject({
+      code: 'conflict',
+    })
+    expect(await text(MAIN)).toBe('local edit')
+  })
+
+  it('records conditional operations in the speculative draft only', async () => {
+    const group = await CodeGroupDisk.create(vault(), () => true)
+    const draft = await CodeDraft.create(disk, group.work)
+    expect(
+      await draft.conditionalFile?.({
+        path: MANIFEST,
+        expected: null,
+        effect: { kind: 'write', bytes: encodeText('new'), mtime: 2 },
+      })
+    ).toBe(true)
+    expect(draft.steps).toHaveLength(1)
+    expect(await disk.stat(MANIFEST)).toBeNull()
+    await state.transaction(() => group.place(draft))
+    expect(await text(MANIFEST)).toBe('new')
+  })
   it('retains legacy journals without ledger ownership evidence', async () => {
     const { group, draft } = await prepared()
     await state.transaction(() => group.place(draft))
@@ -144,13 +184,13 @@ describe('grouped code placement recovery', () => {
 
   it('recovers an interrupted rollback after a later placement failed', async () => {
     const { group, draft } = await prepared()
-    const write = disk.writeAtomic.bind(disk)
-    disk.writeAtomic = async (...args) => {
-      if (args[0] === MANIFEST) throw new Error('cannot place')
-      await write(...args)
+    const write = disk.conditionalFile.bind(disk)
+    disk.conditionalFile = async (op) => {
+      if (op.path === MANIFEST) throw new Error('cannot place')
+      return write(op)
     }
     await expect(state.transaction(() => group.place(draft))).rejects.toThrow('cannot place')
-    disk.writeAtomic = write
+    disk.conditionalFile = write
     await CodeGroupDisk.recover(vault(), () => true)
     expect(await text(MAIN)).toBe('original()')
     expect(await disk.stat(MANIFEST)).toBeNull()

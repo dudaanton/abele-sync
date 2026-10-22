@@ -97,10 +97,21 @@ export class CodeGroupDisk {
       if (!(await matches(this.vault.disk, step.before)))
         throw new EngineError('conflict', 'code changed before the group write')
       this.check()
-      if (op.kind === 'write' && bytes !== null)
-        await this.vault.disk.writeAtomic(op.path, bytes, op.image.mtime)
-      else if (op.kind === 'remove') await this.vault.disk.remove(op.path)
-      else if (op.kind === 'move') await this.vault.disk.move(op.from, op.to)
+      const path = op.kind === 'move' ? op.from : op.path
+      const effect =
+        op.kind === 'write'
+          ? { kind: 'write' as const, bytes: bytes!, mtime: op.image.mtime }
+          : op.kind === 'move'
+            ? { kind: 'move' as const, to: op.to }
+            : { kind: 'remove' as const }
+      if (
+        !(await this.vault.disk.conditionalFile({
+          path,
+          expected: step.before[path] ?? null,
+          effect,
+        }))
+      )
+        throw new EngineError('conflict', 'code changed at group publication')
     }
     this.check()
     if (!(await draft.validateResult()))
@@ -128,14 +139,36 @@ export class CodeGroupDisk {
       }
       this.check()
       if (step.op.kind === 'move') {
-        await this.vault.disk.move(step.op.to, step.op.from)
+        if (
+          !(await this.vault.disk.conditionalFile({
+            path: step.op.to,
+            expected: step.after[step.op.to] ?? null,
+            effect: { kind: 'move', to: step.op.from },
+          }))
+        )
+          conflicted = true
       } else {
         const image = step.before[step.op.path] ?? null
-        if (image === null) await this.vault.disk.remove(step.op.path)
-        else {
+        if (image === null) {
+          if (
+            !(await this.vault.disk.conditionalFile({
+              path: step.op.path,
+              expected: step.after[step.op.path] ?? null,
+              effect: { kind: 'remove' },
+            }))
+          )
+            conflicted = true
+        } else {
           const bytes = await blobs.read(image)
           this.check()
-          await this.vault.disk.writeAtomic(step.op.path, bytes, image.mtime)
+          if (
+            !(await this.vault.disk.conditionalFile({
+              path: step.op.path,
+              expected: step.after[step.op.path] ?? null,
+              effect: { kind: 'write', bytes, mtime: image.mtime },
+            }))
+          )
+            conflicted = true
         }
       }
     }
