@@ -34,6 +34,35 @@ async function fixture() {
 }
 const all = { excluded: () => false }
 
+it('does not overwrite a save at the restored conflict destination during download', async () => {
+  const { fs, state, entry } = await fixture()
+  const sha = await sha256(encodeText('remote'))
+  const path = `N (Conflicted copy remote ${sha.slice(0, 16)}).bin`
+  const client = {
+    versions: async () => [{ version_id: 'new', sha, size: 6, mtime: 20 }],
+    versionBytes: async () => {
+      await fs.writeAtomic(path, encodeText('saved'), 30)
+      return encodeText('remote')
+    },
+  } as unknown as EngineClient
+  await preserveRestoredEdits(client, fs, state, {
+    ops: [
+      {
+        op: 'modify',
+        file_id: entry.fileId,
+        base_version_id: entry.versionId,
+        sha: await sha256(encodeText('local')),
+        size: 5,
+        mtime: 30,
+      },
+    ],
+  } as Parameters<typeof preserveRestoredEdits>[3])
+  expect(await fs.read(path)).toEqual(encodeText('saved'))
+  expect(await fs.read(`N (Conflicted copy remote ${sha.slice(0, 16)} 1).bin`)).toEqual(
+    encodeText('remote')
+  )
+})
+
 it.each([
   ['Café/'.normalize('NFD'), false],
   [('é'.repeat(100) + '/').repeat(4).normalize('NFD'), false],

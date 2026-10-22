@@ -222,7 +222,16 @@ export async function preserveRestoredEdits(
           : await fs.read(entry.path)
         if (bytes.length !== copy.size || (await sha256(bytes)) !== copy.sha)
           throw new Error('restored edit changed during recovery')
-        await fs.writeAtomic(path, bytes, copy.mtime)
+        if (!fs.conditionalFile)
+          throw new Error('restored conflict needs conditional publication support')
+        if (
+          !(await fs.conditionalFile({
+            path,
+            expected: null,
+            effect: { kind: 'write', bytes, mtime: copy.mtime },
+          }))
+        )
+          continue
       }
       break
     }
