@@ -185,7 +185,23 @@ export class VerdictRecorder {
       }
       const bytes = verdicts.fetched.get(incoming)
       if (bytes !== undefined) {
-        await writeExpected(this.fs, this.opts.expected, target, incoming, bytes, result.mtime)
+        const base = op.op === 'delete' ? null : sent
+        await this.state.setMeta(`pull-base:${target}`, JSON.stringify({ base }))
+        if (
+          !(await writeExpected(
+            this.fs,
+            this.opts.expected,
+            target,
+            incoming,
+            bytes,
+            result.mtime,
+            base
+          ))
+        ) {
+          await this.keepBase(op, result, previous, target)
+          this.count(result)
+          return
+        }
       }
       await this.remember(target, result, incoming, result.size, result.mtime, true)
     }

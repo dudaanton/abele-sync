@@ -125,6 +125,12 @@ function deviceOn(
     writes.push(path)
     await write(path, bytes, mtime)
   }
+  const conditional = fs.conditionalFile.bind(fs)
+  fs.conditionalFile = async (op) => {
+    const applied = await conditional(op)
+    if (applied && op.effect.kind === 'write') writes.push(op.path)
+    return applied
+  }
 
   const hasBlob = client.hasBlob.bind(client)
   client.hasBlob = async (sha) => {
@@ -422,10 +428,12 @@ describe('the pusher over the device facet', () => {
 
     // The merge lands on disk, and the person types into it before the pusher looks again.
     const typed = 'ONE\ntwo\nTHREE\nfour\n'
-    const write = d.fs.writeAtomic.bind(d.fs)
-    d.fs.writeAtomic = async (path, bytes, mtime) => {
-      await write(path, bytes, mtime)
-      await MemoryFileSystem.prototype.writeAtomic.call(d.fs, path, encodeText(typed), 9000)
+    const write = d.fs.conditionalFile.bind(d.fs)
+    d.fs.conditionalFile = async (op) => {
+      const applied = await write(op)
+      if (applied && op.effect.kind === 'write')
+        await MemoryFileSystem.prototype.writeAtomic.call(d.fs, op.path, encodeText(typed), 9000)
+      return applied
     }
     const report = await d.sync()
 

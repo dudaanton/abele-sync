@@ -7,7 +7,7 @@ import {
 } from '@abele/sync-protocol'
 import type { EngineClient } from './engineClient.js'
 import type { ExpectedWrites } from './echo.js'
-import type { FileSystem } from './fs.js'
+import type { FileSystem, FileVersion } from './fs.js'
 import { fingerprintFile } from './fs.js'
 import type { StateEntry, StateStore } from './state.js'
 
@@ -162,11 +162,19 @@ export async function writeExpected(
   path: string,
   sha: string,
   bytes: Uint8Array,
-  mtime: number
-): Promise<void> {
+  mtime: number,
+  base: FileVersion | null
+): Promise<boolean> {
   expected.expect(path, sha)
   try {
-    await fs.writeAtomic(path, bytes, mtime)
+    const written =
+      (await fs.conditionalFile?.({
+        path,
+        expected: base,
+        effect: { kind: 'write', bytes, mtime },
+      })) ?? false
+    if (!written) expected.clear(path)
+    return written
   } catch (error) {
     expected.clear(path)
     throw error
