@@ -192,7 +192,7 @@ export class Puller {
   }
 
   async run(): Promise<void> {
-    await importLegacyPullHolds(this.state)
+    await importLegacyPullHolds(this.state, this.client)
     this.reached = this.report.cursor
     this.inventoryComplete = this.report.cursor > 0
     await this.holds.load()

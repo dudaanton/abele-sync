@@ -286,7 +286,7 @@ export class SyncCycle {
     // Before the server is asked anything, so a narrowing is recorded even offline. A file
     // that came back into scope is settled by a manifest walk, so a widening always walks it,
     // whether or not the host asked for the rescan.
-    await importLegacyPullHolds(state)
+    await importLegacyPullHolds(state, client)
     await this.recordScope(this.ctx.signal?.())
     const scope = await this.scope.review(scanningFs, this.filter)
     for (const path of scope.forgotten) {

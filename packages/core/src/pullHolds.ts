@@ -1,5 +1,6 @@
 import type { ChangeItem } from '@abele/sync-protocol'
 import type { StateStore } from './state.js'
+import type { EngineClient } from './engineClient.js'
 import { GENERATION_KEY } from './restoreGeneration.js'
 
 export const HELD_PROGRESS = 'pull-held-progress'
@@ -48,17 +49,18 @@ export class PullHolds {
     const raw = JSON.parse((await this.state.getMeta?.(HELD_PROGRESS)) ?? 'null') as
       Header | LegacyHeader | null
     if (raw === null || raw.generation !== this.generation) return
+    const originalHead = raw.head
+    // The first array format accidentally filed reached=0 during inventory.
+    // Its inventory checkpoint still has the authoritative snapshot head.
+    if (!raw.inventoryComplete && raw.head === 0) {
+      const checkpoint = JSON.parse(
+        (await this.state.getMeta?.('pull-manifest-progress')) ?? 'null'
+      ) as { head: number; generation?: string | null } | null
+      if (checkpoint !== null && (checkpoint.generation ?? null) === this.generation)
+        raw.head = checkpoint.head
+    }
     if ('holds' in raw) {
       for (const held of raw.holds) this.put(held)
-      // The first array format accidentally filed reached=0 during inventory.
-      // Its inventory checkpoint still has the authoritative snapshot head.
-      if (!raw.inventoryComplete && raw.head === 0) {
-        const checkpoint = JSON.parse(
-          (await this.state.getMeta?.('pull-manifest-progress')) ?? 'null'
-        ) as { head: number; generation?: string | null } | null
-        if (checkpoint !== null && (checkpoint.generation ?? null) === this.generation)
-          raw.head = checkpoint.head
-      }
       await this.state.transaction(async () => {
         await this.persist(raw.head, raw.inventoryComplete)
       })
@@ -81,6 +83,8 @@ export class PullHolds {
       id = node.next
     }
     if (previous !== raw.last) throw new Error('invalid pull hold tail')
+    if (raw.head !== originalHead)
+      await this.state.transaction(() => this.persist(raw.head, raw.inventoryComplete))
   }
 
   put(held: HeldChange): void {
@@ -196,36 +200,70 @@ export class PullHolds {
 }
 
 /** Legacy inventory holds must become independent before a rewind removes inventory. */
-export async function importLegacyPullHolds(state: StateStore): Promise<void> {
+export async function importLegacyPullHolds(
+  state: StateStore,
+  client?: EngineClient
+): Promise<void> {
+  // Upgrade array records even when inventory has no embedded holds. load() still
+  // needs the inventory keys to repair a zero head before a rewind can clear them.
+  const raw = JSON.parse((await state.getMeta?.(HELD_PROGRESS)) ?? 'null') as
+    Header | LegacyHeader | null
   const legacy = JSON.parse((await state.getMeta?.('pull-manifest-progress')) ?? 'null') as {
     generation?: string | null
     head: number
     coverageComplete?: boolean
+    firstHeld?: number | null
     heldChanges?: ChangeItem[]
   } | null
-  if (
-    legacy === null ||
-    (legacy.generation ?? null) !== ((await state.getMeta?.(GENERATION_KEY)) ?? null)
-  )
-    return
-  const payload = JSON.parse((await state.getMeta?.('pull-manifest-page')) ?? '{}') as {
+  const valid =
+    legacy !== null &&
+    (legacy.generation ?? null) === ((await state.getMeta?.(GENERATION_KEY)) ?? null)
+  const payload = (
+    valid ? JSON.parse((await state.getMeta?.('pull-manifest-page')) ?? '{}') : {}
+  ) as {
     heldChanges?: ChangeItem[]
   }
-  const changes = legacy.heldChanges ?? payload.heldChanges ?? []
-  if (!changes.length) return
+  const changes: ChangeItem[] = [
+    ...(valid ? (legacy.heldChanges ?? []) : []),
+    ...(payload.heldChanges ?? []),
+  ]
+  const pointer =
+    valid && legacy.firstHeld != null && changes.length === 0 ? legacy.firstHeld : null
+  const array = raw !== null && 'holds' in raw
+  const repair = raw !== null && raw.head === 0 && !raw.inventoryComplete && valid
+  if (!array && !repair && !changes.length && pointer === null) return
   const holds = new PullHolds(state)
   await holds.load()
+  if (!valid) return
+  // The first format stored only a sequence barrier. Its unresolved files can
+  // belong to earlier inventory pages, so recover their metadata from the feed.
+  if (pointer !== null) {
+    if (client === undefined) throw new Error('legacy hold recovery requires a feed client')
+    let since = Math.max(0, pointer - 1)
+    while (since < legacy.head) {
+      const page = await client.changes(since, 1000)
+      for (const change of page.items)
+        if (change.seq >= pointer && change.seq <= legacy.head) changes.push(change)
+      if (page.next_since <= since) throw new Error('legacy hold recovery feed made no progress')
+      since = page.next_since
+    }
+    if (!changes.length) throw new Error('legacy held changes unavailable; retain checkpoint')
+  }
+  if (!changes.length) return
   for (const change of changes) {
-    if (holds.files.has(change.file_id)) continue
+    const existing = holds.records.get(change.file_id)
     holds.put({
-      change,
-      base: (await state.byFileId(change.file_id))?.versionId ?? null,
-      firstSeq: change.seq,
+      change: existing !== undefined && existing.change.seq > change.seq ? existing.change : change,
+      base:
+        existing !== undefined
+          ? existing.base
+          : ((await state.byFileId(change.file_id))?.versionId ?? null),
+      firstSeq: Math.min(change.seq, existing?.firstSeq ?? change.seq),
     })
   }
   await state.transaction(async () => {
     await holds.persist(
-      holds.header?.head ?? legacy.head,
+      Math.min(holds.header?.head ?? legacy.head, legacy.head),
       holds.header?.inventoryComplete ?? legacy.coverageComplete ?? false
     )
     await state.setMeta?.(

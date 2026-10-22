@@ -125,58 +125,79 @@ it('D-022 retains completed manifest coverage when one local edit stays held', a
   await f.engine.stop()
 })
 
-it('D-116 imports a legacy hold before scope widening clears its checkpoint', async () => {
-  const f = await fixture()
-  const item = { ...f.items[0]!, seq: 50 }
-  await f.state.put({
-    path: item.path,
-    wirePath: item.path,
-    fileId: item.file_id,
-    versionId: 'base',
-    sha: item.sha,
-    size: item.size,
-    mtime: 1,
-  })
-  await f.state.setCursor(49)
-  await new ScopeMarks(f.state).review(f.fs, { excluded: () => true })
-  await f.state.setMeta('held-deletes', JSON.stringify([{ path: item.path, fileId: item.file_id }]))
-  await f.state.setMeta(
-    'pull-manifest-progress',
-    JSON.stringify({
-      generation: null,
-      scope: 'old',
-      head: 100,
-      coverageComplete: true,
-      firstHeld: null,
-      completed: [],
+it.each(['embedded', 'array-zero-head'] as const)(
+  'imports %s legacy holds before scope widening clears their checkpoint (D-116/D-120)',
+  async (format) => {
+    const f = await fixture()
+    const item = { ...f.items[0]!, seq: 50 }
+    await f.state.put({
+      path: item.path,
+      wirePath: item.path,
+      fileId: item.file_id,
+      versionId: 'base',
+      sha: item.sha,
+      size: item.size,
+      mtime: 1,
     })
-  )
-  await f.state.setMeta(
-    'pull-manifest-page',
-    JSON.stringify({
-      items: [],
-      next: null,
-      head_seq: 100,
-      heldChanges: [item],
-      recheck: [],
-      seen: [],
-    })
-  )
-  f.client.state = async () =>
-    ({
-      head_seq: 100,
-      settings: { max_file_bytes: 1e9, quota_bytes: null },
-    }) as Awaited<ReturnType<EngineClient['state']>>
-  f.client.manifest = async () => ({ items: [item], next: null, head_seq: 100 })
-  f.client.changes = async () => ({ items: [], next_since: 100, head_seq: 100 })
-  f.client.versions = async () =>
-    [{ version_id: item.version_id }] as Awaited<ReturnType<EngineClient['versions']>>
-  const report = await f.engine.sync()
-  expect(report.pull.held.map((c) => c.file_id)).toEqual([item.file_id])
-  expect(await f.state.getCursor()).toBeLessThan(50)
-  expect(await f.fs.stat(item.path)).toBeNull()
-  await f.engine.stop()
-})
+    await f.state.setCursor(49)
+    await new ScopeMarks(f.state).review(f.fs, { excluded: () => true })
+    await f.state.setMeta(
+      'held-deletes',
+      JSON.stringify([{ path: item.path, fileId: item.file_id }])
+    )
+    await f.state.setMeta(
+      'pull-manifest-progress',
+      JSON.stringify({
+        generation: null,
+        scope: 'old',
+        head: 100,
+        coverageComplete: format === 'embedded',
+        firstHeld: null,
+        completed: [],
+      })
+    )
+    await f.state.setMeta(
+      'pull-manifest-page',
+      JSON.stringify({
+        items: [],
+        next: null,
+        head_seq: 100,
+        heldChanges: format === 'embedded' ? [item] : [],
+        recheck: [],
+        seen: [],
+      })
+    )
+    if (format === 'array-zero-head')
+      await f.state.setMeta(
+        'pull-held-progress',
+        JSON.stringify({
+          generation: null,
+          head: 0,
+          inventoryComplete: false,
+          holds: [{ change: item, base: 'base', firstSeq: 50 }],
+        })
+      )
+    f.client.state = async () =>
+      ({
+        head_seq: 100,
+        settings: { max_file_bytes: 1e9, quota_bytes: null },
+      }) as Awaited<ReturnType<EngineClient['state']>>
+    f.client.manifest = async () => ({ items: [item], next: null, head_seq: 100 })
+    const followed: number[] = []
+    f.client.changes = async (since) => {
+      followed.push(since)
+      return { items: [], next_since: 100, head_seq: 100 }
+    }
+    f.client.versions = async () =>
+      [{ version_id: item.version_id }] as Awaited<ReturnType<EngineClient['versions']>>
+    const report = await f.engine.sync()
+    expect(report.pull.held.map((c) => c.file_id)).toEqual([item.file_id])
+    expect(await f.state.getCursor()).toBeLessThan(50)
+    expect(await f.fs.stat(item.path)).toBeNull()
+    expect(followed.every((since) => since >= 100)).toBe(true)
+    await f.engine.stop()
+  }
+)
 
 it('D-035 resumes later manifest pages while unchanged scope recheck marks remain', async () => {
   const f = await fixture()
