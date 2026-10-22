@@ -150,19 +150,9 @@ function lastPerFile(changes: ChangeItem[]): ChangeItem[] {
   return changes.filter((change) => last.get(change.file_id) === change)
 }
 
-/** Only final identities and destinations are candidates for placement. */
+/** A destination can be reused by another identity; retain each identity's tombstone. */
 function newest(changes: ChangeItem[]): ChangeItem[] {
-  const files = new Set<string>(),
-    paths = new Set<string>(),
-    result: ChangeItem[] = []
-  for (let at = changes.length - 1; at >= 0; at--) {
-    const change = changes[at]!
-    if (files.has(change.file_id) || paths.has(change.path)) continue
-    files.add(change.file_id)
-    paths.add(change.path)
-    result.push(change)
-  }
-  return result.reverse()
+  return lastPerFile(changes)
 }
 
 /** One run of the puller: the adapters, the options and the report it is filling in. */
@@ -583,8 +573,17 @@ export class Puller {
     // Staged before anything is fetched: a staged change wants no bytes yet.
     const taking: ChangeItem[] = []
     const staged: Staged[] = []
+    const destinations = new Map(wanted.filter((c) => c.op !== 'delete').map((c) => [c.path, c]))
     for (const change of wanted) {
       checkCancellation(this.opts.signal)
+      // Retain the identity as an obligation until the later occupant is actually
+      // installed. Do not install an obsolete occupant (or adopt its local edit).
+      const occupant = destinations.get(change.path)
+      if (change.op !== 'delete' && occupant && occupant.seq > change.seq) {
+        this.hold(change)
+        await finish(change)
+        continue
+      }
       const refusal = this.client.pathRefusal?.(change.path)
       if (refusal) {
         ;(this.report.rejected ??= []).push({

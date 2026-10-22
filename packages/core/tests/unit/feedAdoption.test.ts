@@ -8,6 +8,27 @@ import { pull } from '../../src/puller.js'
 import type { EngineClient } from '../../src/engineClient.js'
 import { PullHolds } from '../../src/pullHolds.js'
 
+it('retains tombstones for distinct identities sharing a destination', async () => {
+  const f = await fixture(0)
+  const base = f.changes[0]!
+  f.changes.splice(
+    0,
+    f.changes.length,
+    { ...base, seq: 2, op: 'delete', sha: null, size: null, mtime: null },
+    { ...base, seq: 3, file_id: 'other', op: 'move', prev_path: 'b.bin' },
+    { ...base, seq: 4, file_id: 'other', op: 'delete', sha: null, size: null, mtime: null }
+  )
+  f.client.changes = async (since) => ({
+    items: f.changes.filter((c) => c.seq > since).slice(0, 1),
+    next_since: Math.min(since + 1, 4),
+    head_seq: 4,
+  })
+  await f.run()
+  expect(await f.fs.stat('a.bin')).toBeNull()
+  expect(await f.state.byFileId('f')).toBeNull()
+  expect(await f.state.getCursor()).toBe(4)
+})
+
 async function fixture(local: number, inventory = false) {
   const fs = new MemoryFileSystem(),
     state = new MemoryStateStore()
