@@ -33,6 +33,92 @@ describe('MemoryStateStore', () => {
     store = new MemoryStateStore()
   })
 
+  it('keeps an open rollback boundary after an earlier transaction commits first', async () => {
+    let releaseFirst!: () => void, releaseSecond!: () => void
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve
+    })
+    const first = store.transaction(async () => {
+      await store.setMeta('first', 'committed')
+      await firstGate
+    })
+    const second = store.transaction(async () => {
+      await secondGate
+      await store.setMeta('second', 'tentative')
+      throw new Error('second')
+    })
+    releaseFirst()
+    await first
+    releaseSecond()
+    await expect(second).rejects.toThrow('second')
+    expect(await store.getMeta('first')).toBe('committed')
+    expect(await store.getMeta('second')).toBeNull()
+  })
+
+  it('updates cursor transactions without enumerating unrelated ledger rows', async () => {
+    for (let n = 0; n < 2000; n++)
+      await store.put(entry({ path: `notes/${n}.md`, fileId: `file-${n}` }))
+    let visited = 0
+    const original = Map.prototype[Symbol.iterator]
+    Map.prototype[Symbol.iterator] = function () {
+      const tracked = this.has('notes/0.md') || this.has('file-0')
+      const iterator = original.call(this),
+        next = iterator.next.bind(iterator)
+      iterator.next = () => {
+        const result = next()
+        if (tracked && !result.done) visited++
+        return result
+      }
+      return iterator
+    }
+    try {
+      for (let n = 1; n <= 10; n++) await store.transaction(() => store.setCursor(n))
+    } finally {
+      Map.prototype[Symbol.iterator] = original
+    }
+    expect(visited).toBeLessThan(100)
+    expect(await store.getCursor()).toBe(10)
+  })
+
+  it('preserves nested rollback boundaries for entries, indexes, metadata, cursor and journal', async () => {
+    await store.put(entry())
+    await store.setMeta('marker', 'before')
+    await store.setJournal(journal())
+    await expect(
+      store.transaction(async () => {
+        await store.setCursor(10)
+        await store.put(entry({ versionId: 'outer' }))
+        await expect(
+          store.transaction(async () => {
+            await store.delete('notes/a.md')
+            await store.setMeta('marker', null)
+            await store.setCursor(20)
+            await store.setJournal(null)
+            throw new Error('inner')
+          })
+        ).rejects.toThrow('inner')
+        expect((await store.byFileId('file-1'))?.versionId).toBe('outer')
+        expect(await store.getCursor()).toBe(10)
+        expect(await store.getMeta('marker')).toBe('before')
+        expect(await store.getJournal()).toEqual(journal())
+        await store.transaction(async () => {
+          await store.put(entry({ path: 'notes/b.md', versionId: 'inner-committed' }))
+          await store.delete('notes/a.md')
+          await store.setMeta('marker', 'after')
+        })
+        throw new Error('outer')
+      })
+    ).rejects.toThrow('outer')
+    expect(await collect(store)).toEqual([entry()])
+    expect(await store.byFileId('file-1')).toEqual(entry())
+    expect(await store.getCursor()).toBe(0)
+    expect(await store.getMeta('marker')).toBe('before')
+    expect(await store.getJournal()).toEqual(journal())
+  })
+
   it('gets nothing before anything is put', async () => {
     expect(await store.get('notes/a.md')).toBeNull()
     expect(await store.byFileId('file-1')).toBeNull()

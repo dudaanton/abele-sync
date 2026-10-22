@@ -40,7 +40,7 @@ export interface StateStore {
   setCursor(seq: number): Promise<void>
   getJournal(): Promise<Journal | null>
   setJournal(j: Journal | null): Promise<void>
-  /** All or nothing: memory snapshots and rolls back, SQLite runs BEGIN/COMMIT. */
+  /** All or nothing: memory logs rollback mutations, SQLite runs BEGIN/COMMIT. */
   transaction<T>(fn: () => Promise<T>): Promise<T>
   /**
    * A string the engine keeps beside the entries, by key; null when there is none. Optional:
@@ -54,20 +54,11 @@ export interface StateStore {
   metadataKeys?(prefix: string): string[] | Promise<string[]>
 }
 
-interface Contents {
-  entries: Map<string, StateEntry>
-  index: Map<string, string>
-  cursor: number
-  journal: Journal | null
-  meta: Map<string, string>
-}
-
 /**
  * A `StateStore` over `Map`s, for the engine's tests.
  *
- * Entries are copied in and out, so the store owns what it holds. `transaction` snapshots the
- * whole contents and restores them if the callback throws, which is what lets the engine treat
- * "clear the journal and record its results" as one step even in memory.
+ * Entries are copied in and out, so the store owns what it holds. Transactions log
+ * mutations for rollback; a cursor update never copies the rest of a large vault.
  */
 export class MemoryStateStore implements StateStore {
   /** Keyed by path. */
@@ -77,6 +68,21 @@ export class MemoryStateStore implements StateStore {
   private cursor = 0
   private journal: Journal | null = null
   private meta = new Map<string, string>()
+  private readonly undo: (() => void)[][] = []
+
+  private remember(restore: () => void): void {
+    for (const frame of this.undo) frame.push(restore)
+  }
+
+  private change<K, V>(map: Map<K, V>, key: K, value: V | undefined): void {
+    const before = map.get(key)
+    this.remember(() => {
+      if (before === undefined) map.delete(key)
+      else map.set(key, before)
+    })
+    if (value === undefined) map.delete(key)
+    else map.set(key, value)
+  }
 
   async get(path: string): Promise<StateEntry | null> {
     const entry = this.entries.get(path)
@@ -98,16 +104,16 @@ export class MemoryStateStore implements StateStore {
    * and the caller does both.
    */
   async put(entry: StateEntry): Promise<void> {
-    this.entries.set(entry.path, { ...entry })
-    this.index.set(entry.fileId, entry.path)
+    this.change(this.entries, entry.path, { ...entry })
+    this.change(this.index, entry.fileId, entry.path)
   }
 
   async delete(path: string): Promise<void> {
     const entry = this.entries.get(path)
     if (!entry) return
-    this.entries.delete(path)
+    this.change(this.entries, path, undefined)
     // Only drop the index if it still points here: a moved file indexes its new path.
-    if (this.index.get(entry.fileId) === path) this.index.delete(entry.fileId)
+    if (this.index.get(entry.fileId) === path) this.change(this.index, entry.fileId, undefined)
   }
 
   async getCursor(): Promise<number> {
@@ -115,6 +121,10 @@ export class MemoryStateStore implements StateStore {
   }
 
   async setCursor(seq: number): Promise<void> {
+    const before = this.cursor
+    this.remember(() => {
+      this.cursor = before
+    })
     this.cursor = seq
   }
 
@@ -123,6 +133,10 @@ export class MemoryStateStore implements StateStore {
   }
 
   async setJournal(j: Journal | null): Promise<void> {
+    const before = this.journal
+    this.remember(() => {
+      this.journal = before
+    })
     this.journal = copyJournal(j)
   }
 
@@ -134,36 +148,20 @@ export class MemoryStateStore implements StateStore {
   }
 
   async setMeta(key: string, value: string | null): Promise<void> {
-    if (value === null) this.meta.delete(key)
-    else this.meta.set(key, value)
+    this.change(this.meta, key, value ?? undefined)
   }
 
   async transaction<T>(fn: () => Promise<T>): Promise<T> {
-    const before = this.contents()
+    const frame: (() => void)[] = []
+    this.undo.push(frame)
     try {
       return await fn()
     } catch (error) {
-      this.restore(before)
+      for (let n = frame.length - 1; n >= 0; n--) frame[n]!()
       throw error
+    } finally {
+      this.undo.splice(this.undo.indexOf(frame), 1)
     }
-  }
-
-  private contents(): Contents {
-    return {
-      entries: new Map(this.entries),
-      index: new Map(this.index),
-      cursor: this.cursor,
-      journal: copyJournal(this.journal),
-      meta: new Map(this.meta),
-    }
-  }
-
-  private restore(contents: Contents): void {
-    this.entries = contents.entries
-    this.index = contents.index
-    this.cursor = contents.cursor
-    this.journal = contents.journal
-    this.meta = contents.meta
   }
 }
 
