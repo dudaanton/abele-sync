@@ -1,3 +1,4 @@
+import { transact } from './stateTransaction.js'
 import {
   AbeleError,
   V2CommitOpSchema,
@@ -79,9 +80,9 @@ export class V2Directories {
       ? { directories: [], removals: [] }
       : (DocumentSchema.parse(JSON.parse(raw)) as Document)
   }
-  private save(doc: Document) {
+  private save(doc: Document, state: StateStore = this.state) {
     doc.schemaVersion = 2
-    return this.state.setMeta!(KEY, JSON.stringify(doc))
+    return state.setMeta!(KEY, JSON.stringify(doc))
   }
   async receive(item: DirectoryItem) {
     this.signal?.throwIfAborted()
@@ -352,8 +353,8 @@ export class V2Directories {
     doc.removals = doc.removals.filter(
       (item) => !within(typeof item === 'string' ? item : item.path)
     )
-    await this.state.transaction(async () => {
-      await this.state.setMeta!(
+    await transact(this.state, async (tx) => {
+      await tx.setMeta!(
         'v2-directory-review',
         JSON.stringify([
           ...review,
@@ -364,11 +365,11 @@ export class V2Directories {
           },
         ])
       )
-      for (const entry of entries) await this.state.delete(entry.path)
-      await this.state.setCursor(0)
-      await this.state.setMeta!('pull-manifest-progress', null)
-      await this.state.setMeta!('pull-manifest-page', null)
-      await this.save(doc)
+      for (const entry of entries) await tx.delete(entry.path)
+      await tx.setCursor(0)
+      await tx.setMeta!('pull-manifest-progress', null)
+      await tx.setMeta!('pull-manifest-page', null)
+      await this.save(doc, tx)
     })
     return true
   }

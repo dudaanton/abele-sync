@@ -270,6 +270,18 @@ function checking<T extends object>(
       if (what === undefined) return (value as (...args: unknown[]) => unknown).bind(obj)
       return (...args: unknown[]): unknown => {
         check(what)
+        if (key === 'transaction') {
+          const work = args[0] as (tx: StateStore) => Promise<unknown>
+          args[0] = async (tx: StateStore | undefined) => {
+            const result = await work(
+              tx === undefined
+                ? tx!
+                : checking(tx, check, methods as Partial<Record<keyof StateStore & string, string>>)
+            )
+            check(what)
+            return result
+          }
+        }
         const result = (value as (...args: unknown[]) => unknown).apply(obj, args)
         if (key === 'beginAtomicWrite' || key === 'reopenStage') {
           return Promise.resolve(result).then((stage) =>

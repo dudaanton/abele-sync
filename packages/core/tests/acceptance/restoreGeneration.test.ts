@@ -1,3 +1,4 @@
+import { decorateStateTransactions } from '../helpers/stateTransactions.js'
 import { cp, rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
@@ -137,12 +138,14 @@ it('combines a server generation change and restored local vault into one conser
       await cp(backup, join(server.dir, 'server.db'))
     })
     let requests = 0
-    const setMeta = state.setMeta.bind(state)
-    state.setMeta = (key, value) => {
-      if (key === 'content-reconciliation' && value && JSON.parse(value).phase === 'requested')
-        requests++
-      return setMeta(key, value)
-    }
+    decorateStateTransactions(state, (tx) => {
+      const setMeta = tx.setMeta!.bind(tx)
+      tx.setMeta = (key, value) => {
+        if (key === 'content-reconciliation' && value && JSON.parse(value).phase === 'requested')
+          requests++
+        return setMeta(key, value)
+      }
+    })
     const report = await a.sync('server-1')
     expect(report.joined).toBe(false)
     expect(requests).toBe(1)

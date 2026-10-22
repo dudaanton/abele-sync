@@ -91,9 +91,13 @@ export class DeleteGate {
   }
 
   /** The deletes a commit sent that nobody confirmed, counted toward the guard's window. */
-  async tallySent(ops: readonly CommitOp[], confirmed: ReadonlySet<string>): Promise<void> {
+  async tallySent(
+    ops: readonly CommitOp[],
+    confirmed: ReadonlySet<string>,
+    state: StateStore = this.ctx.state
+  ): Promise<void> {
     const count = ops.filter((op) => op.op === 'delete' && !confirmed.has(op.file_id)).length
-    await this.ctx.holds.tally(this.ctx.now(), count, this.deleteWindow())
+    await this.ctx.holds.tally(this.ctx.now(), count, this.deleteWindow(), state)
   }
 
   /** How long sent deletes count toward the guard. */

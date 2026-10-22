@@ -346,7 +346,10 @@ export interface EngineHooks {
 
 /** The engine, on an opened vault. `log` takes the engine's own lines as well as ours. */
 export function buildNodeEngine(
-  vault: Omit<NodeReplica, 'fs'> & { fs: FileSystem },
+  vault: Omit<NodeReplica, 'fs' | 'state'> & {
+    fs: FileSystem
+    state: import('@abele/sync-core').StateStore
+  },
   opts: EngineHooks
 ): SyncEngine {
   return new SyncEngine({

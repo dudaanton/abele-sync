@@ -47,8 +47,8 @@ describe('grouped code placement recovery', () => {
   it('D-089 retries a valid rollback after a one-shot ledger identity read failure', async () => {
     const { group, draft } = await prepared()
     await expect(
-      state.transaction(async () => {
-        await group.place(draft)
+      state.transaction(async (tx) => {
+        await group.place(draft, tx)
         throw new Error('stop')
       })
     ).rejects.toThrow('stop')
@@ -79,8 +79,8 @@ describe('grouped code placement recovery', () => {
       (await children(parent)).sort((a, b) => a.path.localeCompare(b.path))
     const { group, draft } = await prepared()
     await expect(
-      state.transaction(async () => {
-        await group.place(draft)
+      state.transaction(async (tx) => {
+        await group.place(draft, tx)
         throw new Error('stop')
       })
     ).rejects.toThrow('stop')
@@ -98,8 +98,8 @@ describe('grouped code placement recovery', () => {
     async (invalid) => {
       const { group, draft } = await prepared()
       await expect(
-        state.transaction(async () => {
-          await group.place(draft)
+        state.transaction(async (tx) => {
+          await group.place(draft, tx)
           throw new Error('stop')
         })
       ).rejects.toThrow('stop')
@@ -126,8 +126,8 @@ describe('grouped code placement recovery', () => {
     const draft = await CodeDraft.create(disk, group.work)
     await draft.move(MAIN, MANIFEST)
     await expect(
-      state.transaction(async () => {
-        await group.place(draft)
+      state.transaction(async (tx) => {
+        await group.place(draft, tx)
         throw new Error('stop')
       })
     ).rejects.toThrow('stop')
@@ -155,7 +155,7 @@ describe('grouped code placement recovery', () => {
       await save(op.path)
       return conditional(op)
     }
-    await expect(state.transaction(() => group.place(draft))).rejects.toMatchObject({
+    await expect(state.transaction((tx) => group.place(draft, tx))).rejects.toMatchObject({
       code: 'conflict',
     })
     expect(await text(MAIN)).toBe('local edit')
@@ -173,12 +173,12 @@ describe('grouped code placement recovery', () => {
     ).toBe(true)
     expect(draft.steps).toHaveLength(1)
     expect(await disk.stat(MANIFEST)).toBeNull()
-    await state.transaction(() => group.place(draft))
+    await state.transaction((tx) => group.place(draft, tx))
     expect(await text(MANIFEST)).toBe('new')
   })
   it('retains legacy journals without ledger ownership evidence', async () => {
     const { group, draft } = await prepared()
-    await state.transaction(() => group.place(draft))
+    await state.transaction((tx) => group.place(draft, tx))
     const files = new NodeFileSystem(group.work)
     const journal = JSON.parse(new TextDecoder().decode(await files.read('journal.json')))
     delete journal.ledger
@@ -194,11 +194,11 @@ describe('grouped code placement recovery', () => {
     'requires ownership to apply a journal but preserves it for review without blocking (committed: %s)',
     async (committed) => {
       const { group, draft } = await prepared()
-      if (committed) await state.transaction(() => group.place(draft))
+      if (committed) await state.transaction((tx) => group.place(draft, tx))
       else
         await expect(
-          state.transaction(async () => {
-            await group.place(draft)
+          state.transaction(async (tx) => {
+            await group.place(draft, tx)
             throw new Error('interrupted')
           })
         ).rejects.toThrow('interrupted')
@@ -240,9 +240,9 @@ describe('grouped code placement recovery', () => {
   it('undoes disk placement when SQLite did not commit and keeps the whole queue', async () => {
     const { group, draft } = await prepared()
     await expect(
-      state.transaction(async () => {
-        state.setMeta('test-queue', null)
-        await group.place(draft)
+      state.transaction(async (tx) => {
+        await tx.setMeta!('test-queue', null)
+        await group.place(draft, tx)
         throw new Error('stopped before SQLite commit')
       })
     ).rejects.toThrow('stopped before SQLite commit')
@@ -259,9 +259,9 @@ describe('grouped code placement recovery', () => {
 
   it('does not undo a committed group or resurrect later local deletions when cleanup was interrupted', async () => {
     const { group, draft } = await prepared()
-    await state.transaction(async () => {
-      await group.place(draft)
-      state.setMeta('test-queue', null)
+    await state.transaction(async (tx) => {
+      await group.place(draft, tx)
+      await tx.setMeta!('test-queue', null)
     })
     // A failure reported after SQLite committed must not undo the now-committed files.
     await group.rollback()
@@ -282,7 +282,7 @@ describe('grouped code placement recovery', () => {
       if (op.path === MANIFEST) throw new Error('cannot place')
       return write(op)
     }
-    await expect(state.transaction(() => group.place(draft))).rejects.toThrow('cannot place')
+    await expect(state.transaction((tx) => group.place(draft, tx))).rejects.toThrow('cannot place')
     disk.conditionalFile = write
     await CodeGroupDisk.recover(vault(), () => true)
     expect(await text(MAIN)).toBe('original()')
@@ -296,8 +296,8 @@ describe('grouped code placement recovery', () => {
     await draft.preload([MAIN, renamed])
     await draft.move(MAIN, renamed)
     await expect(
-      state.transaction(async () => {
-        await group.place(draft)
+      state.transaction(async (tx) => {
+        await group.place(draft, tx)
         throw new Error('stop')
       })
     ).rejects.toThrow('stop')
@@ -308,8 +308,8 @@ describe('grouped code placement recovery', () => {
   it('restores backups visibly rather than overwriting an external edit or blocking recovery', async () => {
     const { group, draft } = await prepared()
     await expect(
-      state.transaction(async () => {
-        await group.place(draft)
+      state.transaction(async (tx) => {
+        await group.place(draft, tx)
         throw new Error('stop')
       })
     ).rejects.toThrow('stop')

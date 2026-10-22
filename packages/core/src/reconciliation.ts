@@ -1,3 +1,4 @@
+import { transact } from './stateTransaction.js'
 import type { FileInfo, FileSystem } from './fs.js'
 import { revalidationPaths, scan, type ScanFilter, type ScanResult } from './scanner.js'
 import type { StateEntry, StateStore } from './state.js'
@@ -55,13 +56,13 @@ export async function requestReconciliation(
   const decisionKey = decision
     ? `reconciliation-decision:${await sha256(encodeText(decision))}`
     : null
-  await state.transaction(async () => {
+  await transact(state, async (tx) => {
     if (decisionKey) {
-      await state.setMeta!(decisionKey, decision!)
-      await state.setMeta!('delete-decision', null)
+      await tx.setMeta!(decisionKey, decision!)
+      await tx.setMeta!('delete-decision', null)
     }
-    await state.setMeta!(RECONCILIATION_KEY, JSON.stringify({ phase: 'requested', reason }))
-    await state.setMeta!('scan-hint-epoch', crypto.randomUUID())
+    await tx.setMeta!(RECONCILIATION_KEY, JSON.stringify({ phase: 'requested', reason }))
+    await tx.setMeta!('scan-hint-epoch', crypto.randomUUID())
   })
 }
 
@@ -126,15 +127,12 @@ export async function fenceRestoredJournal(
       if (history[0]?.op === 'delete' && history[1]?.version_id === op.base_version_id)
         alreadyDeleted++
     }
-  await state.transaction(async () => {
-    await state.setMeta!(
-      `reconciliation-journal:${journal.idempotencyKey}`,
-      JSON.stringify(journal)
-    )
-    await state.setJournal(null)
-    if (alreadyDeleted && (await state.getMeta?.(tallyKey)) !== 'yes') {
-      await new DeleteHolds(state).tally(Date.now(), alreadyDeleted, DEFAULT_DELETE_WINDOW_MS)
-      await state.setMeta!(tallyKey, 'yes')
+  await transact(state, async (tx) => {
+    await tx.setMeta!(`reconciliation-journal:${journal.idempotencyKey}`, JSON.stringify(journal))
+    await tx.setJournal(null)
+    if (alreadyDeleted && (await tx.getMeta?.(tallyKey)) !== 'yes') {
+      await new DeleteHolds(tx).tally(Date.now(), alreadyDeleted, DEFAULT_DELETE_WINDOW_MS)
+      await tx.setMeta!(tallyKey, 'yes')
     }
   })
 }
@@ -316,7 +314,8 @@ async function comparisonState(
     setCursor: (cursor) => state.setCursor(cursor),
     getJournal: () => state.getJournal(),
     setJournal: (journal) => state.setJournal(journal),
-    transaction: (work) => state.transaction(work),
+    transactionScoped: state.transactionScoped,
+    transaction: (work) => transact(state, work),
     getMeta: (key) => state.getMeta?.(key) ?? null,
     setMeta: (key, value) => state.setMeta?.(key, value),
   }

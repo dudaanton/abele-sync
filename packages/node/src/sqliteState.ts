@@ -11,6 +11,9 @@ import {
   type Journal,
   type StateEntry,
   type StateStore,
+  StateTransaction,
+  changedState,
+  type StateMutation,
 } from '@abele/sync-core'
 
 const SCHEMA = `
@@ -68,6 +71,8 @@ interface Row {
  * shared port's `ExternalStateError` semantics, including aborted and unknown commit outcomes.
  */
 export class SqliteStateStore implements StateStore, ExternalStatePort {
+  readonly transactionScoped = true
+  private revision = 0
   readonly externalDurability = 'durable' as const
   /** One shared adapter over this exact connection, retaining unknown-outcome holds.
    * Lazy creation leaves ordinary memory stores and read-only snapshots unchanged.
@@ -82,8 +87,9 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
   private readonly selectMeta: Statement
   private readonly upsertMeta: Statement
   private readonly deleteMeta: Statement
-  /** 0 outside a transaction; a nested `transaction` runs inside the outer one. */
+  /** Read-only snapshots retain a deferred SQL transaction; writer callbacks use patches. */
   private depth = 0
+  private callbacks = 0
 
   private readonly openedIdentity: string | undefined
   private constructor(
@@ -160,9 +166,10 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
 
   private externalPort(): SqliteExternalStateStore {
     const db = this.db
+    const store = this
     return (this.external ??= new SqliteExternalStateStore({
       get inTransaction() {
-        return db.inTransaction
+        return db.inTransaction || store.callbacks > 0
       },
       exec: (sql) => {
         if (sql !== 'ROLLBACK') this.checkEffect()
@@ -291,38 +298,95 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
   }
 
   /**
-   * `BEGIN IMMEDIATE` … `COMMIT`, `ROLLBACK` if the callback throws. Nesting is counted, not
-   * saved: an inner `transaction` is part of the outer one and does not commit on its own, so
-   * an inner throw the caller swallows leaves its writes in the outer transaction — the engine
-   * lets every failure out, which is what makes that safe.
+   * Buffer a scoped patch across awaits; publish it with BEGIN IMMEDIATE/COMMIT only
+   * after the callback succeeds. Root writes remain independent; a changed connection
+   * revision or SQLite data_version rejects a stale patch. Nested handles are savepoints.
    */
-  async transaction<T>(fn: () => Promise<T>): Promise<T> {
+  async transaction<T>(fn: (tx: StateStore) => Promise<T>): Promise<T> {
     this.checkEffect()
-    if (this.depth > 0) {
-      this.depth++
-      try {
-        return await fn()
-      } finally {
-        this.depth--
-      }
-    }
-    guard('cannot begin a state transaction', () => this.db.exec('BEGIN IMMEDIATE'))
-    this.depth = 1
+    const revision = this.revision
+    const dataVersion = () =>
+      guard('cannot read state revision', () => this.db.pragma('data_version', { simple: true }))
+    const version = dataVersion()
+    const tx = new StateTransaction(this, async (entry) =>
+      guard('cannot inspect state clashes', () =>
+        (
+          this.db
+            .prepare('SELECT * FROM entries WHERE path <> ? AND (file_id = ? OR wire_path = ?)')
+            .all(entry.path, entry.fileId, entry.wirePath) as Row[]
+        ).map(toRequiredEntry)
+      )
+    )
     try {
-      const result = await fn()
-      this.checkEffect()
-      guard('cannot commit the state transaction', () => this.db.exec('COMMIT'))
-      return result
-    } catch (error) {
-      // A failed COMMIT may have rolled back already; that ROLLBACK must not hide the error.
+      this.callbacks++
+      let result: T
       try {
-        this.db.exec('ROLLBACK')
-      } catch {
-        /* no transaction left to roll back */
+        result = await fn(tx)
+      } finally {
+        this.callbacks--
       }
-      throw error
+      if (revision !== this.revision || version !== dataVersion()) throw changedState()
+      if (tx.mutations.length) {
+        let callbackFailure: { cause: unknown } | undefined
+        try {
+          guard('cannot publish state transaction', () =>
+            this.db
+              .transaction(() => {
+                try {
+                  // No await while holding SQL. Guard driver errors, preserve host ownership errors.
+                  if (version !== dataVersion()) throw changedState()
+                  this.checkEffect()
+                  for (const op of tx.mutations)
+                    guard('cannot record state patch', () => this.applyMutation(op))
+                  this.checkEffect()
+                } catch (cause) {
+                  callbackFailure = { cause }
+                  throw cause
+                }
+              })
+              .immediate()
+          )
+        } catch (cause) {
+          if (callbackFailure) throw callbackFailure.cause
+          throw cause
+        }
+      }
+      return result
     } finally {
-      this.depth = 0
+      tx.close()
+    }
+  }
+
+  private applyMutation(op: StateMutation): void {
+    switch (op.kind) {
+      case 'put': {
+        const e = op.entry
+        this.clearClashes.run(e.path, e.fileId, e.wirePath)
+        this.upsert.run({
+          path: e.path,
+          wire_path: e.wirePath,
+          file_id: e.fileId,
+          version_id: e.versionId,
+          sha: e.sha,
+          size: e.size,
+          mtime: e.mtime,
+        })
+        break
+      }
+      case 'delete':
+        this.deleteByPath.run(op.path)
+        break
+      case 'cursor':
+        this.upsertMeta.run(CURSOR_KEY, String(op.value))
+        break
+      case 'journal':
+        if (op.value === null) this.deleteMeta.run(JOURNAL_KEY)
+        else this.upsertMeta.run(JOURNAL_KEY, JSON.stringify(op.value))
+        break
+      case 'meta':
+        if (op.value === null) this.deleteMeta.run(own(op.key))
+        else this.upsertMeta.run(own(op.key), op.value)
+        break
     }
   }
 
@@ -334,6 +398,7 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
 
   private checkEffect(): void {
     this.effectGuard?.()
+    this.revision++
   }
 
   /** The private handle must still be the physical ledger named by its descriptor. */
@@ -360,7 +425,8 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
   }
   getExternalInstanceId(): string {
     this.externalPort() // Refuse SQLite memory as production persistence.
-    if (this.db.inTransaction) throw new ExternalStateError('nested-transaction')
+    if (this.db.inTransaction || this.callbacks > 0)
+      throw new ExternalStateError('nested-transaction')
     const existing = this.readExternalInstanceId()
     if (existing !== null) return existing
     this.checkEffect()
@@ -393,6 +459,7 @@ function guard<T>(what: string, fn: () => T): T {
   try {
     return fn()
   } catch (cause) {
+    if (cause instanceof EngineError) throw cause
     const code =
       typeof cause === 'object' && cause !== null ? (cause as { code?: unknown }).code : undefined
     if (typeof code === 'string' && code.startsWith('SQLITE_BUSY')) {

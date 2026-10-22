@@ -266,7 +266,8 @@ export class VerdictPlanner {
    * A verdict whose bytes the server could not produce is kept on its base like a stale one:
    * the file stays as the scan found it, and the next scan sends it again.
    */
-  async fetchRun(run: number[], verdicts: Verdicts): Promise<void> {
+  async fetchRun(run: number[], verdicts: Verdicts, state: StateStore = this.state): Promise<void> {
+    const disk = this.disk.withState(state)
     const { fetched, writes, wanted, stale, local } = verdicts
     fetched.clear()
     if (this.fs.beginAtomicWrite && this.fs.reopenStage && this.client.openVersion) {
@@ -275,9 +276,9 @@ export class VerdictPlanner {
         if (sha === undefined || !wanted.has(sha) || stale.has(at)) continue
         const result = this.results[at]
         if (!result || result.status === 'rejected') continue
-        const target = await this.disk.targetOf(result.path, result.file_id)
-        const previous = await this.state.byFileId(result.file_id)
-        const sourcePath = await this.disk.whereIs(previous, target)
+        const target = await disk.targetOf(result.path, result.file_id)
+        const previous = await state.byFileId(result.file_id)
+        const sourcePath = await disk.whereIs(previous, target)
         const base =
           (await this.fs.stat(sourcePath)) === null
             ? null

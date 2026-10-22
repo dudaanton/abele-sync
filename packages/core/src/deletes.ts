@@ -296,10 +296,15 @@ export class DeleteHolds {
   }
 
   /** Count `count` deletes that went out at `now`, forgetting those past the window. */
-  async tally(now: number, count: number, windowMs: number): Promise<void> {
+  async tally(
+    now: number,
+    count: number,
+    windowMs: number,
+    state: StateStore = this.state
+  ): Promise<void> {
     if (count <= 0) return
-    const kept = (await this.recentPairs()).filter(([at]) => at > now - windowMs && at <= now)
-    await this.writeRecent([...kept, [now, count]])
+    const kept = (await this.recentPairs(state)).filter(([at]) => at > now - windowMs && at <= now)
+    await this.writeRecent([...kept, [now, count]], state)
   }
 
   /** A decision was made: what went out before it counts no more. */
@@ -322,9 +327,9 @@ export class DeleteHolds {
     await this.state.setMeta(NOTED_KEY, noted ? '1' : null)
   }
 
-  private async recentPairs(): Promise<Array<[number, number]>> {
-    if (!this.state.getMeta) return [...this.memoryRecent]
-    const raw = await this.state.getMeta(RECENT_DELETES_KEY)
+  private async recentPairs(state: StateStore = this.state): Promise<Array<[number, number]>> {
+    if (!state.getMeta) return [...this.memoryRecent]
+    const raw = await state.getMeta(RECENT_DELETES_KEY)
     if (raw === null) return []
     try {
       const value: unknown = JSON.parse(raw)
@@ -341,11 +346,14 @@ export class DeleteHolds {
     }
   }
 
-  private async writeRecent(pairs: Array<[number, number]>): Promise<void> {
-    if (!this.state.setMeta) {
+  private async writeRecent(
+    pairs: Array<[number, number]>,
+    state: StateStore = this.state
+  ): Promise<void> {
+    if (!state.setMeta) {
       this.memoryRecent = pairs
       return
     }
-    await this.state.setMeta(RECENT_DELETES_KEY, pairs.length === 0 ? null : JSON.stringify(pairs))
+    await state.setMeta(RECENT_DELETES_KEY, pairs.length === 0 ? null : JSON.stringify(pairs))
   }
 }

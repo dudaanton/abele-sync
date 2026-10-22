@@ -20,8 +20,8 @@ if (cut === 'after-main') {
   const transaction = SqliteStateStore.prototype.transaction
   SqliteStateStore.prototype.transaction = async function (fn) {
     const outer = this.depth === 0
-    return transaction.call(this, async () => {
-      const result = await fn()
+    return transaction.call(this, async (tx) => {
+      const result = await fn(tx)
       if (outer) await pause()
       return result
     })

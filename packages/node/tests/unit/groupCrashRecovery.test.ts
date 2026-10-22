@@ -278,7 +278,7 @@ async function run(
       if (mode === 'write') await draft.writeAtomic(operand, encodeText('approved'), 2)
       else if (mode === 'remove') await draft.remove(operand)
       else await draft.move('file.bin', destination)
-      await state.transaction(() => group.place(draft))
+      await state.transaction((tx) => group.place(draft, tx))
     } catch (error) {
       if (!crash.dead) throw error
       failed = true

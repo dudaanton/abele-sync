@@ -1,3 +1,4 @@
+import { decorateStateTransactions } from '../helpers/stateTransactions.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { CommitOp } from '@abele/sync-protocol'
 import { adversarial, type Adversarial } from '../helpers/adversarial.js'
@@ -35,13 +36,16 @@ describe('pull write provenance', () => {
         })
         await write(...args)
       }
-      const put = b.state.put.bind(b.state)
-      b.state.put = async (entry) => {
-        if (cut === 'inside-ledger-transaction') await put(entry)
-        throw new Error('crash before ledger commit')
-      }
+      let inject = true
+      decorateStateTransactions(b.state, (tx) => {
+        const put = tx.put.bind(tx)
+        tx.put = async (entry) => {
+          if (!inject || cut === 'inside-ledger-transaction') await put(entry)
+          if (inject) throw new Error('crash before ledger commit')
+        }
+      })
       await expect(b.sync()).rejects.toThrow('crash before ledger commit')
-      b.state.put = put
+      inject = false
       expect(await b.text('note.md')).toBe('B\n')
       expect(await b.state.get('note.md')).toEqual(base)
       expect(await b.state.getMeta(key)).not.toBeNull()
@@ -63,12 +67,16 @@ describe('pull write provenance', () => {
     await a.write('note.md', 'B\n')
     await a.sync()
     const remote = (await a.state.get('note.md'))!
-    const put = b.state.put.bind(b.state)
-    b.state.put = async () => {
-      throw new Error('crash before ledger commit')
-    }
+    let inject = true
+    decorateStateTransactions(b.state, (tx) => {
+      const put = tx.put.bind(tx)
+      tx.put = async (entry) => {
+        if (inject) throw new Error('crash before ledger commit')
+        return put(entry)
+      }
+    })
     await expect(b.sync()).rejects.toThrow('crash before ledger commit')
-    b.state.put = put
+    inject = false
     const key = `pull-write:${base.fileId}`
     expect(await b.state.getMeta(key)).not.toBeNull()
     await b.write('note.md', 'D\n', remote.mtime)

@@ -1,3 +1,4 @@
+import { decorateStateTransactions } from '../helpers/stateTransactions.js'
 import { AbeleError, type CommitOp } from '@abele/sync-protocol'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import {
@@ -431,11 +432,13 @@ describe('the engine over the device facet', () => {
     const filed = new Promise<void>((resolve) => {
       recorded = resolve
     })
-    const journal = d.state.setJournal.bind(d.state)
-    d.state.setJournal = async (value) => {
-      await journal(value)
-      if (value === null) recorded()
-    }
+    decorateStateTransactions(d.state, (tx) => {
+      const journal = tx.setJournal.bind(tx)
+      tx.setJournal = async (value) => {
+        await journal(value)
+        if (value === null) recorded()
+      }
+    })
     await filed
     const outcome = await Promise.race([
       stopping.then(() => 'stopped'),

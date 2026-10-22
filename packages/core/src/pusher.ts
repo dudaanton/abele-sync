@@ -1,3 +1,4 @@
+import { transact } from './stateTransaction.js'
 import {
   AbeleError,
   type CommitOp,
@@ -136,8 +137,9 @@ export interface ResumeOptions {
   /**
    * Told of each batch's ops once its commit has landed and its results are recorded — per
    * batch, so a push cut off after the first of several still reports what went out.
+   * Runs before ledger publication: all state effects must use the supplied tx capability.
    */
-  onCommitted?: (ops: readonly CommitOp[]) => void | Promise<void>
+  onCommitted?: (ops: readonly CommitOp[], tx: StateStore) => void | Promise<void>
   /**
    * How many of a batch's downloaded bytes — the heads its answers name — may be held before
    * they are written, as `PullOptions.prefetchBytes`: the batch is recorded in runs that fit,
@@ -246,17 +248,17 @@ export async function resumeJournal(
         state,
         'expired local-preferred join requires current-state reconciliation'
       )
-      await state.transaction(async () => {
+      await transact(state, async (tx) => {
         const key = `expired-journal:${journal.idempotencyKey}`
-        const saved = await state.getMeta!(key),
+        const saved = await tx.getMeta!(key),
           raw = JSON.stringify(journal)
         if (saved !== null && saved !== raw)
           throw new EngineError('protocol', 'expired journal review identity mismatch')
-        await state.setMeta!(key, raw)
-        await state.setJournal(null)
-        await state.setCursor(0)
-        await state.setMeta!('pull-manifest-progress', null)
-        await state.setMeta!('pull-manifest-page', null)
+        await tx.setMeta!(key, raw)
+        await tx.setJournal(null)
+        await tx.setCursor(0)
+        await tx.setMeta!('pull-manifest-progress', null)
+        await tx.setMeta!('pull-manifest-page', null)
       })
       return { ...emptyReport(), reconciliationRequired: true }
     }
@@ -465,7 +467,8 @@ class Pusher {
       const applied: AppliedChange[] = []
       let recorded = 0
       let interrupted = false
-      await this.state.transaction(async () => {
+      await transact(this.state, async (tx) => {
+        const recorder = this.recorder.withState(tx)
         for (const [k, run] of verdicts.runs.entries()) {
           if (k > 0) {
             if (this.opts.signal?.aborted) {
@@ -473,7 +476,7 @@ class Pusher {
               return
             }
             try {
-              await this.planner.fetchRun(run, verdicts)
+              await this.planner.fetchRun(run, verdicts, tx)
             } catch (error) {
               // Download cancellation must not roll back files already recorded by this batch.
               if (!this.opts.signal?.aborted) throw error
@@ -493,9 +496,9 @@ class Pusher {
               const previous =
                 this.opts.onApplied === undefined || op.op === 'create'
                   ? null
-                  : await this.state.byFileId(op.file_id)
+                  : await tx.byFileId(op.file_id)
               const keptBefore = this.report.kept.length
-              await this.recorder.take(op, results[at], at, verdicts)
+              await recorder.take(op, results[at], at, verdicts)
               recorded++
               const result = results[at]!
               if (
@@ -529,8 +532,8 @@ class Pusher {
             }
           }
         }
-        await this.opts.onCommitted?.(sending)
-        await this.state.setJournal(null)
+        await this.opts.onCommitted?.(sending, tx)
+        await tx.setJournal(null)
       })
       for (const change of applied) await notifyApplied(this.opts, change)
       if (interrupted) checkCancellation(this.opts.signal)

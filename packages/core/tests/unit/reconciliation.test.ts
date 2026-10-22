@@ -1,3 +1,4 @@
+import { decorateStateTransactions } from '../helpers/stateTransactions.js'
 import { expect, it } from 'vitest'
 import { validatePath } from '@abele/sync-protocol'
 import {
@@ -249,14 +250,17 @@ it('preserves the exact destructive journal if archiving fails and retries witho
     ops: [{ op: 'delete' as const, file_id: 'file', base_version_id: 'old-version' }],
   }
   await state.setJournal(journal)
-  const setMeta = state.setMeta.bind(state)
-  state.setMeta = async (key, value) => {
-    if (key.startsWith('reconciliation-journal:')) throw new Error('disk full')
-    await setMeta(key, value)
-  }
+  let inject = true
+  decorateStateTransactions(state, (tx) => {
+    const setMeta = tx.setMeta!.bind(tx)
+    tx.setMeta = async (key, value) => {
+      if (inject && key.startsWith('reconciliation-journal:')) throw new Error('disk full')
+      await setMeta(key, value)
+    }
+  })
   await expect(fenceRestoredJournal(state, 11)).rejects.toThrow('disk full')
   expect(await state.getJournal()).toEqual(journal)
-  state.setMeta = setMeta
+  inject = false
   await fenceRestoredJournal(state, 11)
   expect(await state.getJournal()).toBeNull()
   expect(JSON.parse((await state.getMeta('reconciliation-journal:receipt'))!)).toEqual(journal)

@@ -23,6 +23,7 @@ export { LocalPaths, refreshLocalPaths, wirePath as localToWirePath } from './lo
 export * from './selective.js'
 export * from './staging.js'
 export * from './state.js'
+export * from './stateTransaction.js'
 export * from './external/records.js'
 export * from './external/state.js'
 export * from './external/recovery.js'

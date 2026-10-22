@@ -1,3 +1,4 @@
+import { transact } from './stateTransaction.js'
 import type { StateEntry, StateStore } from './state.js'
 import { readReconciliation, requestReconciliation } from './reconciliation.js'
 
@@ -64,33 +65,33 @@ export async function reconcileGeneration(state: StateStore, generation: string 
     pullKeys.size > 0 ||
     (await state.getJournal()) !== null ||
     (await state.getCursor()) > 0
-  await state.transaction(async () => {
+  await transact(state, async (tx) => {
     if (recovering) {
-      const localReconciliation = await readReconciliation(state)
+      const localReconciliation = await readReconciliation(tx)
       const metadata: Record<string, string | null> = {}
       const resetKeys = new Set([...RESET_KEYS, ...pullKeys])
-      for (const key of resetKeys) metadata[key] = await state.getMeta!(key)
-      await state.setMeta!(
+      for (const key of resetKeys) metadata[key] = await tx.getMeta!(key)
+      await tx.setMeta!(
         `retired-generation:${old ?? 'legacy'}`,
         JSON.stringify({
           entries,
-          cursor: await state.getCursor(),
-          journal: await state.getJournal(),
+          cursor: await tx.getCursor(),
+          journal: await tx.getJournal(),
           metadata,
         })
       )
-      for (const entry of entries) await state.delete(entry.path)
-      await state.setJournal(null)
-      await state.setCursor(0)
-      for (const key of resetKeys) await state.setMeta!(key, null)
-      await state.setMeta!(RECONCILING_KEY, generation)
+      for (const entry of entries) await tx.delete(entry.path)
+      await tx.setJournal(null)
+      await tx.setCursor(0)
+      for (const key of resetKeys) await tx.setMeta!(key, null)
+      await tx.setMeta!(RECONCILING_KEY, generation)
       const members = new Map<string, StateEntry>()
       for (const entry of JSON.parse(metadata[MEMBERS_KEY] ?? '[]') as StateEntry[])
         members.set(entry.wirePath, entry)
       for (const entry of entries) members.set(entry.wirePath, entry)
-      await state.setMeta!(MEMBERS_KEY, JSON.stringify([...members.values()]))
+      await tx.setMeta!(MEMBERS_KEY, JSON.stringify([...members.values()]))
       await requestReconciliation(
-        state,
+        tx,
         `server generation changed${
           localReconciliation && localReconciliation.phase !== 'complete'
             ? `; ${localReconciliation.reason}`
@@ -98,7 +99,7 @@ export async function reconcileGeneration(state: StateStore, generation: string 
         }`
       )
     }
-    await state.setMeta!(GENERATION_KEY, generation)
+    await tx.setMeta!(GENERATION_KEY, generation)
   })
   return recovering
 }

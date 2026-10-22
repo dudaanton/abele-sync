@@ -26,9 +26,9 @@ it('keeps linked holds and their minimum correct across random insert, update, r
       ? Math.min(...[...expected.values()].map((h) => h.firstSeq))
       : null
     expect(holds.earliest()).toBe(earliest)
-    await state.transaction(async () => {
-      await holds.persist(step, true)
-      await state.setCursor(earliest === null ? step : earliest - 1)
+    await state.transaction(async (tx) => {
+      await holds.persist(step, true, tx)
+      await tx.setCursor(earliest === null ? step : earliest - 1)
     })
     if (step % 7 === 0) {
       holds = new PullHolds(state)

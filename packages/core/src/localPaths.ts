@@ -1,3 +1,4 @@
+import { transact } from './stateTransaction.js'
 import { AbeleError, caseKey, validatePath } from '@abele/sync-protocol'
 import type { FileSystem } from './fs.js'
 import type { StateStore } from './state.js'
@@ -60,9 +61,9 @@ export async function refreshLocalPaths(fs: FileSystem, state: StateStore): Prom
     if (known.get(entry.wirePath)?.losers.includes(path)) continue
     const occupant = await state.get(path)
     if (occupant && occupant.fileId !== entry.fileId) continue
-    await state.transaction(async () => {
-      await state.delete(entry.path)
-      await state.put({ ...entry, path })
+    await transact(state, async (tx) => {
+      await tx.delete(entry.path)
+      await tx.put({ ...entry, path })
     })
   }
 }

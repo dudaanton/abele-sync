@@ -1,3 +1,4 @@
+import { decorateStateTransactions } from '../helpers/stateTransactions.js'
 import { afterAll, beforeAll, expect, it } from 'vitest'
 import {
   encodeText,
@@ -141,11 +142,13 @@ it('holds a replacement file created while the old occupant ledger entry is dele
     size: original.length,
     mtime: 1,
   })
-  const drop = state.delete.bind(state)
-  state.delete = async (path) => {
-    await drop(path)
-    await fs.writeAtomic(path, encodeText('new local work'), 2)
-  }
+  decorateStateTransactions(state, (tx) => {
+    const drop = tx.delete.bind(tx)
+    tx.delete = async (path) => {
+      await drop(path)
+      await fs.writeAtomic(path, encodeText('new local work'), 2)
+    }
+  })
   const sha = await sha256(incoming)
   const placer = new PullPlacer(
     { getBlob: async () => incoming } as unknown as VaultClient,

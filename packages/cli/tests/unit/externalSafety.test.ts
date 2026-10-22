@@ -295,8 +295,8 @@ describe('initial CLI recovery and lifecycle holds', () => {
     try {
       expect(state.getExternalInstanceId()).toBe(id)
       await expect(
-        state.transaction(async () => {
-          state.setMeta('effect', 'uncommitted')
+        state.transaction(async (tx) => {
+          await tx.setMeta!('effect', 'uncommitted')
           await Promise.resolve()
           held = false
         })

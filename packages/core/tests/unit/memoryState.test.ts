@@ -41,13 +41,13 @@ describe('MemoryStateStore', () => {
     const secondGate = new Promise<void>((resolve) => {
       releaseSecond = resolve
     })
-    const first = store.transaction(async () => {
-      await store.setMeta('first', 'committed')
+    const first = store.transaction(async (tx) => {
+      await tx.setMeta!('first', 'committed')
       await firstGate
     })
-    const second = store.transaction(async () => {
+    const second = store.transaction(async (tx) => {
       await secondGate
-      await store.setMeta('second', 'tentative')
+      await tx.setMeta!('second', 'tentative')
       throw new Error('second')
     })
     releaseFirst()
@@ -75,7 +75,7 @@ describe('MemoryStateStore', () => {
       return iterator
     }
     try {
-      for (let n = 1; n <= 10; n++) await store.transaction(() => store.setCursor(n))
+      for (let n = 1; n <= 10; n++) await store.transaction((tx) => tx.setCursor(n))
     } finally {
       Map.prototype[Symbol.iterator] = original
     }
@@ -88,26 +88,26 @@ describe('MemoryStateStore', () => {
     await store.setMeta('marker', 'before')
     await store.setJournal(journal())
     await expect(
-      store.transaction(async () => {
-        await store.setCursor(10)
-        await store.put(entry({ versionId: 'outer' }))
+      store.transaction(async (tx) => {
+        await tx.setCursor(10)
+        await tx.put(entry({ versionId: 'outer' }))
         await expect(
-          store.transaction(async () => {
-            await store.delete('notes/a.md')
-            await store.setMeta('marker', null)
-            await store.setCursor(20)
-            await store.setJournal(null)
+          tx.transaction(async (tx) => {
+            await tx.delete('notes/a.md')
+            await tx.setMeta!('marker', null)
+            await tx.setCursor(20)
+            await tx.setJournal(null)
             throw new Error('inner')
           })
         ).rejects.toThrow('inner')
-        expect((await store.byFileId('file-1'))?.versionId).toBe('outer')
-        expect(await store.getCursor()).toBe(10)
-        expect(await store.getMeta('marker')).toBe('before')
-        expect(await store.getJournal()).toEqual(journal())
-        await store.transaction(async () => {
-          await store.put(entry({ path: 'notes/b.md', versionId: 'inner-committed' }))
-          await store.delete('notes/a.md')
-          await store.setMeta('marker', 'after')
+        expect((await tx.byFileId('file-1'))?.versionId).toBe('outer')
+        expect(await tx.getCursor()).toBe(10)
+        expect(await tx.getMeta!('marker')).toBe('before')
+        expect(await tx.getJournal()).toEqual(journal())
+        await tx.transaction(async (tx) => {
+          await tx.put(entry({ path: 'notes/b.md', versionId: 'inner-committed' }))
+          await tx.delete('notes/a.md')
+          await tx.setMeta!('marker', 'after')
         })
         throw new Error('outer')
       })
@@ -186,9 +186,9 @@ describe('MemoryStateStore', () => {
   })
 
   it('runs the callback inside a transaction and returns its value', async () => {
-    const result = await store.transaction(async () => {
-      await store.put(entry())
-      await store.setCursor(7)
+    const result = await store.transaction(async (tx) => {
+      await tx.put(entry())
+      await tx.setCursor(7)
       return 'done'
     })
     expect(result).toBe('done')
@@ -203,11 +203,11 @@ describe('MemoryStateStore', () => {
 
     const boom = new Error('boom')
     await expect(
-      store.transaction(async () => {
-        await store.put(entry({ path: 'notes/b.md', fileId: 'file-2' }))
-        await store.delete('notes/a.md')
-        await store.setCursor(99)
-        await store.setJournal(null)
+      store.transaction(async (tx) => {
+        await tx.put(entry({ path: 'notes/b.md', fileId: 'file-2' }))
+        await tx.delete('notes/a.md')
+        await tx.setCursor(99)
+        await tx.setJournal(null)
         throw boom
       })
     ).rejects.toBe(boom)
@@ -258,10 +258,10 @@ describe('MemoryStateStore', () => {
     await store.setJournal(journal())
     const boom = new Error('boom')
     await expect(
-      store.transaction(async () => {
-        const open = await store.getJournal()
+      store.transaction(async (tx) => {
+        const open = await tx.getJournal()
         open!.ops.push({ op: 'delete', file_id: 'file-2', base_version_id: 'ver-2' })
-        await store.setJournal(open)
+        await tx.setJournal(open)
         throw boom
       })
     ).rejects.toBe(boom)

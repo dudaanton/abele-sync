@@ -122,7 +122,7 @@ async function fixture({ shape, complete }: Row) {
     const holds = new PullHolds(state)
     await holds.load()
     holds.put({ change: a, base: 'base', firstSeq: 50 })
-    await state.transaction(() => holds.persist(100, complete))
+    await state.transaction((tx) => holds.persist(100, complete, tx))
     if (shape === 'linked-zero-head' && !complete) {
       const header = JSON.parse((await state.getMeta('pull-held-progress'))!)
       await state.setMeta('pull-held-progress', JSON.stringify({ ...header, head: 0 }))
@@ -152,6 +152,13 @@ function faults(state: StateStore, client: EngineClient, cut: number) {
     const object = target as Record<string, (...args: unknown[]) => unknown>
     const original = object[key]!
     object[key] = async (...args) => {
+      if (key === 'transaction') {
+        const work = args[0] as (tx: StateStore) => Promise<unknown>
+        args[0] = (tx: StateStore) => {
+          for (const method of ['getMeta', 'setMeta', 'byFileId', 'transaction']) wrap(tx, method)
+          return work(tx)
+        }
+      }
       const result = await original.apply(target, args)
       if (++count === cut) throw new Error('migration crash')
       return result
@@ -191,10 +198,10 @@ it.each(rows)(
           2
         )
       if (row.rewind)
-        await state.transaction(async () => {
-          await state.setCursor(0)
-          await state.setMeta('pull-manifest-progress', null)
-          await state.setMeta('pull-manifest-page', null)
+        await state.transaction(async (tx) => {
+          await tx.setCursor(0)
+          await tx.setMeta!('pull-manifest-progress', null)
+          await tx.setMeta!('pull-manifest-page', null)
         })
       const paths = new Set(expected.map((item) => item.path))
       const report = await pull(client, new MemoryFileSystem(), state, {

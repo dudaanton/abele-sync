@@ -1,7 +1,7 @@
 import { link, lstat, mkdtemp, readdir, rename, rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { basename, dirname, join, resolve } from 'node:path'
-import { EngineError, ExternalStateError, isEngineOwn } from '@abele/sync-core'
+import { type StateStore, EngineError, ExternalStateError, isEngineOwn } from '@abele/sync-core'
 import { caseKey, normalisePath, validatePath } from '@abele/sync-protocol'
 import {
   CodeDraft,
@@ -91,9 +91,9 @@ export class CodeGroupDisk {
       effectTracker: this.vault.fence?.track,
     }).writeAtomic('journal.json', new TextEncoder().encode(JSON.stringify(this.journal)), 0)
   }
-  async place(draft: CodeDraft): Promise<void> {
+  async place(draft: CodeDraft, state: StateStore = this.vault.state): Promise<void> {
     this.check()
-    const ledger = this.vault.state.readExternalInstanceId()
+    const ledger = (await state.getMeta?.('ledger-instance-id')) ?? null
     if (ledger === null) throw new ExternalStateError('recovery-required')
     this.journal = {
       version: 1,
@@ -146,7 +146,7 @@ export class CodeGroupDisk {
     if (!(await draft.validateResult()))
       throw new EngineError('conflict', 'code changed during group placement')
     // This is inside the same transaction as ALL ledger changes and the queue removal.
-    this.vault.state.setMeta(this.marker, 'committed')
+    await state.setMeta!(this.marker, 'committed')
   }
   async rollback(): Promise<void> {
     this.assertOwningLedger()

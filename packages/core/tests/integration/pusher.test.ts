@@ -1,3 +1,5 @@
+import { decorateStateTransactions } from '../helpers/stateTransactions.js'
+import type { StateStore } from '../../src/state.js'
 import {
   AbeleError,
   type CommitOp,
@@ -258,15 +260,15 @@ describe('the pusher over the device facet', () => {
     await d.fs.remove('gone.md')
     await expect(
       d.sync({
-        onCommitted: async () => {
-          await d.state.setMeta('sent-delete-count', '1')
+        onCommitted: async (_ops, tx) => {
+          await tx.setMeta!('sent-delete-count', '1')
           throw new Error('count could not be persisted')
         },
       })
     ).rejects.toThrow('count could not be persisted')
     expect(await d.state.getMeta('sent-delete-count')).toBeNull()
     expect(await d.state.getJournal()).not.toBeNull()
-    await d.resume({ onCommitted: async () => d.state.setMeta('sent-delete-count', '1') })
+    await d.resume({ onCommitted: async (_ops, tx) => tx.setMeta!('sent-delete-count', '1') })
     expect(await d.state.getMeta('sent-delete-count')).toBe('1')
     expect(await d.state.getJournal()).toBeNull()
   })
@@ -761,7 +763,7 @@ describe('the pusher over the device facet', () => {
     // The commit lands, and the device dies before it can write down what came back.
     const transaction = d.state.transaction.bind(d.state)
     let crash = true
-    d.state.transaction = async <T>(fn: () => Promise<T>): Promise<T> => {
+    d.state.transaction = async <T>(fn: (tx: StateStore) => Promise<T>): Promise<T> => {
       if (!crash) return transaction(fn)
       crash = false
       throw new EngineError('io', 'the state file went away')
@@ -1353,7 +1355,7 @@ describe('the pusher over the device facet', () => {
 
     const transaction = d.state.transaction.bind(d.state)
     let crash = true
-    d.state.transaction = async <T>(fn: () => Promise<T>): Promise<T> => {
+    d.state.transaction = async <T>(fn: (tx: StateStore) => Promise<T>): Promise<T> => {
       if (!crash) return transaction(fn)
       crash = false
       throw new EngineError('io', 'the state file went away')
@@ -1436,15 +1438,17 @@ describe('the pusher over the device facet', () => {
 
     // The merge comes back and is written to disk, and the device dies before the record
     // lands: the state rolls back to the journal, and the file keeps the merged bytes.
-    const setJournal = d.state.setJournal.bind(d.state)
     let crash = true
-    d.state.setJournal = async (journal) => {
-      if (journal === null && crash) {
-        crash = false
-        throw new EngineError('io', 'the state file went away')
+    decorateStateTransactions(d.state, (tx) => {
+      const setJournal = tx.setJournal.bind(tx)
+      tx.setJournal = async (journal) => {
+        if (journal === null && crash) {
+          crash = false
+          throw new EngineError('io', 'the state file went away')
+        }
+        await setJournal(journal)
       }
-      await setJournal(journal)
-    }
+    })
     await expect(d.sync()).rejects.toThrow(EngineError)
     expect(d.writes).toEqual(['note.md'])
     expect(await d.text('note.md')).toBe('KILO-from-yonder\nlima\nMIKE-from-here\n')

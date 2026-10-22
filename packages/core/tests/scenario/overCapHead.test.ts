@@ -1,3 +1,4 @@
+import { decorateStateTransactions } from '../helpers/stateTransactions.js'
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { selectiveDefaults, type VaultClient } from '../legacy/index.js'
 import { serverHarness, type Harness } from '../helpers/harness.js'
@@ -364,16 +365,18 @@ describe('a server file passed over for a local one over the cap', () => {
     await seed(p.seeder, [await create(p.seeder, 'big.png', 's'.repeat(10), 100)])
     await p.joiner.write('big.png', 'l'.repeat(205), 200)
     const order: string[] = []
-    const setCursor = p.joiner.state.setCursor.bind(p.joiner.state)
-    p.joiner.state.setCursor = async (seq) => {
-      if (seq > 0) order.push('cursor')
-      return setCursor(seq)
-    }
-    const setMeta = p.joiner.state.setMeta.bind(p.joiner.state)
-    p.joiner.state.setMeta = async (key, value) => {
-      if (key === 'passed-over-paths' && value !== null) order.push('mark')
-      return setMeta(key, value)
-    }
+    decorateStateTransactions(p.joiner.state, (tx) => {
+      const setCursor = tx.setCursor.bind(tx)
+      tx.setCursor = async (seq) => {
+        if (seq > 0) order.push('cursor')
+        return setCursor(seq)
+      }
+      const setMeta = tx.setMeta!.bind(tx)
+      tx.setMeta = async (key, value) => {
+        if (key === 'passed-over-paths' && value !== null) order.push('mark')
+        return setMeta(key, value)
+      }
+    })
     await p.joiner.sync()
     expect(order[0]).toBe('mark')
     expect(order).toContain('cursor')

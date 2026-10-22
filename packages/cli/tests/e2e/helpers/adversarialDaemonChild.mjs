@@ -29,6 +29,15 @@ function wrap(object, method, where) {
     return result
   }
 }
+function wrapState(state, method, where) {
+  wrap(state, method, where)
+  const transaction = state.transaction.bind(state)
+  state.transaction = (work) =>
+    transaction(async (tx) => {
+      wrapState(tx, method, where)
+      return work(tx)
+    })
+}
 if (cut === 'scan') wrap(vault.fs, 'fingerprint', 'after')
 if (cut === 'upload') wrap(vault.client, 'putBlobSource', 'after')
 if (cut === 'upload-read' || cut === 'upload-second-pass') {
@@ -47,7 +56,7 @@ if (cut === 'upload-read' || cut === 'upload-second-pass') {
 }
 if (cut === 'commit-before') wrap(vault.client, 'commitRaw', 'before')
 if (cut === 'commit-after') wrap(vault.client, 'commitRaw', 'after')
-if (cut === 'record' || cut === 'pull-ledger') wrap(vault.state, 'put', 'after')
+if (cut === 'record' || cut === 'pull-ledger') wrapState(vault.state, 'put', 'after')
 // Stop on durable streaming checkpoints, not the bypassed whole-buffer writer.
 if (['pull-append', 'pull-seal', 'pull-write', 'merge-download'].includes(cut)) {
   for (const method of ['beginAtomicWrite', 'reopenStage']) {
@@ -63,7 +72,7 @@ if (['pull-append', 'pull-seal', 'pull-write', 'merge-download'].includes(cut)) 
     }
   }
 }
-if (cut === 'pull-cursor') wrap(vault.state, 'setCursor', 'after')
+if (cut === 'pull-cursor') wrapState(vault.state, 'setCursor', 'after')
 if (cut === 'delete-tally') {
   const transaction = vault.state.transaction.bind(vault.state)
   vault.state.transaction = async (fn) => {
@@ -74,17 +83,26 @@ if (cut === 'delete-tally') {
   }
 }
 if (cut === 'join-marker' || cut === 'held-decision') {
-  const set = vault.state.setMeta.bind(vault.state)
-  vault.state.setMeta = (key, value) => {
-    set(key, value)
-    if (
-      (cut === 'join-marker' && key === 'join-open' && value !== null) ||
-      (cut === 'held-decision' && key === 'delete-decision' && value === null)
-    ) {
-      process.send({ barrier: cut })
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)
+  const decorate = (state) => {
+    const set = state.setMeta.bind(state)
+    state.setMeta = async (key, value) => {
+      await set(key, value)
+      if (
+        (cut === 'join-marker' && key === 'join-open' && value !== null) ||
+        (cut === 'held-decision' && key === 'delete-decision' && value === null)
+      ) {
+        process.send({ barrier: cut })
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)
+      }
     }
+    const transaction = state.transaction.bind(state)
+    state.transaction = (work) =>
+      transaction(async (tx) => {
+        decorate(tx)
+        return work(tx)
+      })
   }
+  decorate(vault.state)
 }
 const engine = buildEngine(vault, { fallbackMs: 300000, log() {}, stillHeld: release.held })
 try {

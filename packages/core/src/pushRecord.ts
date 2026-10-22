@@ -37,6 +37,18 @@ export class VerdictRecorder {
     private readonly disk: PushDisk
   ) {}
 
+  withState(state: StateStore): VerdictRecorder {
+    return new VerdictRecorder(
+      this.fs,
+      state,
+      this.opts,
+      this.report,
+      this.hash,
+      this.refused,
+      this.disk.withState(state)
+    )
+  }
+
   /** Write a refusal down, once. */
   refuse(sha: string, refusal: Refusal): void {
     if (this.refused.has(sha)) return

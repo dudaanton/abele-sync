@@ -1,3 +1,4 @@
+import { transact } from './stateTransaction.js'
 import { normalisePath, type ChangeItem, type CommitOp } from '@abele/sync-protocol'
 import type { EngineClient } from './engineClient.js'
 import { deferredSource, StagedChanges, touchesDeferred, type Staged } from './defer.js'
@@ -398,9 +399,9 @@ export class Staging {
       this.ctx.log(`sync: ${change.path} is held here by another file; its staged change stays`)
       return 'blocked'
     }
-    await state.transaction(async () => {
-      if (entry !== null && entry.path !== target) await state.delete(entry.path)
-      await state.put({
+    await transact(state, async (tx) => {
+      if (entry !== null && entry.path !== target) await tx.delete(entry.path)
+      await tx.put({
         path: target,
         wirePath: change.path,
         fileId: change.file_id,

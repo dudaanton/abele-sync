@@ -1,3 +1,4 @@
+import { transact } from './stateTransaction.js'
 import type { ChangeItem } from '@abele/sync-protocol'
 import type { StateStore } from './state.js'
 import type { EngineClient } from './engineClient.js'
@@ -61,8 +62,8 @@ export class PullHolds {
     }
     if ('holds' in raw) {
       for (const held of raw.holds) this.put(held)
-      await this.state.transaction(async () => {
-        await this.persist(raw.head, raw.inventoryComplete)
+      await transact(this.state, async (tx) => {
+        await this.persist(raw.head, raw.inventoryComplete, tx)
       })
       return
     }
@@ -84,7 +85,7 @@ export class PullHolds {
     }
     if (previous !== raw.last) throw new Error('invalid pull hold tail')
     if (raw.head !== originalHead)
-      await this.state.transaction(() => this.persist(raw.head, raw.inventoryComplete))
+      await transact(this.state, (tx) => this.persist(raw.head, raw.inventoryComplete, tx))
   }
 
   put(held: HeldChange): void {
@@ -175,10 +176,14 @@ export class PullHolds {
   }
 
   /** Caller owns the cursor transaction. Changed keys are a constant-size patch. */
-  async persist(head: number, inventoryComplete: boolean): Promise<void> {
+  async persist(
+    head: number,
+    inventoryComplete: boolean,
+    tx: StateStore = this.state
+  ): Promise<void> {
     for (const id of this.changed) {
       const node = this.records.get(id)
-      await this.state.setMeta?.(pullHoldKey(id), node === undefined ? null : JSON.stringify(node))
+      await tx.setMeta?.(pullHoldKey(id), node === undefined ? null : JSON.stringify(node))
     }
     this.header =
       this.first === null
@@ -191,10 +196,7 @@ export class PullHolds {
             first: this.first,
             last: this.last,
           }
-    await this.state.setMeta?.(
-      HELD_PROGRESS,
-      this.header === null ? null : JSON.stringify(this.header)
-    )
+    await tx.setMeta?.(HELD_PROGRESS, this.header === null ? null : JSON.stringify(this.header))
     this.changed.clear()
   }
 }
@@ -261,15 +263,16 @@ export async function importLegacyPullHolds(
       firstSeq: Math.min(change.seq, existing?.firstSeq ?? change.seq),
     })
   }
-  await state.transaction(async () => {
+  await transact(state, async (tx) => {
     await holds.persist(
       Math.min(holds.header?.head ?? legacy.head, legacy.head),
-      holds.header?.inventoryComplete ?? legacy.coverageComplete ?? false
+      holds.header?.inventoryComplete ?? legacy.coverageComplete ?? false,
+      tx
     )
-    await state.setMeta?.(
+    await tx.setMeta?.(
       'pull-manifest-progress',
       JSON.stringify({ ...legacy, firstHeld: null, heldChanges: undefined })
     )
-    await state.setMeta?.('pull-manifest-page', JSON.stringify({ ...payload, heldChanges: [] }))
+    await tx.setMeta?.('pull-manifest-page', JSON.stringify({ ...payload, heldChanges: [] }))
   })
 }

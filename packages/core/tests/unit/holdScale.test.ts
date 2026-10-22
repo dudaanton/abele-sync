@@ -1,3 +1,4 @@
+import { decorateStateTransactions } from '../helpers/stateTransactions.js'
 import { expect, it } from 'vitest'
 import { MemoryFileSystem, MemoryStateStore, ExpectedWrites } from '../../src/index.js'
 import { pull } from '../../src/puller.js'
@@ -19,12 +20,14 @@ it('D-118 serializes only linear metadata bytes for 10000 held inventory items',
   }))
   let serialized = 0
   const budget = count * 5000
-  const setMeta = state.setMeta.bind(state)
-  state.setMeta = async (key, value) => {
-    serialized += value?.length ?? 0
-    if (serialized > budget) throw new Error('nonlinear metadata cost')
-    await setMeta(key, value)
-  }
+  decorateStateTransactions(state, (tx) => {
+    const setMeta = tx.setMeta!.bind(tx)
+    tx.setMeta = async (key, value) => {
+      serialized += value?.length ?? 0
+      if (serialized > budget) throw new Error('nonlinear metadata cost')
+      await setMeta(key, value)
+    }
+  })
   const client = {
     manifest: async (cursor: string | null) => {
       const start = Number(cursor ?? 0),
@@ -43,6 +46,7 @@ it('D-118 serializes only linear metadata bytes for 10000 held inventory items',
     filter: { excluded: () => false },
   })
   expect(report.held).toHaveLength(count)
+  expect(serialized).toBeGreaterThan(count * 100)
   expect(serialized).toBeLessThanOrEqual(budget)
   // Per-hold records are authority too: a restore must retire them with the header.
   const keys = state.metadataKeys.bind(state)

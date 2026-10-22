@@ -1,3 +1,4 @@
+import { transact } from './stateTransaction.js'
 import {
   AbeleError,
   type ChangeItem,
@@ -301,9 +302,9 @@ export class Puller {
         (await this.state.getMeta?.(MANIFEST_PROGRESS)) ?? 'null'
       ) as ManifestProgress | null
       if (progress !== null && (progress.generation ?? null) !== generation) {
-        await this.state.transaction(async () => {
-          await this.state.setMeta?.(MANIFEST_PROGRESS, null)
-          await this.state.setMeta?.(MANIFEST_PAGE_DATA, null)
+        await transact(this.state, async (tx) => {
+          await tx.setMeta?.(MANIFEST_PROGRESS, null)
+          await tx.setMeta?.(MANIFEST_PAGE_DATA, null)
         })
         progress = null
       }
@@ -367,14 +368,14 @@ export class Puller {
         }
         const checkpoint = progress
         this.bootstrapContext = checkpoint
-        const saveProgress = () => {
+        const saveProgress = (tx: StateStore) => {
           checkpoint.firstHeld = null
-          return this.state.setMeta?.(MANIFEST_PROGRESS, progressHeader(checkpoint))
+          return tx.setMeta?.(MANIFEST_PROGRESS, progressHeader(checkpoint))
         }
-        await this.state.transaction(async () => {
-          await this.state.setMeta?.(MANIFEST_PAGE_DATA, progressPage(checkpoint, page))
-          await saveProgress()
-          await this.persist()
+        await transact(this.state, async (tx) => {
+          await tx.setMeta?.(MANIFEST_PAGE_DATA, progressPage(checkpoint, page))
+          await saveProgress(tx)
+          await this.persist(tx)
         })
         const completed = new Set(checkpoint.completed)
         const pending = page.items.map(asCreate)
@@ -384,18 +385,18 @@ export class Puller {
             if (this.heldFiles.get(change.file_id) !== change) {
               checkpoint.completed.push(change.file_id)
             }
-            await this.state.transaction(async () => {
-              await saveProgress()
-              await this.persist()
+            await transact(this.state, async (tx) => {
+              await saveProgress(tx)
+              await this.persist(tx)
             })
           }
         )
         checkpoint.heldChanges = []
         checkpoint.seen = [...this.seen].filter((id) => this.opts.recheck?.has(id))
-        await this.state.transaction(async () => {
-          await this.state.setMeta?.(MANIFEST_PAGE_DATA, progressPage(checkpoint, page))
-          await saveProgress()
-          await this.persist()
+        await transact(this.state, async (tx) => {
+          await tx.setMeta?.(MANIFEST_PAGE_DATA, progressPage(checkpoint, page))
+          await saveProgress(tx)
+          await this.persist(tx)
         })
         cursor = page.next
         if (cursor !== null) {
@@ -412,9 +413,9 @@ export class Puller {
             firstHeld: this.firstHeld,
             heldChanges: [],
           }
-          await this.state.transaction(async () => {
-            await this.state.setMeta?.(MANIFEST_PAGE_DATA, progressPage(progress!, next))
-            await this.state.setMeta?.(MANIFEST_PROGRESS, progressHeader(progress!))
+          await transact(this.state, async (tx) => {
+            await tx.setMeta?.(MANIFEST_PAGE_DATA, progressPage(progress!, next))
+            await tx.setMeta?.(MANIFEST_PROGRESS, progressHeader(progress!))
           })
         }
       } while (cursor !== null)
@@ -555,7 +556,7 @@ export class Puller {
    * change this run held, so the next run fetches that change again.
    * Called only inside a state transaction: the hold record and cursor commit together.
    */
-  private async persist(): Promise<void> {
+  private async persist(tx: StateStore): Promise<void> {
     this.firstHeld = this.holds.earliest()
     this.report.cursor = Math.min(
       this.reached,
@@ -565,14 +566,15 @@ export class Puller {
       this.walking
         ? Math.min(this.manifestHead ?? this.reached, this.heldHead ?? Infinity)
         : this.reached,
-      this.inventoryComplete
+      this.inventoryComplete,
+      tx
     )
-    await this.state.setCursor(this.report.cursor)
+    await tx.setCursor(this.report.cursor)
   }
 
   private async save(): Promise<void> {
-    await this.state.transaction(async () => {
-      await this.persist()
+    await transact(this.state, async (tx) => {
+      await this.persist(tx)
       if (!this.report.bootstrapped || this.walking) return
       if (this.heldFiles.size && this.bootstrapContext !== null) {
         const progress = this.bootstrapContext
@@ -584,14 +586,14 @@ export class Puller {
           coverageComplete: true,
         })
         progress.seen = progress.recheck.filter((id) => this.seen.has(id))
-        await this.state.setMeta?.(MANIFEST_PROGRESS, progressHeader(progress))
-        await this.state.setMeta?.(
+        await tx.setMeta?.(MANIFEST_PROGRESS, progressHeader(progress))
+        await tx.setMeta?.(
           MANIFEST_PAGE_DATA,
           progressPage(progress, { items: [], next: null, head_seq: this.reached })
         )
       } else {
-        await this.state.setMeta?.(MANIFEST_PROGRESS, null)
-        await this.state.setMeta?.(MANIFEST_PAGE_DATA, null)
+        await tx.setMeta?.(MANIFEST_PROGRESS, null)
+        await tx.setMeta?.(MANIFEST_PAGE_DATA, null)
       }
     })
   }

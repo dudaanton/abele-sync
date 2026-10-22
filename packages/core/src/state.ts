@@ -1,4 +1,5 @@
 import type { CommitOp } from '@abele/sync-protocol'
+import { StateTransaction, changedState, type StateMutation } from './stateTransaction.js'
 
 /** What the engine remembers about one synced file between runs. */
 export interface StateEntry {
@@ -24,10 +25,12 @@ export interface Journal {
 }
 
 /**
- * Durable engine state. The plugin implements this over its data file, the daemon over SQLite;
+ * Durable engine state. Hosts implement this over IndexedDB or SQLite;
  * the engine and its tests use `MemoryStateStore`.
  */
 export interface StateStore {
+  /** True only when transaction passes an isolated, revocable capability. */
+  readonly transactionScoped?: boolean
   /** Optional host claim attribution for durable in-flight installation intents. */
   effectOwner?(): string | undefined
   get(path: string): Promise<StateEntry | null>
@@ -40,8 +43,10 @@ export interface StateStore {
   setCursor(seq: number): Promise<void>
   getJournal(): Promise<Journal | null>
   setJournal(j: Journal | null): Promise<void>
-  /** All or nothing: memory logs rollback mutations, SQLite runs BEGIN/COMMIT. */
-  transaction<T>(fn: () => Promise<T>): Promise<T>
+  /** All callback reads/writes MUST use tx, including helpers called after awaits.
+   * Root calls belong to unrelated tasks and must survive rollback. Do not retain tx.
+   * See transact() for the exclusive-access compatibility path for legacy hosts. */
+  transaction<T>(fn: (tx: StateStore) => Promise<T>): Promise<T>
   /**
    * A string the engine keeps beside the entries, by key; null when there is none. Optional:
    * a store without it still syncs, and the engine keeps what it would have filed in memory,
@@ -57,10 +62,12 @@ export interface StateStore {
 /**
  * A `StateStore` over `Map`s, for the engine's tests.
  *
- * Entries are copied in and out, so the store owns what it holds. Transactions log
- * mutations for rollback; a cursor update never copies the rest of a large vault.
+ * Entries are copied in and out. Transactions own private patches and publish them
+ * synchronously on success; a cursor update never copies the rest of a large vault.
  */
 export class MemoryStateStore implements StateStore {
+  readonly transactionScoped = true
+  private revision = 0
   /** Keyed by path. */
   private entries = new Map<string, StateEntry>()
   /** fileId → the path that file was last put under. */
@@ -68,18 +75,9 @@ export class MemoryStateStore implements StateStore {
   private cursor = 0
   private journal: Journal | null = null
   private meta = new Map<string, string>()
-  private readonly undo: (() => void)[][] = []
-
-  private remember(restore: () => void): void {
-    for (const frame of this.undo) frame.push(restore)
-  }
 
   private change<K, V>(map: Map<K, V>, key: K, value: V | undefined): void {
-    const before = map.get(key)
-    this.remember(() => {
-      if (before === undefined) map.delete(key)
-      else map.set(key, before)
-    })
+    this.revision++
     if (value === undefined) map.delete(key)
     else map.set(key, value)
   }
@@ -121,10 +119,7 @@ export class MemoryStateStore implements StateStore {
   }
 
   async setCursor(seq: number): Promise<void> {
-    const before = this.cursor
-    this.remember(() => {
-      this.cursor = before
-    })
+    this.revision++
     this.cursor = seq
   }
 
@@ -133,10 +128,7 @@ export class MemoryStateStore implements StateStore {
   }
 
   async setJournal(j: Journal | null): Promise<void> {
-    const before = this.journal
-    this.remember(() => {
-      this.journal = before
-    })
+    this.revision++
     this.journal = copyJournal(j)
   }
 
@@ -151,16 +143,44 @@ export class MemoryStateStore implements StateStore {
     this.change(this.meta, key, value ?? undefined)
   }
 
-  async transaction<T>(fn: () => Promise<T>): Promise<T> {
-    const frame: (() => void)[] = []
-    this.undo.push(frame)
+  async transaction<T>(fn: (tx: StateStore) => Promise<T>): Promise<T> {
+    const revision = this.revision
+    const tx = new StateTransaction(this)
     try {
-      return await fn()
-    } catch (error) {
-      for (let n = frame.length - 1; n >= 0; n--) frame[n]!()
-      throw error
+      const result = await fn(tx)
+      if (revision !== this.revision) throw changedState()
+      // Publication is synchronous: no unrelated task can interleave patch mutations.
+      for (const op of tx.mutations) this.apply(op)
+      return result
     } finally {
-      this.undo.splice(this.undo.indexOf(frame), 1)
+      tx.close()
+    }
+  }
+
+  private apply(op: StateMutation): void {
+    switch (op.kind) {
+      case 'put':
+        this.change(this.entries, op.entry.path, { ...op.entry })
+        this.change(this.index, op.entry.fileId, op.entry.path)
+        break
+      case 'delete': {
+        const entry = this.entries.get(op.path)
+        this.change(this.entries, op.path, undefined)
+        if (entry && this.index.get(entry.fileId) === op.path)
+          this.change(this.index, entry.fileId, undefined)
+        break
+      }
+      case 'cursor':
+        this.revision++
+        this.cursor = op.value
+        break
+      case 'journal':
+        this.revision++
+        this.journal = copyJournal(op.value)
+        break
+      case 'meta':
+        this.change(this.meta, op.key, op.value ?? undefined)
+        break
     }
   }
 }

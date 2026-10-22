@@ -37,7 +37,7 @@ it('retains foreign-ledger approval evidence in review without blocking a fresh 
     const draft = await CodeDraft.create(replica.disk, group.work)
     await draft.preload(['example.txt'])
     await draft.writeAtomic('example.txt', new TextEncoder().encode('approved'), 1000)
-    await replica.state.transaction(() => group.place(draft))
+    await replica.state.transaction((tx) => group.place(draft, tx))
     const journal = await readFile(join(group.work, 'journal.json'))
     replica.close()
     replica = undefined

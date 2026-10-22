@@ -1,3 +1,4 @@
+import { decorateStateTransactions } from '../helpers/stateTransactions.js'
 import { expect, it } from 'vitest'
 import type { ChangeItem } from '@abele/sync-protocol'
 import { MemoryFileSystem, MemoryStateStore, sha256, ExpectedWrites } from '../../src/index.js'
@@ -287,12 +288,14 @@ it('eviction preserves an edit made while its intent is saved', async () => {
 })
 
 it('retains removal provenance when a new equal save appears during ledger retirement', async () => {
-  const f = await fixture(),
-    drop = f.state.delete.bind(f.state)
-  f.state.delete = async (path) => {
-    await drop(path)
-    await f.fs.writeAtomic(path, f.b, 1)
-  }
+  const f = await fixture()
+  decorateStateTransactions(f.state, (tx) => {
+    const drop = tx.delete.bind(tx)
+    tx.delete = async (path) => {
+      await drop(path)
+      await f.fs.writeAtomic(path, f.b, 1)
+    }
+  })
   const incoming = { ...f.change, file_id: 'incoming' }
   expect(await f.placer.place(incoming, incoming.sha!, null, new Map(), new Map())).toBe(false)
   // Retry must not classify the newly created local B as a completed remote B.

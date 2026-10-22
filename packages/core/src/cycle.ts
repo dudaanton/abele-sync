@@ -1,3 +1,5 @@
+import type { StateStore } from './state.js'
+import { transact } from './stateTransaction.js'
 import type { CommitOp } from '@abele/sync-protocol'
 import { fetchChecked } from './apply.js'
 import { DeleteGate } from './deleteGate.js'
@@ -375,7 +377,8 @@ export class SyncCycle {
     const confirmed = new Set(filed?.decision.kind === 'confirm' ? filed.decision.fileIds : [])
     // Counted as each commit lands, so a push cut off half way still counts what it sent — and
     // so does a replay, whose batch may have landed before its answer was lost.
-    const tally = (ops: readonly CommitOp[]): Promise<void> => this.gate.tallySent(ops, confirmed)
+    const tally = (ops: readonly CommitOp[], tx: StateStore): Promise<void> =>
+      this.gate.tallySent(ops, confirmed, tx)
     if (filed?.decision.kind === 'restore') await this.gate.putBack(filed.decision)
 
     if (this.rewind) {
@@ -527,11 +530,11 @@ export class SyncCycle {
         (secondPull ?? before).held.length > 0 ||
         this.ctx.stopping()
       reconciliation.phase = unresolved ? 'review' : 'complete'
-      await state.transaction(async () => {
-        await state.setMeta?.(RECONCILIATION_KEY, JSON.stringify(reconciliation))
+      await transact(state, async (tx) => {
+        await tx.setMeta?.(RECONCILIATION_KEY, JSON.stringify(reconciliation))
         if (reconciling && !unresolved) {
-          await state.setMeta?.(MEMBERS_KEY, null)
-          await state.setMeta?.(RECONCILING_KEY, null)
+          await tx.setMeta?.(MEMBERS_KEY, null)
+          await tx.setMeta?.(RECONCILING_KEY, null)
         }
       })
       this.ctx.set({ reconciliation })

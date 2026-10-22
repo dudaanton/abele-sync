@@ -47,6 +47,10 @@ export class PushDisk {
     private readonly diskPaths: Map<string, string>
   ) {}
 
+  withState(state: StateStore): PushDisk {
+    return new PushDisk(this.fs, state, this.opts, this.hash, this.diskPaths)
+  }
+
   /**
    * Where the file a verdict is about lies right now: at the target, or — when nothing is
    * there yet — where this device last had it. A server that lands an edit at a path the head

@@ -190,15 +190,20 @@ it('commits unresolved holds and their bounded cursor atomically across a failed
   f.add('a', 'delete')
   f.add('b', 'modify')
   const noted = new Set(['a.bin', 'b.bin'])
-  const setCursor = f.state.setCursor.bind(f.state)
+  const transaction = f.state.transaction.bind(f.state)
   let failed = false
-  f.state.setCursor = async (cursor) => {
-    await setCursor(cursor)
-    if (!failed && (await f.state.getMeta(pullHoldKey('b'))) !== null) {
-      failed = true
-      throw new Error('cursor write crash')
-    }
-  }
+  f.state.transaction = (work) =>
+    transaction(async (tx) => {
+      const setCursor = tx.setCursor.bind(tx)
+      tx.setCursor = async (cursor) => {
+        await setCursor(cursor)
+        if (!failed && (await tx.getMeta!(pullHoldKey('b'))) !== null) {
+          failed = true
+          throw new Error('cursor write crash')
+        }
+      }
+      return work(tx)
+    })
   await expect(f.run(noted)).rejects.toThrow('cursor write crash')
   expect(failed).toBe(true)
   expect(await f.state.getCursor()).toBe(2)

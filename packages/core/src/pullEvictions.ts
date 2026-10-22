@@ -1,3 +1,4 @@
+import { transact } from './stateTransaction.js'
 import { normalisePath, validatePath } from '@abele/sync-protocol'
 import type { FileSystem } from './fs.js'
 import type { StateEntry, StateStore } from './state.js'
@@ -32,9 +33,9 @@ export async function recoverPullEvictions(
         (field) => entry[field] === base[field]
       )
     const absent = (await fs.stat(base.path)) === null
-    await state.transaction(async () => {
-      if (same && absent) await state.delete(base.path)
-      await state.setMeta?.(key, null)
+    await transact(state, async (tx) => {
+      if (same && absent) await tx.delete(base.path)
+      await tx.setMeta?.(key, null)
     })
   }
 }

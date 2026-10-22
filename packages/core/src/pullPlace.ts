@@ -1,3 +1,4 @@
+import { transact } from './stateTransaction.js'
 import { AbeleError, caseKey, normalisePath, type ChangeItem } from '@abele/sync-protocol'
 import { notifyApplied } from './applied.js'
 import { bytesFor, settledStat } from './apply.js'
@@ -234,10 +235,10 @@ export class PullPlacer {
       return false
     if (!(await this.clearPath(entry.path, entry))) return false
     this.opts.expected.clear(entry.path)
-    await this.state.transaction(async () => {
-      await this.state.delete(entry.path)
-      await this.state.setMeta?.(scanHintKey(entry.path), null)
-      await this.pending.clear(entry.fileId)
+    await transact(this.state, async (tx) => {
+      await tx.delete(entry.path)
+      await tx.setMeta?.(scanHintKey(entry.path), null)
+      await new PendingPullWrites(tx).clear(entry.fileId)
     })
     await notifyApplied(this.opts, {
       path: entry.wirePath,
@@ -624,9 +625,9 @@ export class PullPlacer {
         return 'held'
       }
       this.opts.expected.clear(occupant.path)
-      await this.state.transaction(async () => {
-        await this.state.delete(occupant.path)
-        await this.state.setMeta?.(intent, null)
+      await transact(this.state, async (tx) => {
+        await tx.delete(occupant.path)
+        await tx.setMeta?.(intent, null)
       })
       // Our removal authorizes only an absent target. A file saved while the ledger
       // deletion awaited belongs to the user; it must not become our new baseline.
@@ -675,9 +676,9 @@ export class PullPlacer {
     const have = await settledStat(this.fs, target, sha, wrote, this.hash)
     const stageId = await this.pending.stageId(change)
     const receiptId = await this.pending.receiptId(change)
-    await this.state.transaction(async () => {
-      if (from !== null) await this.state.delete(from)
-      await this.state.put({
+    await transact(this.state, async (tx) => {
+      if (from !== null) await tx.delete(from)
+      await tx.put({
         path: target,
         wirePath: change.path,
         fileId: change.file_id,
@@ -686,10 +687,10 @@ export class PullPlacer {
         size: have.size,
         mtime: have.mtime,
       })
-      await this.state.setMeta?.(scanHintKey(target), null)
-      await this.state.setMeta?.(`pull-base:${target}`, null)
-      if (from !== null) await this.state.setMeta?.(scanHintKey(from), null)
-      if (stageId === undefined) await this.pending.clear(change.file_id)
+      await tx.setMeta?.(scanHintKey(target), null)
+      await tx.setMeta?.(`pull-base:${target}`, null)
+      if (from !== null) await tx.setMeta?.(scanHintKey(from), null)
+      if (stageId === undefined) await new PendingPullWrites(tx).clear(change.file_id)
     })
     if (stageId !== undefined) {
       await discardPullStage(this.fs, stageId)

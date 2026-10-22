@@ -29,8 +29,8 @@ export async function approveCodeGroup(
   let result: DeferredApplied
   const lines: string[] = []
   try {
-    result = await vault.state.transaction(async () => {
-      if ((await vault.state.getJournal()) !== null)
+    result = await vault.state.transaction(async (tx) => {
+      if ((await tx.getJournal()) !== null)
         throw new HeldGroup('finish the interrupted sync before approval')
       const draft = await CodeDraft.create(vault.fs, disk.work, {
         effectGuard: () => {
@@ -59,7 +59,7 @@ export async function approveCodeGroup(
       }
       await draft.preload(paths)
       const engine = (running.engine = buildEngine(
-        { ...vault, fs: draft },
+        { ...vault, fs: draft, state: tx },
         {
           stillHeld: held,
           fallbackMs: DEFAULT_INTERVAL_SECONDS * 1000,
@@ -80,7 +80,7 @@ export async function approveCodeGroup(
       ) {
         throw new HeldGroup('local code changed while downloading the group')
       }
-      await disk.place(draft)
+      await disk.place(draft, tx)
       return prepared
     })
   } catch (error) {

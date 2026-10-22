@@ -9,11 +9,11 @@ it('crash discards uncommitted state and fences stale handles', async () => {
     state = new DurableStateStore(scheduler)
   await state.setCursor(2)
   await expect(
-    state.transaction(async () => {
-      await state.setCursor(9)
+    state.transaction(async (tx) => {
+      await tx.setCursor(9)
       expect(await state.reopen().getCursor()).toBe(2)
       scheduler.crash()
-      await state.setCursor(10)
+      await tx.setCursor(10)
     })
   ).rejects.toThrow('epoch')
   expect(await state.reopen().getCursor()).toBe(2)

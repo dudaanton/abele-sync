@@ -7,6 +7,7 @@ import SqliteDatabase from 'better-sqlite3'
 import type { Journal, StateEntry } from '@abele/sync-core'
 import { SqliteStateStore } from '../../src/sqliteState.js'
 import { MemoryFileSystem, refreshLocalPaths } from '@abele/sync-core'
+import { rollbackIsolation } from '../../../core/tests/helpers/stateTransactionContract.js'
 
 const entry = (over: Partial<StateEntry> = {}): StateEntry => ({
   path: 'notes/a.md',
@@ -49,6 +50,58 @@ afterEach(async () => {
 })
 
 describe('SqliteStateStore', () => {
+  it('isolates unrelated writes from a suspended SQLite transaction rollback', async () => {
+    await rollbackIsolation(store)
+  })
+  it('preserves SQLite uniqueness in scoped reads, including nested transactions', async () => {
+    await store.put(entry())
+    await store.transaction(async (tx) => {
+      await tx.put(entry({ path: 'notes/b.md', wirePath: 'notes/b.md' }))
+      expect(await tx.get('notes/a.md')).toBeNull()
+      await tx.transaction(async (nested) => {
+        await nested.put(entry({ path: 'notes/c.md', wirePath: 'notes/b.md', fileId: 'other' }))
+        expect(await nested.get('notes/b.md')).toBeNull()
+      })
+      expect(await tx.byFileId('file-1')).toBeNull()
+    })
+    expect(await store.get('notes/c.md')).toMatchObject({ fileId: 'other' })
+  })
+  it('rejects a stale patch after an independent connection commits', async () => {
+    const other = SqliteStateStore.open(file)
+    try {
+      await expect(
+        store.transaction(async (tx) => {
+          await tx.setCursor(20)
+          other.setMeta('outside', 'survives')
+        })
+      ).rejects.toMatchObject({ code: 'conflict' })
+      expect(await store.getCursor()).toBe(0)
+      expect(store.getMeta('outside')).toBe('survives')
+    } finally {
+      other.close()
+    }
+  })
+  it('rolls back the whole published patch when ownership is lost before SQL commit', async () => {
+    store.close()
+    let armed = false
+    store = SqliteStateStore.open(file, {
+      effectGuard: () => {
+        if (armed && store.getMeta('atomic') === 'written') throw new Error('lost before commit')
+      },
+    })
+    await expect(
+      store.transaction(async (tx) => {
+        await tx.put(entry())
+        await tx.setCursor(20)
+        await tx.setMeta!('atomic', 'written')
+        armed = true
+      })
+    ).rejects.toThrow('lost before commit')
+    armed = false
+    expect(store.getMeta('atomic')).toBeNull()
+    expect(await store.getCursor()).toBe(0)
+    expect(await collect(store)).toEqual([])
+  })
   it('rekeys a normalization-only local rename with exactly one SQLite file identity', async () => {
     const fs = new MemoryFileSystem()
     const original = entry({ path: 'й/ё.md', wirePath: 'й/ё.md' })
@@ -67,10 +120,10 @@ describe('SqliteStateStore', () => {
     store.setMeta('status', 'before')
     const snapshot = SqliteStateStore.openReadOnlySnapshot(file)
     try {
-      expect(await snapshot.transaction(async () => snapshot.getMeta('status'))).toBe('before')
-      await store.transaction(async () => {
-        await store.put(entry({ versionId: 'ver-2' }))
-        store.setMeta('status', 'after')
+      expect(await snapshot.transaction(async (tx) => tx.getMeta!('status'))).toBe('before')
+      await store.transaction(async (tx) => {
+        await tx.put(entry({ versionId: 'ver-2' }))
+        await tx.setMeta!('status', 'after')
       })
       expect(snapshot.getMeta('status')).toBe('before')
       expect(await snapshot.get('notes/a.md')).toMatchObject({ versionId: 'ver-1' })
@@ -184,9 +237,9 @@ describe('SqliteStateStore', () => {
   })
 
   it('runs the callback inside a transaction and returns its value', async () => {
-    const result = await store.transaction(async () => {
-      await store.put(entry())
-      await store.setCursor(7)
+    const result = await store.transaction(async (tx) => {
+      await tx.put(entry())
+      await tx.setCursor(7)
       return 'done'
     })
     expect(result).toBe('done')
@@ -201,11 +254,11 @@ describe('SqliteStateStore', () => {
 
     const boom = new Error('boom')
     await expect(
-      store.transaction(async () => {
-        await store.put(entry({ path: 'notes/b.md', wirePath: 'notes/b.md', fileId: 'file-2' }))
-        await store.delete('notes/a.md')
-        await store.setCursor(99)
-        await store.setJournal(null)
+      store.transaction(async (tx) => {
+        await tx.put(entry({ path: 'notes/b.md', wirePath: 'notes/b.md', fileId: 'file-2' }))
+        await tx.delete('notes/a.md')
+        await tx.setCursor(99)
+        await tx.setJournal(null)
         throw boom
       })
     ).rejects.toBe(boom)
@@ -218,10 +271,10 @@ describe('SqliteStateStore', () => {
   })
 
   it('runs a nested transaction inside the outer one, committing once', async () => {
-    await store.transaction(async () => {
-      await store.put(entry())
-      await store.transaction(async () => {
-        await store.setCursor(5)
+    await store.transaction(async (tx) => {
+      await tx.put(entry())
+      await tx.transaction(async (tx) => {
+        await tx.setCursor(5)
       })
     })
     expect(await store.get('notes/a.md')).toEqual(entry())
@@ -231,10 +284,10 @@ describe('SqliteStateStore', () => {
   it('rolls the outer transaction back when a nested one throws through it', async () => {
     const boom = new Error('boom')
     await expect(
-      store.transaction(async () => {
-        await store.put(entry())
-        await store.transaction(async () => {
-          await store.setCursor(5)
+      store.transaction(async (tx) => {
+        await tx.put(entry())
+        await tx.transaction(async (tx) => {
+          await tx.setCursor(5)
           throw boom
         })
       })
@@ -248,29 +301,28 @@ describe('SqliteStateStore', () => {
     await expect(store.get('notes/a.md')).rejects.toMatchObject({ code: 'io' })
     await expect(store.put(entry())).rejects.toMatchObject({ code: 'io' })
     await expect(store.getCursor()).rejects.toMatchObject({ code: 'io' })
-    await expect(store.transaction(async () => undefined)).rejects.toMatchObject({ code: 'io' })
+    await expect(store.transaction(async (tx) => undefined)).rejects.toMatchObject({ code: 'io' })
     store = SqliteStateStore.open(file)
   })
 
   it('reports a database another writer holds as a conflict', async () => {
     const other = SqliteStateStore.open(file, { busyTimeoutMs: 0 })
-    let release = (): void => {}
-    const held = new Promise<void>((resolve) => (release = resolve))
-    const outer = store.transaction(async () => {
-      await store.put(entry())
-      await held
-    })
+    // A scoped callback no longer reserves SQLite across awaits. Hold a real SQL
+    // writer instead, so this still exercises the busy/error mapping guarantee.
+    const writer = new SqliteDatabase(file)
+    writer.exec('BEGIN IMMEDIATE')
     try {
       await expect(
-        other.transaction(async () => {
-          await other.setCursor(1)
+        other.transaction(async (tx) => {
+          await tx.setCursor(1)
         })
       ).rejects.toMatchObject({ code: 'conflict' })
     } finally {
-      release()
-      await outer
+      writer.exec('ROLLBACK')
+      writer.close()
       other.close()
     }
+    await store.put(entry())
     expect(await store.get('notes/a.md')).toEqual(entry())
   })
 
