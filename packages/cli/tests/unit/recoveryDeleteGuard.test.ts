@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, unlink } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, unlink, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { expect, it, vi } from 'vitest'
 import { readHeldDeletes, selectiveDefaults, V2EngineClient } from '@abele/sync-core'
@@ -48,8 +48,22 @@ it('BUG: nine recovered deletes plus one new delete in a 40-file vault trip the 
       deviceName: 'test',
       selective: selectiveDefaults(),
     })
-    const context = { fetch, env: {}, revokeTimeoutMs: 20, io: { out: () => {}, err: () => {} } }
+    let downloads = 0
+    const transport: typeof fetch = (input, init) => {
+      if (new URL(String(input)).pathname.endsWith('/content')) downloads++
+      return fetch(input, init)
+    }
+    const context = {
+      fetch: transport,
+      env: {},
+      revokeTimeoutMs: 20,
+      io: { out: () => {}, err: () => {} },
+    }
+    // This regression starts from a synced 40-file inventory. Adopt its existing
+    // bytes through the real CLI instead of doing 40 unrelated durable downloads.
+    for (let n = 0; n < 40; n++) await writeFile(join(dir, `file-${n}.txt`), 'original')
     expect(await runRun({ dir, once: true }, context)).toBe(0)
+    expect(downloads).toBe(0)
     raw = SqliteStateStore.open(join(stateFolder(dir), 'state.db'))
     const ops = seeded.results.slice(0, 9).map((r: CommitOpResult) => {
       if (r.status === 'rejected') throw new Error('bad fixture')
