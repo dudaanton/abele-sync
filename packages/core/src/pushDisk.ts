@@ -233,12 +233,7 @@ export class PushDisk {
 
   /** Whether the file at `path` is already the bytes named. */
   async holds(path: string, sha: string): Promise<boolean> {
-    try {
-      if ((await this.fs.stat(path)) === null) return false
-      return (await fingerprintFile(this.fs, path, this.hash)).sha === sha
-    } catch {
-      // It was there a moment ago and cannot be read now: write it, rather than assume.
-      return false
-    }
+    if ((await this.fs.stat(path)) === null) return false
+    return (await fingerprintFile(this.fs, path, this.hash)).sha === sha
   }
 }

@@ -8,6 +8,63 @@ import {
 } from '../../src/index.js'
 import { PushDisk } from '../../src/pushDisk.js'
 
+it('D-091 keeps the receipt retryable when deferred equality cannot be read', async () => {
+  const { push, resumeJournal, scan } = await import('../../src/index.js')
+  const { StagedChanges } = await import('../../src/defer.js')
+  const f = await fixture()
+  await f.state.delete('old.bin')
+  const found = await scan(f.fs, f.state, { excluded: () => false })
+  const op = found.ops[0]!
+  if (op.op !== 'create') throw new Error('expected create')
+  const failure = new Error('receipt read unavailable'),
+    read = f.fs.read.bind(f.fs)
+  let failing = true
+  const client = {
+    hasBlob: async () => true,
+    versions: async () => [],
+    commitRaw: async () => {
+      f.fs.read = async (path: string) => {
+        if (failing) throw failure
+        return read(path)
+      }
+      return {
+        replayed: false,
+        body: {
+          head_seq: 1,
+          results: [
+            {
+              status: 'applied',
+              file_id: 'file',
+              version_id: 'b',
+              seq: 1,
+              path: op.path,
+              sha: op.sha,
+              size: op.size,
+              mtime: op.mtime,
+            },
+          ],
+        },
+      }
+    },
+  } as unknown as import('../../src/engineClient.js').EngineClient
+  const staged = new StagedChanges(f.state)
+  const opts = {
+    expected: new ExpectedWrites(),
+    defer: () => true,
+    onDefer: async (items: import('../../src/defer.js').Staged[]) => {
+      await staged.stage(items)
+    },
+  }
+  await expect(push(client, f.fs, f.state, found, opts)).rejects.toBe(failure)
+  expect(await f.state.getJournal()).not.toBeNull()
+  expect(await staged.list()).toEqual([])
+  failing = false
+  await resumeJournal(client, f.fs, f.state, opts)
+  expect(await f.state.getJournal()).toBeNull()
+  expect(await staged.list()).toEqual([])
+  expect((await f.state.get('old.bin'))?.versionId).toBe('b')
+})
+
 async function fixture() {
   const fs = new MemoryFileSystem(),
     state = new MemoryStateStore(),
