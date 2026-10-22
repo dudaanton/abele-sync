@@ -31,6 +31,7 @@ interface ManifestProgress {
   seen: string[]
   firstHeld: number | null
   heldChanges?: ChangeItem[]
+  heldBases?: Record<string, string | null>
   coverageComplete?: boolean
 }
 type CachedManifestPage = ManifestResponse &
@@ -316,9 +317,21 @@ export class Puller {
           await saveProgress()
         })
         const completed = new Set(checkpoint.completed)
-        const pending = checkpoint.coverageComplete
+        let pending = checkpoint.coverageComplete
           ? [...(checkpoint.heldChanges ?? [])]
           : page.items.map(asCreate)
+        if (checkpoint.coverageComplete && checkpoint.heldBases) {
+          const retained: ChangeItem[] = []
+          for (const change of pending) {
+            const base = checkpoint.heldBases[change.file_id]
+            const current = await this.state.byFileId(change.file_id)
+            if (base !== undefined && (current?.versionId ?? null) !== base)
+              this.heldFiles.delete(change.file_id)
+            else retained.push(change)
+          }
+          pending = retained
+          this.syncHeld()
+        }
         await this.page(
           pending.filter((item) => !completed.has(item.file_id)),
           async (change) => {
@@ -329,6 +342,11 @@ export class Puller {
           }
         )
         checkpoint.heldChanges = [...this.heldFiles.values()]
+        checkpoint.heldBases ??= {}
+        for (const change of checkpoint.heldChanges)
+          if (!(change.file_id in checkpoint.heldBases))
+            checkpoint.heldBases[change.file_id] =
+              (await this.state.byFileId(change.file_id))?.versionId ?? null
         checkpoint.seen = [...this.seen].filter((id) => this.opts.recheck?.has(id))
         await this.state.transaction(async () => {
           await this.state.setMeta?.(MANIFEST_PAGE_DATA, progressPage(checkpoint, page))
@@ -348,6 +366,7 @@ export class Puller {
             seen: checkpoint.seen,
             firstHeld: this.firstHeld,
             heldChanges: [...this.report.held],
+            heldBases: checkpoint.heldBases,
           }
           await this.state.transaction(async () => {
             await this.state.setMeta?.(MANIFEST_PAGE_DATA, progressPage(progress!, next))
@@ -728,6 +747,13 @@ export class Puller {
       if (entry?.versionId === change.version_id || entry?.sha === sha) continue
       if (this.isDirty(change, entry)) continue
       if (entry !== null && (await this.placer.edited(entry))) continue
+      if (
+        entry !== null &&
+        this.opts.protectMissing &&
+        !this.opts.recheck?.has(entry.fileId) &&
+        (await this.fs.stat(entry.path)) === null
+      )
+        continue
       // Something on disk that nothing has synced: a device syncing over a copy of the vault
       // it was handed, or somebody's unsynced work. The apply adopts the first and holds the
       // second, and wants no bytes from the server for either.

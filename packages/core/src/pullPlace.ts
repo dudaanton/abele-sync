@@ -170,6 +170,8 @@ export class PullPlacer {
         throw error
       return false
     }
+    const pending = await this.pending.matching(change, entry)
+    if (pending !== null && pending.target !== target) return false
     if (entry !== null && (await this.edited(entry, target))) return false
     const from = entry === null || entry.path === target ? null : entry.path
     if (from !== null && (await this.fs.stat(from)) !== null) return false
@@ -344,7 +346,9 @@ export class PullPlacer {
       firstTarget !== null &&
       (await fingerprintFile(this.fs, target, this.hash)).sha === entry.sha &&
       sameStat(firstTarget, await this.fs.stat(target))
-    const state = movedBase ? { free: firstTarget } : await this.clear(target, from, change, sha)
+    const state = movedBase
+      ? { free: firstTarget }
+      : await this.clear(target, from, change, sha, firstTarget)
     if (state === 'held') return false
     if (state === 'aside') {
       this.opts.log?.(
@@ -595,11 +599,12 @@ export class PullPlacer {
     target: string,
     from: string | null,
     change: ChangeItem,
-    sha: string
+    sha: string,
+    observed: FileInfo | null
   ): Promise<Target> {
     const occupant = await this.state.get(target)
     if (occupant !== null) {
-      if (occupant.fileId === change.file_id) return { free: await this.fs.stat(target) }
+      if (occupant.fileId === change.file_id) return { free: observed }
       if (this.opts.dirty.has(occupant.wirePath) || (await this.edited(occupant))) {
         return 'held'
       }
@@ -618,7 +623,7 @@ export class PullPlacer {
       // deletion awaited belongs to the user; it must not become our new baseline.
       return { free: null, removed: true }
     }
-    const there = await this.fs.stat(target)
+    const there = observed
     // A case-only rename on a case-insensitive disk: what a `stat` finds at the target is the
     // very file being renamed, seen through its other spelling. Only the disk can say — on a
     // case-sensitive one those two names are two files, and the second is somebody's unsynced
