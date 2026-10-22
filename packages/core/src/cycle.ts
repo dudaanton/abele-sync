@@ -389,6 +389,9 @@ export class SyncCycle {
     // describe a disk the state does not know about yet.
     const replayed = await resumeJournal(client, fs, state, { ...common, onCommitted: tally })
     if (replayed?.reconciliationRequired) return this.cycle()
+    // Receipt settlement may replace bytes before the resumed pull. Inventory
+    // and persisted-hint validation must use those installed source stamps.
+    if (replayed !== null) inventory.invalidate()
     this.liveJournalKey = undefined
     for (const path of replayed?.kept ?? []) this.kept.add(path)
     if (!reconciliation || reconciliation.phase === 'complete') await client.syncDirectories?.()
