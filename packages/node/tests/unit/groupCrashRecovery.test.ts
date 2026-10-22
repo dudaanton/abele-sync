@@ -1,7 +1,7 @@
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
-import { expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { encodeText, selectiveDefaults } from '@abele/sync-core'
 
 // Kill the process model after a completed filesystem await. All later I/O (including
@@ -12,6 +12,7 @@ const { state: crash, run: inCrashScope } = await vi.hoisted(async () => {
     armed: false,
     dead: false,
     cut: 0,
+    phaseSteps: 0,
     points: [] as string[],
     exact: '',
     handles: new Set<{ close(): Promise<void> }>(),
@@ -19,6 +20,22 @@ const { state: crash, run: inCrashScope } = await vi.hoisted(async () => {
     root: '',
     signal: undefined as AbortSignal | undefined,
   }))
+})
+// Like FileHandle.sync below, SQLite's physical flush is not a process-crash
+// boundary. Keep the real driver/transactions/WAL, without thousands of native
+// fsyncs that cannot be intercepted by the filesystem promise mock.
+vi.mock('better-sqlite3', async (original) => {
+  const sqlite = await original<{ default: typeof import('better-sqlite3') }>()
+  return {
+    ...sqlite,
+    default: new Proxy(sqlite.default, {
+      construct(Database, args) {
+        const db = Reflect.construct(Database, args) as InstanceType<typeof Database>
+        db.pragma('synchronous = OFF')
+        return db
+      },
+    }),
+  }
 })
 vi.mock('node:fs/promises', async (original) => {
   const actual = await original<typeof import('node:fs/promises')>()
@@ -39,6 +56,8 @@ vi.mock('node:fs/promises', async (original) => {
   }
   const boundary = async (label: string, call: () => Promise<unknown>) => {
     crash.signal?.throwIfAborted()
+    if (++crash.phaseSteps > 1024)
+      throw new Error(`replay phase exceeded 1024 filesystem awaits at ${label}`)
     if (crash.dead) throw new Error('process crashed')
     let value: unknown, error: unknown
     try {
@@ -147,6 +166,16 @@ import { NodeFileSystem } from '../../src/nodeFs.js'
 import { SqliteStateStore } from '../../src/sqliteState.js'
 import { recoverNodeReplica, type NodeReplica } from '../../src/replica.js'
 
+it('the process-crash model does not benchmark SQLite power-loss flushes', async () => {
+  const { default: Database } = await import('better-sqlite3')
+  const db = new Database(':memory:')
+  try {
+    expect(db.pragma('synchronous', { simple: true })).toBe(0)
+  } finally {
+    db.close()
+  }
+})
+
 // Equivalent durable images share a recovery trace. Replay each distinct image once,
 // while still cutting and checking every lifecycle await for all three operations.
 const recoveryImages = new Set<string>()
@@ -248,6 +277,10 @@ async function replay(
     selective: selectiveDefaults(),
   }
   const vault = { dir, disk, state, cfg }
+  const recover = async (held: () => boolean = () => true) => {
+    crash.phaseSteps = 0
+    await recoverNodeReplica({ ...vault } as NodeReplica, held)
+  }
   crash.fold = fold
   crash.root = dir
   const destination = caseOnly ? (mode === 'move' ? 'File.bin' : 'FILE.BIN') : 'moved.bin'
@@ -351,7 +384,7 @@ async function replay(
       }
       crash.armed = true
       try {
-        await recoverNodeReplica({ ...vault } as NodeReplica, () => true)
+        await recover(() => true)
       } catch (error) {
         if (!crash.dead) throw error
       }
@@ -480,7 +513,7 @@ async function replay(
           crash.points = []
           crash.cut = 0
           crash.armed = true
-          await recoverNodeReplica({ ...vault } as NodeReplica, () => true)
+          await recover(() => true)
           const recoveryCount = crash.points.length
           crash.armed = false
           for (let second = 1; second <= recoveryCount; second++) {
@@ -490,7 +523,7 @@ async function replay(
             crash.cut = second
             crash.armed = true
             try {
-              await recoverNodeReplica({ ...vault } as NodeReplica, () => true)
+              await recover(() => true)
             } catch (error) {
               if (!crash.dead) throw error
             }
@@ -503,7 +536,7 @@ async function replay(
               })
             crash.handles.clear()
             try {
-              await recoverNodeReplica({ ...vault } as NodeReplica, () => true)
+              await recover(() => true)
               await check()
             } catch (error) {
               throw new Error(`${mode} lifecycle ${cut}, recovery ${second}/${recoveryCount}`, {
@@ -519,12 +552,13 @@ async function replay(
       }
     }
     // Restart composition, not an artificially reordered sequence of helpers.
-    await recoverNodeReplica({ ...vault } as NodeReplica, () => true)
+    await recover(() => true)
     await check()
-    await recoverNodeReplica(vault as NodeReplica, () => true)
+    await recover(() => true)
     await check()
     return count
   } finally {
+    crash.phaseSteps = 0
     crash.signal = undefined
     crash.armed = false
     crash.dead = false
@@ -576,24 +610,46 @@ it('D-084 preserves an in-place edit of a case-only published move on a folding 
   await run(0, 'publication', 'move', 0, true, true, true, true)
 }, 120_000)
 
+// Partition the identical exhaustive matrix, rather than charging thousands of
+// nested restarts to one wall-clock timeout. No lifecycle/recovery cut is sampled.
 for (const [caseOnly, fold] of [
   [false, false],
   [true, true],
 ] as const)
   for (const mode of ['write', 'remove', 'move'] as const)
-    it(`group ${mode} (${fold ? 'folding case-only' : 'native'}) converges after every lifecycle await and every nested recovery await`, async ({
-      signal,
-    }) => {
-      const count = await run(0, '', mode, 0, false, false, caseOnly, fold, false, signal)
-      expect(count).toBeGreaterThan(0)
-      for (let cut = 1; cut <= count; cut++) {
-        try {
-          await run(cut, '', mode, 0, true, false, caseOnly, fold, false, signal)
-        } catch (error) {
-          throw new Error(`group restart failed at await ${cut}/${count}`, { cause: error })
-        }
-      }
-      console.info(
-        `Group ${mode} recovery replayed ${count} lifecycle awaits; ${recoveryImages.size} distinct recovery images`
-      )
-    }, 600_000)
+    describe(`group ${mode} (${fold ? 'folding case-only' : 'native'}) converges after every lifecycle await and every nested recovery await`, () => {
+      let count = 0
+      const covered = new Set<number>()
+      const partitions = 64
+      beforeAll(async () => {
+        count = await run(0, '', mode, 0, false, false, caseOnly, fold)
+        expect(count).toBeGreaterThan(0)
+        expect(
+          Math.ceil(count / partitions),
+          'bounded lifecycle cuts per test'
+        ).toBeLessThanOrEqual(8)
+      }, 60_000)
+      for (let part = 0; part < partitions; part++)
+        it(`lifecycle partition ${part + 1}/${partitions}`, async ({ signal }) => {
+          const first = Math.floor((part * count) / partitions) + 1
+          const last = Math.floor(((part + 1) * count) / partitions)
+          expect(last - first + 1, 'bounded lifecycle cuts per test').toBeLessThanOrEqual(8)
+          for (let cut = first; cut <= last; cut++) {
+            try {
+              await run(cut, '', mode, 0, true, false, caseOnly, fold, false, signal)
+              covered.add(cut)
+            } catch (error) {
+              throw new Error(`group restart failed at await ${cut}/${count}`, { cause: error })
+            }
+          }
+        }, 60_000)
+      afterAll(() => {
+        expect(
+          [...covered].sort((a, b) => a - b),
+          'every lifecycle await remains covered'
+        ).toEqual(Array.from({ length: count }, (_, i) => i + 1))
+        console.info(
+          `Group ${mode} recovery replayed ${count} lifecycle awaits; ${recoveryImages.size} distinct recovery images`
+        )
+      })
+    })
