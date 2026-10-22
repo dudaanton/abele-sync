@@ -6,16 +6,20 @@ import { encodeText, selectiveDefaults } from '@abele/sync-core'
 
 // Kill the process model after a completed filesystem await. All later I/O (including
 // catch/finally cleanup) fails until restart, so a thrown exception cannot undo the cut.
-const crash = vi.hoisted(() => ({
-  armed: false,
-  dead: false,
-  cut: 0,
-  points: [] as string[],
-  exact: '',
-  handles: new Set<{ close(): Promise<void> }>(),
-  fold: false,
-  root: '',
-}))
+const { state: crash, run: inCrashScope } = await vi.hoisted(async () => {
+  const { crashScope } = await import('../helpers/crashScope.js')
+  return crashScope(() => ({
+    armed: false,
+    dead: false,
+    cut: 0,
+    points: [] as string[],
+    exact: '',
+    handles: new Set<{ close(): Promise<void> }>(),
+    fold: false,
+    root: '',
+    signal: undefined as AbortSignal | undefined,
+  }))
+})
 vi.mock('node:fs/promises', async (original) => {
   const actual = await original<typeof import('node:fs/promises')>()
   const resolveCase = async (value: unknown) => {
@@ -34,6 +38,7 @@ vi.mock('node:fs/promises', async (original) => {
     return folder
   }
   const boundary = async (label: string, call: () => Promise<unknown>) => {
+    crash.signal?.throwIfAborted()
     if (crash.dead) throw new Error('process crashed')
     let value: unknown, error: unknown
     try {
@@ -41,6 +46,7 @@ vi.mock('node:fs/promises', async (original) => {
     } catch (caught) {
       error = caught
     }
+    crash.signal?.throwIfAborted()
     if (crash.armed) {
       crash.points.push(label)
       if (crash.points.length === crash.cut || (crash.exact && label === crash.exact))
@@ -212,7 +218,11 @@ async function recoverySnapshot(dir: string, state: SqliteStateStore, mode: stri
   return { backup, raw, signature, entries }
 }
 
-async function run(
+function run(...args: Parameters<typeof replay>) {
+  return inCrashScope(() => replay(...args))
+}
+
+async function replay(
   cut = 0,
   exact: 'capture' | 'publication' | 'first-save' | 'settled-move' | '' = '',
   mode: 'write' | 'remove' | 'move' = 'write',
@@ -221,8 +231,11 @@ async function run(
   editMove: boolean | 'replacement' = false,
   caseOnly = false,
   fold = false,
-  invalidJournal = false
+  invalidJournal = false,
+  signal?: AbortSignal
 ) {
+  signal?.throwIfAborted()
+  crash.signal = signal
   const dir = await mkdtemp(join(tmpdir(), 'group-cut-'))
   const disk = new NodeFileSystem(dir)
   let state = SqliteStateStore.open(join(dir, '.abele-sync/state.db'))
@@ -440,7 +453,6 @@ async function run(
       const snapshot = await recoverySnapshot(dir, state, mode)
       try {
         if (!recoveryImages.has(snapshot.signature)) {
-          recoveryImages.add(snapshot.signature)
           state.close()
           // A closed SQLite image includes the rolled-back transaction, not a live WAL.
           await snapshot.raw.copyFile(
@@ -472,6 +484,7 @@ async function run(
           const recoveryCount = crash.points.length
           crash.armed = false
           for (let second = 1; second <= recoveryCount; second++) {
+            signal?.throwIfAborted()
             await restore()
             crash.points = []
             crash.cut = second
@@ -498,6 +511,8 @@ async function run(
               })
             }
           }
+          // A cancelled/failed replay must not mark an image as covered.
+          recoveryImages.add(snapshot.signature)
         }
       } finally {
         await snapshot.raw.rm(snapshot.backup, { recursive: true, force: true })
@@ -510,6 +525,7 @@ async function run(
     await check()
     return count
   } finally {
+    crash.signal = undefined
     crash.armed = false
     crash.dead = false
     for (const handle of crash.handles)
@@ -565,12 +581,14 @@ for (const [caseOnly, fold] of [
   [true, true],
 ] as const)
   for (const mode of ['write', 'remove', 'move'] as const)
-    it(`group ${mode} (${fold ? 'folding case-only' : 'native'}) converges after every lifecycle await and every nested recovery await`, async () => {
-      const count = await run(0, '', mode, 0, false, false, caseOnly, fold)
+    it(`group ${mode} (${fold ? 'folding case-only' : 'native'}) converges after every lifecycle await and every nested recovery await`, async ({
+      signal,
+    }) => {
+      const count = await run(0, '', mode, 0, false, false, caseOnly, fold, false, signal)
       expect(count).toBeGreaterThan(0)
       for (let cut = 1; cut <= count; cut++) {
         try {
-          await run(cut, '', mode, 0, true, false, caseOnly, fold)
+          await run(cut, '', mode, 0, true, false, caseOnly, fold, false, signal)
         } catch (error) {
           throw new Error(`group restart failed at await ${cut}/${count}`, { cause: error })
         }
