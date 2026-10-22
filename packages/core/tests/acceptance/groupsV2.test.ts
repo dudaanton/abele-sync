@@ -135,9 +135,37 @@ describe.each(process.env.ABELE_TEST_PG_URL ? (['sqlite', 'pg'] as const) : (['s
             })
             for (const d of f.devices) await d.paste(token.token, `group-${i}`)
           }
-          const rounds = async (n = 5) => {
-            for (let round = 0; round < n; round++)
-              for (const d of f.devices) for (const id of d.connections.keys()) await d.sync(id)
+          const mutations = () =>
+            f.devices.reduce(
+              (n, d) =>
+                n +
+                d.network.requests.filter(
+                  (r) =>
+                    r.method === 'PUT' ||
+                    (r.method === 'POST' && new URL(r.url).pathname.endsWith('/commit'))
+                ).length,
+              0
+            )
+          let totalSyncs = 0
+          const rounds = async (n = 5, requireIdle = true) => {
+            let syncs = 0
+            for (let round = 0; round < n; round++) {
+              const before = mutations()
+              for (const d of f.devices)
+                for (const id of d.connections.keys()) {
+                  await d.sync(id)
+                  syncs++
+                  totalSyncs++
+                }
+              if (requireIdle && mutations() === before) {
+                expect(syncs, 'bounded convergence work').toBeLessThanOrEqual(
+                  4 * f.devices.reduce((n, d) => n + d.connections.size, 0)
+                )
+                return
+              }
+            }
+            if (requireIdle)
+              throw new Error(`group rename did not reach a quiet round within ${n} passes`)
           }
           await rounds()
           const a = f.devices[0]!
@@ -178,7 +206,7 @@ describe.each(process.env.ABELE_TEST_PG_URL ? (['sqlite', 'pg'] as const) : (['s
                 (r) => r.method === 'PUT' && new URL(r.url).pathname.startsWith('/v2/uploads/')
               ).length
           )
-          await rounds(3)
+          await rounds(3, false)
           expect(await counts()).toEqual(before)
           expect(
             f.devices.map(
@@ -188,6 +216,7 @@ describe.each(process.env.ABELE_TEST_PG_URL ? (['sqlite', 'pg'] as const) : (['s
                 ).length
             )
           ).toEqual(transfers)
+          console.info(`066: ${totalSyncs} syncs across the unchanged rename/restart/idle workflow`)
         } finally {
           await f.close()
         }
