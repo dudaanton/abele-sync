@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createHash, randomUUID } from 'node:crypto'
 import { tokenFixture, success } from '../helpers/tokenFixture.js'
 import { V2SyncClient } from '../helpers/v2SyncClient.js'
@@ -410,10 +410,26 @@ for (const dialect of ['sqlite', 'pg'] as const)
 
     it('uses bounded queries for group previews even when a small path limit covers many notes', async () => {
       const f = await tokenFixture(dialect)
+      const commits = vi.spyOn(f.root, 'commit')
+      const uploads = vi.spyOn(f.root, 'upload')
       try {
         const g = success(await f.root.create('G.md', 'G'))
-        for (let i = 0; i < 32; i++)
-          await f.root.create(`n-${i}.md`, '---\ngroups: ["[[G]]"]\n---\nnote')
+        // This test measures preview queries, not 96 independent upload/commit
+        // transactions. Build the same real memberships in two protocol batches.
+        const blob = await f.root.upload(Buffer.from('---\ngroups: ["[[G]]"]\n---\nnote'))
+        const createNotes = async (first: number, count: number) => {
+          const reply = await f.root.commit(
+            Array.from({ length: count }, (_, offset) => ({
+              op: 'create' as const,
+              path: `n-${first + offset}.md`,
+              ...blob,
+              mtime: 1000,
+            }))
+          )
+          expect(reply.results).toHaveLength(count)
+          for (const result of reply.results) success(result)
+        }
+        await createNotes(0, 32)
         const child = await f.root.json('/tokens', 'POST', {
           scope: { kind: 'group', id: g.file_id },
           label: 'G',
@@ -438,8 +454,7 @@ for (const dialect of ['sqlite', 'pg'] as const)
         expect(result.items[0]!.files).toHaveLength(1)
         expect(queries).toBeLessThan(150)
         const firstQueries = queries
-        for (let i = 32; i < 96; i++)
-          await f.root.create(`n-${i}.md`, '---\ngroups: ["[[G]]"]\n---\nnote')
+        await createNotes(32, 64)
         queries = 0
         const larger = await previewTokenContent(
           { db, pepper: f.t.config.tokenPepper, dialect },
@@ -451,7 +466,11 @@ for (const dialect of ['sqlite', 'pg'] as const)
         expect(larger.items[0]!.files).toHaveLength(1)
         expect(queries).toBeLessThan(150)
         expect(queries).toBeLessThanOrEqual(firstQueries + 5)
+        expect(commits).toHaveBeenCalledTimes(3)
+        expect(uploads).toHaveBeenCalledTimes(2)
       } finally {
+        commits.mockRestore()
+        uploads.mockRestore()
         await f.close()
       }
     })
