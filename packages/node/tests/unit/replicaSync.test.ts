@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { expect, it, vi } from 'vitest'
 import { createUser } from '@abele/sync-server/src/access/tokens.js'
 import { v2Server } from '@abele/sync-server/tests/helpers/v2Server.js'
+import { DeleteHolds, DEFAULT_DELETE_WINDOW_MS } from '@abele/sync-core'
 import {
   openNodeReplica,
   buildNodeEngine,
@@ -16,6 +17,58 @@ vi.mock('node:os', async (original) => ({
   ...(await original<typeof import('node:os')>()),
   uptime: () => 1000,
 }))
+
+it('D-123 recovers an authored unconfirmed delete journal and tallies it exactly once', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'abele-delete-recovery-'))
+  const server = await v2Server()
+  let replica: NodeReplica | undefined
+  let engine: ReturnType<NodeReplica['buildEngine']> | undefined
+  try {
+    const root = await createUser(
+      { db: server.db, pepper: server.config.tokenPepper },
+      'Example',
+      server.address
+    )
+    const options = { dir: join(dir, 'files'), stateDir: join(dir, 'ledger'), key: root.token }
+    replica = await openNodeReplica(options)
+    engine = replica.buildEngine({ fallbackMs: 300_000, log() {} })
+    await replica.fs.writeAtomic('gone.txt', new TextEncoder().encode('before'), 1)
+    await engine.sync()
+    const entry = (await replica.state.get('gone.txt'))!
+    const ops = [{ op: 'delete' as const, file_id: entry.fileId, base_version_id: entry.versionId }]
+    await replica.fs.remove('gone.txt')
+    await replica.state.setJournal({
+      origin: {
+        generation: replica.state.getMeta('server-restore-generation'),
+        cursor: await replica.state.getCursor(),
+      },
+      batchId: 'authored-delete',
+      idempotencyKey: 'authored-delete',
+      ops,
+      startedAt: new Date().toISOString(),
+    })
+    await replica.client.commit(ops, 'authored-delete')
+    await engine.stop()
+    engine = undefined
+    replica.close()
+    replica = undefined
+    for (let restart = 0; restart < 2; restart++) {
+      replica = await openNodeReplica(options)
+      expect(await replica.state.getJournal()).toBeNull()
+      expect(await replica.state.byFileId(entry.fileId)).toBeNull()
+      expect(
+        await new DeleteHolds(replica.state).recent(Date.now(), DEFAULT_DELETE_WINDOW_MS)
+      ).toBe(1)
+      replica.close()
+      replica = undefined
+    }
+  } finally {
+    await engine?.stop()
+    replica?.close()
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
 
 it('retains foreign-ledger approval evidence in review without blocking a fresh stateDir', async () => {
   const rootDir = await mkdtemp(join(tmpdir(), 'abele-ledger-owner-'))

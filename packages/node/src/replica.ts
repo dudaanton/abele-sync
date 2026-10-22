@@ -249,11 +249,12 @@ function openConfiguredReplica(
           filter: vault.filter,
           ...(defer ? { defer } : {}),
           onDefer: (items) => new StagedChanges(state).stage(items),
-          onCommitted: (ops) =>
+          onCommitted: (ops, tx) =>
             holds.tally(
               Date.now(),
               ops.filter((op) => op.op === 'delete' && !confirmed.has(op.file_id)).length,
-              DEFAULT_DELETE_WINDOW_MS
+              DEFAULT_DELETE_WINDOW_MS,
+              tx
             ),
         })
       }
