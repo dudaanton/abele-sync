@@ -155,14 +155,16 @@ export async function conditionalFile(
       return
     }
     check()
-    if (verified && op.expected !== null && (await matchesVictim(victim, op.expected))) {
+    if (verified && op.expected !== null) {
       try {
         await lstat(target)
-        await unlink(victim)
-        captured = false
-        await syncParents(victim, root)
-        await retire()
-        return
+        if (await matchesVictim(victim, op.expected)) {
+          await unlink(victim)
+          captured = false
+          await syncParents(victim, root)
+          await retire()
+          return
+        }
       } catch (error) {
         if (!isMissing(error)) throw error
       }
