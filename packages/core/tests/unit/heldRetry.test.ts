@@ -78,7 +78,11 @@ it('I7: seeded random hold/adopt/retry orders never drop an unresolved held vers
       if (step === 0) {
         f.add(1)
         f.add(2)
-      } else if (random % 3 !== 0) f.add((random >>> 8) % 3)
+      } else {
+        if (random % 7 === 0) f.dirty.clear()
+        else f.dirty.add('file.bin')
+        if (random % 3 !== 0) f.add((random >>> 8) % 3)
+      }
       const report = await f.run()
       for (const held of report.held) {
         const retry = await f.run()
