@@ -125,7 +125,7 @@ export class PullPlacer {
     }
     if (normalisePath(pending.target) !== change.path) return notWritten()
     const occupant = await this.state.get(pending.target)
-    if (!replayAuthority(change.file_id, pending.base, entry, occupant)) return notWritten()
+    if (!replayAuthority(change.file_id, pending.base, entry, occupant)) return false
     // A moved source recreated since the crash belongs to the user; do not remove it.
     if (pending.from !== null && (await this.fs.stat(pending.from)) !== null) return notWritten()
     const have = await this.fs.stat(pending.target)
@@ -150,8 +150,7 @@ export class PullPlacer {
     if (sha !== change.sha || have.size !== change.size) return notWritten()
     if (!installed) return notWritten()
     if (!sameStat(have, await this.fs.stat(pending.target))) return notWritten()
-    await this.remember(change, change.sha, pending.target, have, pending.from)
-    return true
+    return this.remember(change, change.sha, pending.target, have, pending.from, entry)
   }
 
   /** A deferred path may adopt bytes already present, but never mutate the filesystem. */
@@ -176,6 +175,7 @@ export class PullPlacer {
         throw error
       return false
     }
+    if (!(await this.pending.authorizes(change, entry, target))) return false
     const pending = await this.pending.matching(change, entry)
     if (pending !== null && pending.target !== target) return false
     if (!newest && entry !== null && (await this.edited(entry, target))) return false
@@ -200,8 +200,15 @@ export class PullPlacer {
     )
       return false
     if (!sameStat(before, await this.fs.stat(target))) return false
-    await this.remember(change, change.sha, target, before, from)
-    return true
+    return this.remember(
+      change,
+      change.sha,
+      target,
+      before,
+      from,
+      entry,
+      newest && pending === null ? occupant : null
+    )
   }
 
   /** Resolve the physical spelling before considering a content request. */
@@ -330,6 +337,8 @@ export class PullPlacer {
     }
     const from = entry === null || entry.path === target ? null : entry.path
 
+    if (!(await this.pending.authorizes(change, entry, target))) return false
+
     // The first snapshot precedes the decision. A file created or edited during clear()
     // must not become the new baseline merely because the download has not begun yet.
     const firstTarget = await this.fs.stat(target)
@@ -389,8 +398,7 @@ export class PullPlacer {
       if (from !== null) {
         if (entry === null || !(await this.clearPath(from, entry))) return false
       }
-      await this.remember(change, sha, target, state.have, from)
-      return true
+      return this.remember(change, sha, target, state.have, from, entry)
     }
 
     // The bytes before anything on the disk moves: a server whose blob is not what it says
@@ -495,8 +503,7 @@ export class PullPlacer {
       this.opts.log?.(`pull: ${target} cannot be written: ${(error as Error).message}`)
       return false
     }
-    await this.remember(change, sha, target, wrote, from)
-    return true
+    return this.remember(change, sha, target, wrote, from, entry)
   }
 
   private async streamPlace(
@@ -556,14 +563,14 @@ export class PullPlacer {
           throw new EngineError('conflict', 'pull source changed before move')
         this.opts.expected.expect(target, sha)
       })
-      await this.remember(
+      return await this.remember(
         change,
         sha,
         target,
         { size: identity.size, mtime: change.mtime ?? 0 },
-        from
+        from,
+        entry
       )
-      return true
     } catch (error) {
       this.opts.expected.clear(target)
       if (!this.inTheWay(error)) throw error
@@ -684,15 +691,32 @@ export class PullPlacer {
     sha: string,
     target: string,
     wrote: { size: number; mtime: number },
-    from: string | null = null
-  ): Promise<void> {
+    from: string | null,
+    base: StateEntry | null,
+    freshReplacement: StateEntry | null = null
+  ): Promise<boolean> {
     const have = await settledStat(this.fs, target, sha, wrote, this.hash)
     const stageId = await this.pending.stageId(change)
     const receiptId = await this.pending.receiptId(change)
-    await transact(this.state, async (tx) => {
+    const recorded = await transact(this.state, async (tx) => {
+      if (!(await new PendingPullWrites(tx).authorizes(change, base, target))) return false
+      const current = await tx.byFileId(change.file_id)
+      let occupant = await tx.get(target)
+      // Only a fresh authoritative snapshot may replace a verified equal
+      // occupant. Saved intents cannot take this branch, even with equal bytes.
+      if (occupant !== null && occupant.fileId !== change.file_id && freshReplacement !== null) {
+        if (
+          !replayAuthority(change.file_id, base, current, null) ||
+          !(['path', 'wirePath', 'fileId', 'versionId', 'sha', 'size', 'mtime'] as const).every(
+            (field) => occupant![field] === freshReplacement[field]
+          )
+        )
+          return false
+        await tx.delete(target)
+        occupant = null
+      }
+      if (!replayAuthority(change.file_id, base, current, occupant)) return false
       if (from !== null) await tx.delete(from)
-      const occupant = await tx.get(target)
-      if (occupant !== null && occupant.fileId !== change.file_id) await tx.delete(target)
       await tx.put({
         path: target,
         wirePath: change.path,
@@ -706,7 +730,9 @@ export class PullPlacer {
       await tx.setMeta?.(`pull-base:${target}`, null)
       if (from !== null) await tx.setMeta?.(scanHintKey(from), null)
       if (stageId === undefined) await new PendingPullWrites(tx).clear(change.file_id)
+      return true
     })
+    if (!recorded) return false
     if (stageId !== undefined) {
       await discardPullStage(this.fs, stageId)
       await this.pending.clear(change.file_id)
@@ -720,6 +746,7 @@ export class PullPlacer {
       origin: 'remote',
       fileId: change.file_id,
     })
+    return true
   }
 
   /** The bytes for a sha: prefetched, a local file that still holds them, or the server. */

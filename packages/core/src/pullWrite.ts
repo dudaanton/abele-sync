@@ -1,6 +1,7 @@
 import type { ChangeItem } from '@abele/sync-protocol'
 import { EngineError } from './errors.js'
 import type { StateEntry, StateStore } from './state.js'
+import { replayAuthority } from './replayAuthority.js'
 
 /** Intent saved before a pull touches the disk, retired atomically with its ledger update. */
 interface PendingPullWrite {
@@ -67,6 +68,20 @@ export class PendingPullWrites {
     )
       return null
     return pending
+  }
+
+  /** A saved action must not become fresh work merely because its base no longer
+   * matches. Check every adoption/placement path, and again inside publication. */
+  async authorizes(change: ChangeItem, base: StateEntry | null, target: string): Promise<boolean> {
+    const saved = await this.read(change.file_id)
+    if (saved === null || saved.versionId !== change.version_id) return true
+    const current = await this.state.byFileId(change.file_id)
+    return (
+      saved.target === target &&
+      sameEntry(base, current) &&
+      (await this.matching(change, current)) !== null &&
+      replayAuthority(change.file_id, saved.base, current, await this.state.get(target))
+    )
   }
 
   /** A replay whose ledger already landed needs no recovery, but must retire its own intent. */
