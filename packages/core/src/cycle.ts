@@ -173,7 +173,8 @@ export class SyncCycle {
         this.filter
       )
       .catch((error: unknown) => {
-        this.ctx.log(`scope: not recorded: ${messageOf(error)}`)
+        if (!(error instanceof EngineError && error.code === 'lost'))
+          this.ctx.log(`scope: not recorded: ${messageOf(error)}`)
         throw error
       })
     this.marked = marking
@@ -415,7 +416,8 @@ export class SyncCycle {
       this.ctx.set({ reconciliation })
     }
     this.ctx.set({ cursor: first.cursor })
-    await this.staging.tidy(protect)
+    const releasedStaged = await this.staging.tidy(protect)
+    if (releasedStaged) inventory.invalidate()
     // A walk that finished has confirmed every file back in scope, or taken it.
     if (first.bootstrapped) await this.scope.settle(scope.recheck)
 
@@ -430,7 +432,8 @@ export class SyncCycle {
       () => client.scanLocal?.(scanningFs, this.ctx.signal?.(), reported) ?? Promise.resolve()
     )
     const observed =
-      earlyPull !== null || (first.applied === 0 && replayed === null && !reconciling)
+      !releasedStaged &&
+      (earlyPull !== null || (first.applied === 0 && replayed === null && !reconciling))
         ? inspection.found
         : undefined
     const found = await this.scanWork(() =>

@@ -203,10 +203,10 @@ export class Staging {
    * marks bring such a file back through a manifest walk when the scope widens, staged afresh —
    * or in scope and no longer deferred by the host, so written now as a pull would.
    */
-  async tidy(dirty: Set<string>): Promise<void> {
+  async tidy(dirty: Set<string>): Promise<boolean> {
     await this.settle(null)
     const list = await this.records.list()
-    if (list.length === 0) return
+    if (list.length === 0) return false
     const outOfScope: string[] = []
     const release: Staged[] = []
     for (const one of list) {
@@ -232,11 +232,12 @@ export class Staging {
       if (!staging) release.push(one)
     }
     await this.records.drop(outOfScope)
-    if (release.length === 0) return
+    if (release.length === 0) return false
     const held = await this.write(release, dirty)
     await this.records.drop(
       release.filter((one) => !held.has(one.change.file_id)).map((one) => one.change.file_id)
     )
+    return release.some((one) => !held.has(one.change.file_id))
   }
 
   /**
