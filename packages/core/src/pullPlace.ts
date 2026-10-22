@@ -110,7 +110,9 @@ export class PullPlacer {
     try {
       const resolved = await resolveLocalFile(this.fs, this.state, change.path, pending.target)
       if (resolved !== pending.target) return false
-    } catch {
+    } catch (error) {
+      if (!this.inTheWay(error) && !(error instanceof AbeleError && error.code === 'path_taken'))
+        throw error
       return false
     }
     const notWritten = async (): Promise<false> => {
@@ -163,7 +165,9 @@ export class PullPlacer {
         change.path,
         entry?.wirePath === change.path ? entry.path : undefined
       )
-    } catch {
+    } catch (error) {
+      if (!this.inTheWay(error) && !(error instanceof AbeleError && error.code === 'path_taken'))
+        throw error
       return false
     }
     if (entry !== null && (await this.edited(entry, target))) return false
@@ -174,18 +178,14 @@ export class PullPlacer {
     const occupant = await this.state.get(target)
     if (occupant !== null && occupant.fileId !== entry?.fileId && (await this.edited(occupant)))
       return false
-    try {
-      const sha = (await fingerprintFile(this.fs, target, this.hash)).sha
-      if (
-        sha !== change.sha ||
-        (entry !== null && sha !== entry.sha) ||
-        (occupant !== null && sha !== occupant.sha) ||
-        (await this.unclassified(target, sha))
-      )
-        return false
-    } catch {
+    const sha = (await fingerprintFile(this.fs, target, this.hash)).sha
+    if (
+      sha !== change.sha ||
+      (entry !== null && sha !== entry.sha) ||
+      (occupant !== null && sha !== occupant.sha) ||
+      (await this.unclassified(target, sha))
+    )
       return false
-    }
     if (!sameStat(before, await this.fs.stat(target))) return false
     await this.remember(change, change.sha, target, before, from)
     return true

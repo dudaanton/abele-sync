@@ -164,6 +164,9 @@ it.each([true, false])(
       expected: new ExpectedWrites(),
       filter: { excluded: () => false },
       defer: () => true,
+      onDefer: async (items: import('../../src/defer.js').Staged[]) => {
+        await new StagedChanges(f.state).stage(items)
+      },
     }
     await expect(pull(client, f.fs, f.state, opts)).rejects.toBe(failure)
     expect(await new StagedChanges(f.state).list()).toEqual([])
@@ -173,6 +176,46 @@ it.each([true, false])(
     expect(await f.state.getCursor()).toBe(2)
   }
 )
+
+it('D-090 retries a deferred adoption read failure without staging or advancing', async () => {
+  const f = await fixture()
+  await f.fs.writeAtomic('old.bin', f.b, 1)
+  await f.state.delete('old.bin')
+  await f.state.setCursor(1)
+  const failure = new Error('adoption read unavailable'),
+    read = f.fs.read.bind(f.fs)
+  let reads = 0,
+    failing = true
+  f.fs.read = async (path) => {
+    if (++reads > 1 && failing) throw failure
+    return read(path)
+  }
+  const client = {
+    changes: async (since: number) => ({
+      items: since < 2 ? [f.change] : [],
+      head_seq: 2,
+      next_since: 2,
+    }),
+    getBlob: async () => f.b,
+  } as unknown as EngineClient
+  const staged = new StagedChanges(f.state)
+  const opts = {
+    dirty: new Set<string>(),
+    expected: new ExpectedWrites(),
+    filter: { excluded: () => false },
+    defer: () => true,
+    onDefer: async (items: import('../../src/defer.js').Staged[]) => {
+      await staged.stage(items)
+    },
+  }
+  await expect(pull(client, f.fs, f.state, opts)).rejects.toBe(failure)
+  expect(await staged.list()).toEqual([])
+  expect(await f.state.getCursor()).toBe(1)
+  failing = false
+  await pull(client, f.fs, f.state, opts)
+  expect(await staged.list()).toEqual([])
+  expect(await f.state.getCursor()).toBe(2)
+})
 
 it('does not turn a post-move path metadata read failure into a retired collision intent', async () => {
   const f = await fixture(),
