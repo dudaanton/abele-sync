@@ -4,6 +4,64 @@ import { MemoryStateStore } from '../../src/state.js'
 import { V2Directories } from '../../src/v2Directories.js'
 import type { CommitOpResult, V2CommitOp } from '@abele/sync-protocol'
 
+it.each(['mkdir', 'move_directory', 'delete_directory'] as const)(
+  'D-146 directory %s replay preserves a later identity version',
+  async (kind) => {
+    const fs: FileSystem = new MemoryFileSystem(),
+      state = new MemoryStateStore()
+    fs.listDirectories = async function* () {
+      yield { path: 'new', identity: 'inode', mtime: 2 }
+    }
+    fs.listChildren = async (parent) =>
+      parent === '' ? [{ path: 'new', identity: 'inode', kind: 'directory' }] : []
+    const current = {
+      file_id: 'dir',
+      version_id: 'v2',
+      path: 'new',
+      kind: 'directory',
+      mtime: 2,
+      identity: 'inode',
+      localPath: 'new',
+    }
+    const op =
+      kind === 'mkdir'
+        ? { op: kind, path: 'old' }
+        : kind === 'move_directory'
+          ? { op: kind, file_id: 'dir', base_version_id: 'v0', to_path: 'old' }
+          : { op: kind, file_id: 'dir', base_version_id: 'v0' }
+    await state.setCursor(2)
+    await state.setMeta(
+      'v2-directories',
+      JSON.stringify({
+        schemaVersion: 2,
+        directories: [current],
+        removals: [],
+        pending: { key: 'original', op, identity: 'inode', localPath: 'old' },
+      })
+    )
+    const commit = vi.fn(async (_ops: V2CommitOp[], key: string): Promise<CommitOpResult[]> => {
+      if (key !== 'original') throw new Error('stale replay generated a second operation')
+      return [
+        {
+          status: 'applied',
+          file_id: 'dir',
+          version_id: 'v1',
+          seq: 1,
+          path: 'old',
+          sha: null,
+          size: 0,
+          mtime: 1,
+        },
+      ]
+    })
+    const directories = new V2Directories(fs, state, () => true, commit)
+    await directories.scan()
+    const saved = JSON.parse((await state.getMeta('v2-directories'))!)
+    expect(saved.directories).toEqual([current])
+    expect(saved.pending).toBeUndefined()
+  }
+)
+
 it('D-021 retires an unsafe pending directory delete once and keeps ordinary sync running', async () => {
   const fs: FileSystem = new MemoryFileSystem(),
     state = new MemoryStateStore()

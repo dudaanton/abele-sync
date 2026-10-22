@@ -332,6 +332,11 @@ export class V2Directories {
         await this.save(doc)
         return false
       }
+      // The server answer resolves the immutable request, not a newer local
+      // directory baseline received while that request was awaiting settlement.
+      const latest = await this.read()
+      if (latest.pending?.key !== pending.key) return false
+      Object.assign(doc, latest)
       if (result.status === 'rejected') {
         if (pending.op.op === 'mkdir' && refusalCodes.has(result.code)) {
           this.refuse(doc, pending.op.path, result, 'push')
@@ -348,6 +353,20 @@ export class V2Directories {
         )
           return false
         throw new AbeleError(result.code, `${result.message}: ${JSON.stringify(pending.op)}`)
+      }
+      const current = doc.directories.find((directory) => directory.file_id === result.file_id)
+      const sameBase =
+        pending.op.op === 'mkdir'
+          ? current === undefined
+          : 'base_version_id' in pending.op && current?.version_id === pending.op.base_version_id
+      if (
+        current?.version_id === result.version_id ||
+        !sameBase ||
+        (current === undefined && (await this.state.getCursor()) > result.seq)
+      ) {
+        delete doc.pending
+        await this.save(doc)
+        return false
       }
       if (pending.op.op === 'delete_directory') {
         doc.directories = doc.directories.filter((d) => d.file_id !== result.file_id)
@@ -461,6 +480,13 @@ export class V2Directories {
     const fileId = pending.op.file_id
     const old = doc.directories.find((dir) => dir.file_id === fileId)
     if (!old) return false
+    if (old.version_id !== pending.op.base_version_id) {
+      // A later remote version is not a recreated local directory. Retire only
+      // the obsolete delete request, keeping its newer identity and baseline.
+      delete doc.pending
+      await this.save(doc)
+      return true
+    }
     const inventory = await LocalPaths.forPath(this.fs, old.path, this.state)
     if (
       inventory.blocked(old.path) ||
