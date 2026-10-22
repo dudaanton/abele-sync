@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import SqliteDatabase from 'better-sqlite3'
 import type { Journal, StateEntry } from '@abele/sync-core'
 import { SqliteStateStore } from '../../src/sqliteState.js'
-import { MemoryFileSystem, refreshLocalPaths } from '@abele/sync-core'
+import { MemoryFileSystem, refreshLocalPaths, reconcileGeneration } from '@abele/sync-core'
 import { rollbackIsolation } from '../../../core/tests/helpers/stateTransactionContract.js'
 
 const entry = (over: Partial<StateEntry> = {}): StateEntry => ({
@@ -50,6 +50,35 @@ afterEach(async () => {
 })
 
 describe('SqliteStateStore', () => {
+  it.each(['cursor', 'daemon:server-restore-generation'])(
+    'rolls back generation retirement when durable publication of %s fails',
+    async (key) => {
+      await reconcileGeneration(store, 'before')
+      await store.put(entry())
+      await store.setCursor(42)
+      await store.setJournal(journal())
+      await store.setMeta('pull-write:file-1', 'retained intent')
+      const raw = new SqliteDatabase(file)
+      try {
+        raw.exec(`CREATE TRIGGER fail_generation BEFORE INSERT ON meta
+          WHEN NEW.key = '${key}' BEGIN SELECT RAISE(ABORT, 'injected durable write failure'); END`)
+        await expect(reconcileGeneration(store, 'after')).rejects.toMatchObject({ code: 'io' })
+        expect(await store.get('notes/a.md')).toEqual(entry())
+        expect(await store.getCursor()).toBe(42)
+        expect(await store.getJournal()).toEqual(journal())
+        expect(await store.getMeta('pull-write:file-1')).toBe('retained intent')
+        expect(await store.getMeta('server-restore-generation')).toBe('before')
+        expect(await store.getMeta('retired-generation:before')).toBeNull()
+        raw.exec('DROP TRIGGER fail_generation')
+        expect(await reconcileGeneration(store, 'after')).toBe(true)
+        expect(await store.getCursor()).toBe(0)
+        expect(await store.get('notes/a.md')).toBeNull()
+        expect(await store.getMeta('server-restore-generation')).toBe('after')
+      } finally {
+        raw.close()
+      }
+    }
+  )
   it('isolates unrelated writes from a suspended SQLite transaction rollback', async () => {
     await rollbackIsolation(store)
   })

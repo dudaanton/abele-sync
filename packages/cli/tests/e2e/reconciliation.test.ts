@@ -6,6 +6,7 @@ import { createUser } from '@abele/sync-server/src/access/tokens.js'
 import { runCli } from '../../src/cli.js'
 import { V2SyncClient } from '@abele/sync-server/tests/helpers/v2SyncClient.js'
 import { SqliteStateStore } from '@abele/sync-node'
+import { StateTransaction } from '@abele/sync-core'
 import { randomUUID } from 'node:crypto'
 import { sql } from 'kysely'
 
@@ -192,7 +193,7 @@ describe('restored vault recovery', () => {
         return fetch(input, init)
       }
       if (boundary === 'after reply before ledger')
-        vi.spyOn(SqliteStateStore.prototype, 'put').mockImplementationOnce(async () => {
+        vi.spyOn(StateTransaction.prototype, 'put').mockImplementationOnce(async () => {
           throw new Error('interrupted ledger write')
         })
       expect((await invoke(['run', '--dir', a, '--once'], {}, transport)).code).not.toBe(0)

@@ -1,7 +1,10 @@
-import { expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
+import { StateTransaction } from '../src/stateTransaction.js'
 import { MemoryStateStore } from '../src/state.js'
 import { GENERATION_KEY, MEMBERS_KEY, reconcileGeneration } from '../src/restoreGeneration.js'
 import { Http } from '../src/http.js'
+
+afterEach(() => vi.restoreAllMocks())
 
 it('archives untracked pull intents on first contact and atomically retires all pull authority', async () => {
   const state = new MemoryStateStore()
@@ -13,11 +16,15 @@ it('archives untracked pull intents on first contact and atomically retires all 
     JSON.parse((await state.getMeta('retired-generation:legacy'))!).metadata['pull-write:new-file']
   ).toBe(raw)
   await state.setMeta('pull-write:other-file', raw)
-  const save = state.setMeta.bind(state)
-  state.setMeta = async (key, value) => {
+  const save = StateTransaction.prototype.setMeta
+  vi.spyOn(StateTransaction.prototype, 'setMeta').mockImplementation(async function (
+    this: StateTransaction,
+    key,
+    value
+  ) {
     if (key === GENERATION_KEY) throw new Error('disk full at generation fence')
-    await save(key, value)
-  }
+    await save.call(this, key, value)
+  })
   await expect(reconcileGeneration(state, 'second')).rejects.toThrow(
     'disk full at generation fence'
   )
@@ -85,11 +92,14 @@ it('generation reset rolls back together if any durable write fails', async () =
   const state = new MemoryStateStore()
   await reconcileGeneration(state, 'old')
   await state.setCursor(42)
-  const set = state.setCursor.bind(state)
-  state.setCursor = async (seq) => {
+  const set = StateTransaction.prototype.setCursor
+  vi.spyOn(StateTransaction.prototype, 'setCursor').mockImplementation(async function (
+    this: StateTransaction,
+    seq
+  ) {
     if (seq === 0) throw new Error('disk full')
-    await set(seq)
-  }
+    await set.call(this, seq)
+  })
   await expect(reconcileGeneration(state, 'new')).rejects.toThrow('disk full')
   expect(await state.getCursor()).toBe(42)
   expect(await state.getMeta(GENERATION_KEY)).toBe('old')
