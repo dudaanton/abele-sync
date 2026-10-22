@@ -32,6 +32,14 @@ export interface CodeGroupReview {
   reason: 'journal-requires-review'
 }
 const REVIEW_KEY = 'code-approval-review:'
+/** Only our explicit mismatch is a classification; port read failures must retry. */
+class GroupOwnershipMismatch extends ExternalStateError {
+  constructor() {
+    super('recovery-required', {
+      cause: 'code approval requires its owning ledger; recovery files left untouched',
+    })
+  }
+}
 
 /** Disk undo journal paired with the enclosing SQLite transaction's commit marker. */
 export class CodeGroupDisk {
@@ -302,9 +310,7 @@ export class CodeGroupDisk {
       (typeof this.journal.ledger !== 'string' ||
         this.journal.ledger !== this.vault.state.readExternalInstanceId())
     )
-      throw new ExternalStateError('recovery-required', {
-        cause: 'code approval requires its owning ledger; recovery files left untouched',
-      })
+      throw new GroupOwnershipMismatch()
   }
 
   /** Called only while owning the vault, before a new sync or approval can see a partial group. */
@@ -343,8 +349,14 @@ export class CodeGroupDisk {
         const raw = await files.read('journal.json')
         try {
           disk.journal = parseJournal(JSON.parse(new TextDecoder().decode(raw)), vault.cfg.vaultId)
-          disk.assertOwningLedger()
         } catch {
+          await disk.retainForReview()
+          continue
+        }
+        try {
+          disk.assertOwningLedger()
+        } catch (error) {
+          if (!(error instanceof GroupOwnershipMismatch)) throw error
           await disk.retainForReview()
           continue
         }

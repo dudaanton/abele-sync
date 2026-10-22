@@ -44,6 +44,33 @@ async function prepared() {
 }
 
 describe('grouped code placement recovery', () => {
+  it('D-089 retries a valid rollback after a one-shot ledger identity read failure', async () => {
+    const { group, draft } = await prepared()
+    await expect(
+      state.transaction(async () => {
+        await group.place(draft)
+        throw new Error('stop')
+      })
+    ).rejects.toThrow('stop')
+    const journal = await new NodeFileSystem(group.work).read('journal.json')
+    const read = state.readExternalInstanceId.bind(state)
+    const failure = Object.assign(new Error('transient database read'), { code: 'SQLITE_IOERR' })
+    let once = true
+    state.readExternalInstanceId = () => {
+      if (once) {
+        once = false
+        throw failure
+      }
+      return read()
+    }
+    await expect(CodeGroupDisk.recover(vault(), () => true)).rejects.toBe(failure)
+    expect(CodeGroupDisk.reviews(vault())).toEqual([])
+    expect(await new NodeFileSystem(group.work).read('journal.json')).toEqual(journal)
+    await CodeGroupDisk.recover(vault(), () => true)
+    expect(await text(MAIN)).toBe('original()')
+    expect(await disk.stat(MANIFEST)).toBeNull()
+    expect(CodeGroupDisk.reviews(vault())).toEqual([])
+  })
   it('D-087 records the requested folded spelling rather than an earlier unrelated hard-link alias', async () => {
     const alias = '.obsidian/plugins/sample/aaa.js'
     await link(join(dir, MAIN), join(dir, alias))
