@@ -76,6 +76,9 @@ it('drops a verified victim immediately after successful publication', async () 
     await expect(
       readFile(join(root, '.abele-sync/conditional-complete/receipt/victim'))
     ).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(
+      readFile(join(root, '.abele-sync/installations/receipt/victim'))
+    ).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await readdir(join(root, '.abele-sync/conditional'))).toEqual([])
   } finally {
     await rm(root, { recursive: true, force: true })
