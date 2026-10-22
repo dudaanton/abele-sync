@@ -143,7 +143,7 @@ it('D-031 interrupts local scanning for a newly announced remote change', async 
   const bytes = new Uint8Array([8]),
     sha = await sha256(bytes),
     read = fs.read.bind(fs),
-    write = fs.writeAtomic.bind(fs)
+    write = fs.conditionalFile.bind(fs)
   let reads = 0,
     head = 1,
     beforeRemote = 0
@@ -189,13 +189,14 @@ it('D-031 interrupts local scanning for a newly announced remote change', async 
     getBlob: async () => bytes,
   } as unknown as EngineClient
   const engine = new SyncEngine({ fs, state, client, selective: selectiveDefaults() })
-  fs.writeAtomic = async (...args) => {
-    await write(...args)
-    if (args[0] === 'remote.md') {
+  fs.conditionalFile = async (op) => {
+    const applied = await write(op)
+    if (applied && op.effect.kind === 'write' && op.path === 'remote.md') {
       beforeRemote = reads
       engine.pause()
       received()
     }
+    return applied
   }
   engine.start()
   await entered
@@ -215,16 +216,17 @@ it('D-031 applies incoming work before listing or hashing the unrelated local va
   let received = false,
     listings = 0
   const list = fs.list.bind(fs),
-    write = fs.writeAtomic.bind(fs)
+    write = fs.conditionalFile!.bind(fs)
   fs.list = async function* () {
     listings++
     if (!received) throw new Error('full inventory blocks remote work')
     yield* list()
   }
   fs.listChildren = async () => []
-  fs.writeAtomic = async (...args) => {
-    await write(...args)
-    received = true
+  fs.conditionalFile = async (op) => {
+    const applied = await write(op)
+    if (applied && op.effect.kind === 'write') received = true
+    return applied
   }
   const item = {
     seq: 1,
