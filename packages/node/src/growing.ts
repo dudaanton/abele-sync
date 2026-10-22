@@ -51,6 +51,11 @@ export class SettlingFileSystem implements FileSystem, PathMatcher {
   readonly fingerprint?: FileSystem['fingerprint']
   readonly beginAtomicWrite?: FileSystem['beginAtomicWrite']
   readonly reopenStage?: FileSystem['reopenStage']
+  readonly conditionalFile?: FileSystem['conditionalFile']
+  readonly installedFile?: FileSystem['installedFile']
+  readonly discardInstallation?: FileSystem['discardInstallation']
+  readonly recoverConditionalFiles?: FileSystem['recoverConditionalFiles']
+  readonly discardStage?: FileSystem['discardStage']
 
   constructor(private readonly disk: SettleableFileSystem) {
     const watch = disk.watch
@@ -59,6 +64,12 @@ export class SettlingFileSystem implements FileSystem, PathMatcher {
     if (disk.fingerprint) this.fingerprint = disk.fingerprint.bind(disk)
     if (disk.beginAtomicWrite) this.beginAtomicWrite = disk.beginAtomicWrite.bind(disk)
     if (disk.reopenStage) this.reopenStage = disk.reopenStage.bind(disk)
+    if (disk.conditionalFile) this.conditionalFile = disk.conditionalFile.bind(disk)
+    if (disk.installedFile) this.installedFile = disk.installedFile.bind(disk)
+    if (disk.discardInstallation) this.discardInstallation = disk.discardInstallation.bind(disk)
+    if (disk.recoverConditionalFiles)
+      this.recoverConditionalFiles = disk.recoverConditionalFiles.bind(disk)
+    if (disk.discardStage) this.discardStage = disk.discardStage.bind(disk)
   }
 
   /**

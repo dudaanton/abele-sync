@@ -9,6 +9,22 @@ import { NodeFileSystem } from '../../src/nodeFs.js'
 
 let root: string
 
+it('forwards conditional publication and installation evidence through settling', async () => {
+  const disk = new NodeFileSystem(root),
+    fs = new SettlingFileSystem(disk)
+  expect(
+    await fs.conditionalFile?.({
+      path: 'file',
+      expected: null,
+      effect: { kind: 'write', bytes: new Uint8Array([1]), mtime: 1, receipt: 'receipt' },
+    })
+  ).toBe(true)
+  expect(fs.installedFile).toBeTypeOf('function')
+  expect(fs.discardInstallation).toBeTypeOf('function')
+  expect(fs.recoverConditionalFiles).toBeTypeOf('function')
+  expect(fs.discardStage).toBeTypeOf('function')
+})
+
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'abele-growing-'))
 })
