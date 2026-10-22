@@ -56,6 +56,11 @@ export class SettlingFileSystem implements FileSystem, PathMatcher {
   readonly discardInstallation?: FileSystem['discardInstallation']
   readonly recoverConditionalFiles?: FileSystem['recoverConditionalFiles']
   readonly discardStage?: FileSystem['discardStage']
+  readonly listDirectories?: FileSystem['listDirectories']
+  readonly listChildren?: FileSystem['listChildren']
+  readonly mkdir?: FileSystem['mkdir']
+  readonly moveDirectory?: FileSystem['moveDirectory']
+  readonly removeDirectory?: FileSystem['removeDirectory']
 
   constructor(private readonly disk: SettleableFileSystem) {
     const watch = disk.watch
@@ -70,6 +75,11 @@ export class SettlingFileSystem implements FileSystem, PathMatcher {
     if (disk.recoverConditionalFiles)
       this.recoverConditionalFiles = disk.recoverConditionalFiles.bind(disk)
     if (disk.discardStage) this.discardStage = disk.discardStage.bind(disk)
+    if (disk.listDirectories) this.listDirectories = disk.listDirectories.bind(disk)
+    if (disk.listChildren) this.listChildren = disk.listChildren.bind(disk)
+    if (disk.mkdir) this.mkdir = disk.mkdir.bind(disk)
+    if (disk.moveDirectory) this.moveDirectory = disk.moveDirectory.bind(disk)
+    if (disk.removeDirectory) this.removeDirectory = disk.removeDirectory.bind(disk)
   }
 
   /**
@@ -131,19 +141,6 @@ export class SettlingFileSystem implements FileSystem, PathMatcher {
     // not against the size this one happened to catch it at.
     const now = await this.disk.stat(info.path)
     if (now) this.sizes.set(info.path, now.size)
-  }
-
-  listDirectories() {
-    return this.disk.listDirectories!()
-  }
-  mkdir(path: string) {
-    return this.disk.mkdir!(path)
-  }
-  moveDirectory(from: string, to: string) {
-    return this.disk.moveDirectory!(from, to)
-  }
-  removeDirectory(path: string) {
-    return this.disk.removeDirectory!(path)
   }
 
   /* ── Everything else is the disk's own ───────────────────────────────── */

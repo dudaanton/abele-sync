@@ -1,13 +1,29 @@
 import { appendFileSync } from 'node:fs'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { EngineError, type FileInfo } from '@abele/sync-core'
+import { EngineError, type FileInfo, type FileSystem } from '@abele/sync-core'
 import { anyOf, SettlingFileSystem, type SettleableFileSystem } from '../../src/growing.js'
 import { NodeFileSystem } from '../../src/nodeFs.js'
 
 let root: string
+
+it('D-132 refuses to remove a directory replaced after inventory', async () => {
+  const disk = new NodeFileSystem(root)
+  const fs: FileSystem = new SettlingFileSystem(disk)
+  await disk.mkdir('folder')
+  let identity: string | undefined
+  for await (const directory of disk.listDirectories())
+    if (directory.path === 'folder') identity = directory.identity
+  expect(identity).toBeTypeOf('string')
+  // Keep the original inode allocated so a replacement cannot reuse its identity.
+  await rename(join(root, 'folder'), join(root, 'previous'))
+  await mkdir(join(root, 'folder'))
+  await expect(fs.removeDirectory!('folder', identity)).rejects.toMatchObject({ code: 'conflict' })
+  expect((await lstat(join(root, 'folder'))).isDirectory()).toBe(true)
+  expect((await lstat(join(root, 'previous'))).isDirectory()).toBe(true)
+})
 
 it('forwards conditional publication and installation evidence through settling', async () => {
   const disk = new NodeFileSystem(root),
