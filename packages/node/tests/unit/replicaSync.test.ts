@@ -17,7 +17,7 @@ vi.mock('node:os', async (original) => ({
   uptime: () => 1000,
 }))
 
-it('retains committed approval evidence when reopened with a fresh stateDir', async () => {
+it('retains foreign-ledger approval evidence in review without blocking a fresh stateDir', async () => {
   const rootDir = await mkdtemp(join(tmpdir(), 'abele-ledger-owner-'))
   const server = await v2Server()
   let replica: NodeReplica | undefined
@@ -41,17 +41,18 @@ it('retains committed approval evidence when reopened with a fresh stateDir', as
     const journal = await readFile(join(group.work, 'journal.json'))
     replica.close()
     replica = undefined
-    await expect(
-      openNodeReplica({ ...options, stateDir: join(rootDir, 'ledger-b') })
-    ).rejects.toMatchObject({
-      reason: 'recovery-required',
-      cause: expect.stringMatching(/owning ledger/),
-    })
+    const other = await openNodeReplica({ ...options, stateDir: join(rootDir, 'ledger-b') })
+    const reviews = CodeGroupDisk.reviews(other)
+    other.close()
+    expect(reviews).toHaveLength(1)
+    const review = join(options.dir, reviews[0]!.path)
     expect(await readFile(join(options.dir, 'example.txt'), 'utf8')).toBe('approved')
-    expect(await readFile(join(group.work, 'journal.json'))).toEqual(journal)
-    expect(await readdir(group.work)).toContain('blobs')
+    expect(await readFile(join(review, 'journal.json'))).toEqual(journal)
+    expect(await readdir(review)).toContain('blobs')
     replica = await openNodeReplica(options)
     expect(await readFile(join(options.dir, 'example.txt'), 'utf8')).toBe('approved')
+    expect(CodeGroupDisk.reviews(replica)).toHaveLength(1)
+    expect(await readFile(join(review, 'journal.json'))).toEqual(journal)
     await expect(readFile(join(group.work, 'journal.json'))).rejects.toMatchObject({
       code: 'ENOENT',
     })

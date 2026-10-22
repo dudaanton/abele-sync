@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile, readdir } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ExternalState, selectiveDefaults } from '@abele/sync-core'
@@ -255,14 +255,21 @@ describe('initial CLI recovery and lifecycle holds', () => {
     expect(readFileSync(join(path, 'incoming'), 'utf8')).toBe('retained source')
     expect(ctx.fetch).not.toHaveBeenCalled()
   })
-  it('BUG: unjournaled interrupted installation material is held rather than silently purged at startup', async () => {
+  it('retains unjournaled installation bytes for review without blocking every startup', async () => {
     const path = join(stateFolder(dir), 'code-approvals', 'group-interrupted', 'blobs')
     await mkdir(path, { recursive: true })
     await writeFile(join(path, 'retained'), 'recovery bytes')
     const ctx = context()
-    await expect(commands.run(ctx)).rejects.toMatchObject({ reason: 'recovery-required' })
-    expect(readFileSync(join(path, 'retained'), 'utf8')).toBe('recovery bytes')
-    expect(ctx.fetch).not.toHaveBeenCalled()
+    await expect(commands.run(ctx)).rejects.toMatchObject({ code: 'offline' })
+    const folder = join(stateFolder(dir), 'code-approvals')
+    const reviews = (await readdir(folder)).filter((name) =>
+      name.startsWith('review-group-interrupted-')
+    )
+    expect(reviews).toHaveLength(1)
+    expect(readFileSync(join(folder, reviews[0]!, 'blobs', 'retained'), 'utf8')).toBe(
+      'recovery bytes'
+    )
+    expect(ctx.fetch).toHaveBeenCalledTimes(1)
   })
   it('BUG: lock ownership is checked at the effect, not after the next heartbeat', async () => {
     const lock = await acquireLock(dir)
