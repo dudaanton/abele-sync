@@ -1,4 +1,4 @@
-import { caseKey, normalisePath, type ChangeItem } from '@abele/sync-protocol'
+import { AbeleError, caseKey, normalisePath, type ChangeItem } from '@abele/sync-protocol'
 import { notifyApplied } from './applied.js'
 import { bytesFor, settledStat } from './apply.js'
 import type { EngineClient } from './engineClient.js'
@@ -88,11 +88,7 @@ export class PullPlacer {
     if (have.size !== entry.size || have.mtime !== entry.mtime) return true
     // Metadata can be preserved by an editor (or rounded by a filesystem).
     // Never overwrite a target on that evidence alone.
-    try {
-      return (await fingerprintFile(this.fs, path, this.hash)).sha !== entry.sha
-    } catch {
-      return true
-    }
+    return (await fingerprintFile(this.fs, path, this.hash)).sha !== entry.sha
   }
   async settled(change: ChangeItem): Promise<void> {
     const receipt = await this.pending.receiptId(change)
@@ -141,16 +137,14 @@ export class PullPlacer {
     } catch (error) {
       if (!stageMissing(error)) throw error
     }
-    try {
-      const sha = (await fingerprintFile(this.fs, pending.target, this.hash)).sha
-      // The rename landed, but the following write did not. Keep its exact intent so
-      // recovery can replace only the proven old base at the new target.
-      if (sha !== change.sha && pending.from !== null && pending.base?.sha === sha) return false
-      if (sha !== change.sha || have.size !== change.size) return notWritten()
-      if (!installed) return notWritten()
-    } catch {
-      return notWritten()
-    }
+    // A failed read is not evidence that this installation did not happen.
+    // Keep the exact intent/receipt so a later recovery can retry verification.
+    const sha = (await fingerprintFile(this.fs, pending.target, this.hash)).sha
+    // The rename landed, but the following write did not. Keep its exact intent so
+    // recovery can replace only the proven old base at the new target.
+    if (sha !== change.sha && pending.from !== null && pending.base?.sha === sha) return false
+    if (sha !== change.sha || have.size !== change.size) return notWritten()
+    if (!installed) return notWritten()
     if (!sameStat(have, await this.fs.stat(pending.target))) return notWritten()
     await this.remember(change, change.sha, pending.target, have, pending.from)
     return true
@@ -464,10 +458,11 @@ export class PullPlacer {
         wrote = { size: bytes.length, mtime: change.mtime ?? 0 }
       }
     } catch (error) {
-      // A handled failure is not a crashed write. Do not leave authority to adopt a future edit.
+      // Operational failure can follow installation (for example its durability
+      // barrier). Preserve intent/evidence until recovery establishes the outcome.
       this.opts.expected.clear(target)
-      await this.pending.clear(change.file_id)
       if (!this.inTheWay(error)) throw error
+      await this.pending.clear(change.file_id)
       this.opts.log?.(`pull: ${target} cannot be written: ${(error as Error).message}`)
       return false
     }
@@ -578,7 +573,9 @@ export class PullPlacer {
   private async recheckTarget(wire: string, target: string): Promise<void> {
     try {
       if ((await resolveLocalFile(this.fs, this.state, wire, target)) === target) return
-    } catch {
+    } catch (error) {
+      if (!this.inTheWay(error) && !(error instanceof AbeleError && error.code === 'path_taken'))
+        throw error
       // Inventory equivalence is not permission to write through a new alias.
     }
     throw new EngineError('conflict', `normalization collision or changed parent: ${target}`)

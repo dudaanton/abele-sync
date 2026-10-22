@@ -5,6 +5,9 @@ import { PullPlacer } from '../../src/pullPlace.js'
 import { ScopeMarks } from '../../src/scope.js'
 import { recoverPendingPullWrites } from '../../src/pullRecovery.js'
 import { reconcileGeneration } from '../../src/restoreGeneration.js'
+import { pull } from '../../src/puller.js'
+import { StagedChanges } from '../../src/defer.js'
+import type { EngineClient } from '../../src/engineClient.js'
 
 async function fixture() {
   const fs = new MemoryFileSystem(),
@@ -80,6 +83,124 @@ it('does not adopt a pre-write intent when the user independently saved the plan
     )
   ).toBe(false)
   expect(await f.fs.read('old.bin')).toEqual(f.b)
+})
+
+it('keeps a proven installation intent when recovery fingerprinting has a transient read failure', async () => {
+  const f = await fixture()
+  await f.placer.pending.prepare(f.change, f.base, 'old.bin', null)
+  // Installation identity was proved by the port; the independent final fingerprint fails.
+  f.fs.installedFile = async () => true
+  await f.fs.writeAtomic('old.bin', f.b, 1)
+  const key = 'pull-write:file',
+    intent = (await f.state.getMeta(key))!
+  const parsed = JSON.parse(intent)
+  parsed.receiptId = 'receipt'
+  await f.state.setMeta(key, JSON.stringify(parsed))
+  const read = f.fs.read.bind(f.fs),
+    failure = new Error('transient disk read')
+  let once = true
+  f.fs.read = async (path) => {
+    if (once) {
+      once = false
+      throw failure
+    }
+    return read(path)
+  }
+  await expect(f.placer.adopt(f.change, f.base)).rejects.toBe(failure)
+  expect(await f.state.getMeta(key)).toBe(JSON.stringify(parsed))
+  expect(await f.placer.adopt(f.change, f.base)).toBe(true)
+  expect((await f.state.get('old.bin'))?.versionId).toBe('b')
+})
+
+it('keeps the buffered write receipt after an operational failure with an uncertain installed effect', async () => {
+  const f = await fixture(),
+    effect = f.fs.conditionalFile.bind(f.fs)
+  const failure = new Error('flush failed after installation')
+  let calls = 0
+  f.fs.conditionalFile = async (op) => {
+    calls++
+    await effect(op)
+    throw failure
+  }
+  await expect(f.placer.place(f.change, f.change.sha!, f.base, new Map(), new Map())).rejects.toBe(
+    failure
+  )
+  expect(await f.state.getMeta('pull-write:file')).not.toBeNull()
+  expect(await f.fs.read('old.bin')).toEqual(f.b)
+  await recoverPendingPullWrites(f.fs, f.state, ['file'])
+  expect((await f.state.get('old.bin'))?.versionId).toBe('b')
+  expect(await f.state.getMeta('pull-write:file')).toBeNull()
+  expect(calls).toBe(1)
+})
+
+it.each([true, false])(
+  'does not turn an equality read error into a persistent approval decision (tracked %s)',
+  async (tracked) => {
+    const f = await fixture()
+    await f.fs.writeAtomic('old.bin', f.b, 1)
+    if (tracked) await f.state.put({ ...f.base, sha: f.change.sha! })
+    else await f.state.delete('old.bin')
+    await f.state.setCursor(1)
+    const read = f.fs.read.bind(f.fs),
+      failure = new Error('equality read failed')
+    let once = true
+    f.fs.read = async (path) => {
+      if (once) {
+        once = false
+        throw failure
+      }
+      return read(path)
+    }
+    const client = {
+      changes: async (since: number) => ({
+        items: since < 2 ? [f.change] : [],
+        head_seq: 2,
+        next_since: 2,
+      }),
+      getBlob: async () => f.b,
+    } as unknown as EngineClient
+    const opts = {
+      dirty: new Set<string>(),
+      expected: new ExpectedWrites(),
+      filter: { excluded: () => false },
+      defer: () => true,
+    }
+    await expect(pull(client, f.fs, f.state, opts)).rejects.toBe(failure)
+    expect(await new StagedChanges(f.state).list()).toEqual([])
+    expect(await f.state.getCursor()).toBe(1)
+    await pull(client, f.fs, f.state, opts)
+    expect(await new StagedChanges(f.state).list()).toEqual([])
+    expect(await f.state.getCursor()).toBe(2)
+  }
+)
+
+it('does not turn a post-move path metadata read failure into a retired collision intent', async () => {
+  const f = await fixture(),
+    effect = f.fs.conditionalFile.bind(f.fs),
+    get = f.state.getMeta.bind(f.state)
+  const change = { ...f.change, path: 'new.bin', prev_path: 'old.bin', op: 'move' as const }
+  const failure = new Error('path metadata read failed')
+  let moved = false,
+    once = true
+  f.fs.conditionalFile = async (op) => {
+    const applied = await effect(op)
+    if (applied && op.effect.kind === 'move') moved = true
+    return applied
+  }
+  f.state.getMeta = async (key) => {
+    if (moved && once && key === 'normalization-collisions') {
+      once = false
+      throw failure
+    }
+    return get(key)
+  }
+  await expect(f.placer.place(change, change.sha!, f.base, new Map(), new Map())).rejects.toBe(
+    failure
+  )
+  expect(await f.state.getMeta('pull-write:file')).not.toBeNull()
+  await recoverPendingPullWrites(f.fs, f.state, ['file'], { getBlob: async () => f.b })
+  expect(await f.fs.read('new.bin')).toEqual(f.b)
+  expect(await f.state.getMeta('pull-write:file')).toBeNull()
 })
 
 it('equal-target adoption cannot remove a source edited during destination hashing', async () => {

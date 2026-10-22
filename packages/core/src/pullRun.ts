@@ -466,11 +466,7 @@ export class Puller {
     if (this.opts.dirty.has(change.path)) return false
     const there = await this.fs.stat(change.path)
     if (there === null) return false
-    try {
-      return (await fingerprintFile(this.fs, change.path, this.hash)).sha === change.sha
-    } catch {
-      return false
-    }
+    return (await fingerprintFile(this.fs, change.path, this.hash)).sha === change.sha
   }
 
   /**
