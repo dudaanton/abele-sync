@@ -203,7 +203,8 @@ export class Puller {
       const first = this.holds.earliest()
       const savedCursor = first === null ? durable.head : Math.min(durable.head, first - 1)
       this.inventoryComplete = durable.inventoryComplete && this.report.cursor === savedCursor
-      if (this.inventoryComplete) this.reached = durable.head
+      // Ordinary feed retries start at the published cursor. Manifest resumes
+      // use their saved snapshot head inside bootstrap(), without rewalking zero.
       this.syncHeld()
       await this.client.rememberManifest?.(
         [...this.heldFiles.values()]
