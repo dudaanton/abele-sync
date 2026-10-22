@@ -324,6 +324,9 @@ export class SyncCycle {
         holding
       )
       this.ctx.set({ cursor: earlyPull.cursor })
+      // Retire empty remote departures before directory publication can mistake
+      // their old local spellings for newly created local directories.
+      await client.finishPull?.()
     }
     await this.scanWork(() => refreshLocalPaths(scanningFs, state))
     if (reconciling || (priorReconciliation && priorReconciliation.phase !== 'complete'))

@@ -90,8 +90,11 @@ export interface NodeFileSystemOptions {
  * is swept by `sweepTemp`, which the daemon calls once it holds the lock and nobody else does.
  */
 export class NodeFileSystem implements FileSystem {
-  conditionalFile(operation: ConditionalFileOperation): Promise<boolean> {
-    return conditionalFile(this.base, operation, () => this.checkEffect())
+  async conditionalFile(operation: ConditionalFileOperation): Promise<boolean> {
+    const applied = await conditionalFile(this.base, operation, () => this.checkEffect())
+    if (applied && (operation.effect.kind === 'remove' || operation.effect.kind === 'move'))
+      await this.pruneAbove(operation.path)
+    return applied
   }
   installedFile(receipt: string, path: string, sha: string): Promise<boolean> {
     return installedFile(this.base, receipt, path, sha)
