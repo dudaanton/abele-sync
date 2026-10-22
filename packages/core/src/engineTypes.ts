@@ -32,7 +32,8 @@ export interface EngineStatus {
   /**
    * Ops the last scan found, from the scan until the push has recorded them; then the paths
    * that push left for the next one — files that changed while it was in the air, and the
-   * files of ops the server refused. Paths, not ops, after the push: a refused move counts
+   * paths of ops the server or host refused, including directory subtrees. Paths, not ops,
+   * after the push: a refused move counts
    * both ends, since both are the next scan's to settle.
    */
   pending: number
@@ -213,6 +214,9 @@ export function classifyFailure(error: unknown): SyncFailure {
 /** Two pulls of one sync as one report: what both applied, and what the second still held. */
 export function fold(first: PullReport, again: PullReport): PullReport {
   return {
+    ...(first.rejected || again.rejected
+      ? { rejected: [...(first.rejected ?? []), ...(again.rejected ?? [])] }
+      : {}),
     applied: first.applied + again.applied,
     held: again.held,
     skipped: first.skipped + again.skipped,

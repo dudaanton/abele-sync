@@ -4,10 +4,12 @@ import {
   V2CommitOpSchema,
   V2ManifestItemSchema,
   PathSchema,
+  ErrorCodeSchema,
   type V2CommitOp,
   type V2ManifestItem,
   type CommitOpResult,
 } from '@abele/sync-protocol'
+import type { Refusal } from './pusher.js'
 import { z } from 'zod'
 import type { FileSystem } from './fs.js'
 import type { StateEntry, StateStore } from './state.js'
@@ -18,6 +20,18 @@ const DocumentSchema = z
   .object({
     schemaVersion: z.literal(2).optional(),
     incoming: z.array(V2ManifestItemSchema).optional(),
+    refused: z
+      .array(
+        z
+          .object({
+            path: PathSchema,
+            code: ErrorCodeSchema,
+            message: z.string(),
+            direction: z.enum(['push', 'pull']),
+          })
+          .strict()
+      )
+      .optional(),
     directories: z.array(
       z
         .object({
@@ -58,15 +72,39 @@ interface LocalDirectory extends DirectoryItem {
 interface Document {
   schemaVersion?: 2
   incoming?: V2ManifestItem[]
+  refused?: DirectoryRefusal[]
   directories: LocalDirectory[]
   pending?: { key: string; op: V2CommitOp; identity: string; localPath?: string }
   removals: Array<string | { localPath: string; identity: string; path: string }>
+}
+
+export interface DirectoryRefusal extends Refusal {
+  path: string
+  direction: 'push' | 'pull'
+}
+
+// These codes are item refusals in an op result or a host mkdir. HTTP forbidden
+// still revokes connection authority and must abort rather than suppress a path.
+const refusalCodes = new Set([
+  'quota_exceeded',
+  'leaves_scope',
+  'invalid_path',
+  'too_large',
+  'scripts_forbidden',
+  'path_taken',
+  'case_collision',
+  'forbidden',
+])
+function itemRefusal(error: unknown): error is AbeleError {
+  return error instanceof AbeleError && refusalCodes.has(error.code)
 }
 
 /** Directory operations share the engine's durable state and idempotent commit transport.
  * The journal precedes the request; uncertain responses replay the identical operation.
  * Remote directory deletion only removes empty folders, never unsynced bytes recursively. */
 export class V2Directories {
+  private refused: DirectoryRefusal[] = []
+  private readonly refusedPaths = new Map<string, DirectoryRefusal>()
   constructor(
     private readonly fs: FileSystem,
     private readonly state: StateStore,
@@ -76,13 +114,49 @@ export class V2Directories {
   ) {}
   private async read(): Promise<Document> {
     const raw = await this.state.getMeta!(KEY)
-    return raw === null
-      ? { directories: [], removals: [] }
-      : (DocumentSchema.parse(JSON.parse(raw)) as Document)
+    const doc =
+      raw === null
+        ? { directories: [], removals: [] }
+        : (DocumentSchema.parse(JSON.parse(raw)) as Document)
+    this.indexRefusals(doc.refused ?? [])
+    return doc
   }
   private save(doc: Document, state: StateStore = this.state) {
     doc.schemaVersion = 2
+    this.indexRefusals(doc.refused ?? [])
     return state.setMeta!(KEY, JSON.stringify(doc))
+  }
+  async loadRefusals(retry = false): Promise<void> {
+    const doc = await this.read()
+    if (retry && doc.refused?.length) {
+      doc.refused = []
+      await this.save(doc)
+    }
+  }
+  refusalFor(path: string): DirectoryRefusal | undefined {
+    path = wirePath(path)
+    // Cost follows path depth, not the number of refused folders times every file.
+    for (;;) {
+      const refusal = this.refusedPaths.get(path)
+      if (refusal) return refusal
+      const slash = path.lastIndexOf('/')
+      if (slash < 0) return undefined
+      path = path.slice(0, slash)
+    }
+  }
+  private indexRefusals(items: DirectoryRefusal[]) {
+    this.refused = items
+    this.refusedPaths.clear()
+    for (const item of items) this.refusedPaths.set(item.path, item)
+  }
+  refusals(): readonly DirectoryRefusal[] {
+    return this.refused
+  }
+  private refuse(doc: Document, path: string, error: Refusal, direction: 'push' | 'pull') {
+    doc.refused = [
+      ...(doc.refused ?? []).filter((item) => item.path !== path),
+      { path, code: error.code, message: error.message, direction },
+    ]
   }
   async receive(item: DirectoryItem) {
     this.signal?.throwIfAborted()
@@ -90,6 +164,16 @@ export class V2Directories {
     if (!this.fs.mkdir || !this.fs.listDirectories)
       throw new AbeleError('invalid_request', 'host directory filesystem ports are required')
     const doc = await this.read()
+    if (this.refusalFor(item.path)?.direction === 'pull') {
+      // Keep the latest identity without retrying mkdir. A delayed departure of an
+      // older directory at this spelling must not retire the replacement's refusal.
+      doc.incoming = [
+        ...(doc.incoming ?? []).filter((d) => d.file_id !== item.file_id && d.path !== item.path),
+        item,
+      ]
+      await this.save(doc)
+      return
+    }
     const old = doc.directories.find((d) => d.file_id === item.file_id)
     // Place the destination, then let file events move only tracked content. Moving
     // the entire source directory would relocate unsent bytes and local-only folders.
@@ -100,7 +184,15 @@ export class V2Directories {
       return
     }
     const target = inventory.resolve(item.path, 'directory')
-    await this.fs.mkdir(target)
+    try {
+      await this.fs.mkdir(target)
+    } catch (error) {
+      if (!itemRefusal(error)) throw error
+      this.refuse(doc, item.path, error, 'pull')
+      doc.incoming = [...(doc.incoming ?? []).filter((d) => d.file_id !== item.file_id), item]
+      await this.save(doc)
+      return
+    }
     let after = await LocalPaths.forPath(this.fs, item.path, this.state)
     let placed = after.directory(after.resolve(item.path, 'directory'))
     if (!placed && old && this.fs.moveDirectory) {
@@ -123,11 +215,16 @@ export class V2Directories {
       })
     doc.directories = doc.directories.filter((d) => d.file_id !== item.file_id)
     doc.directories.push({ ...item, identity, localPath: placed.path })
+    // A remote directory now exists: an earlier refused publication is satisfied.
+    doc.refused = doc.refused?.filter((entry) => entry.path !== item.path)
     doc.incoming = (doc.incoming ?? []).filter((d) => d.file_id !== item.file_id)
     await this.save(doc)
   }
   async departed(fileId: string, keep = false) {
     const doc = await this.read()
+    const waiting = doc.incoming?.find((item) => item.file_id === fileId)
+    if (waiting?.kind === 'directory')
+      doc.refused = doc.refused?.filter((item) => item.path !== waiting.path)
     doc.incoming = (doc.incoming ?? []).filter((d) => d.file_id !== fileId)
     const old = doc.directories.find((d) => d.file_id === fileId)
     if (!old) {
@@ -218,12 +315,24 @@ export class V2Directories {
       } catch (error) {
         // Only a definitive validator rejection retires the immutable request.
         // Network failures and uncertain outcomes keep the original key and bytes.
+        if (pending.op.op === 'mkdir' && itemRefusal(error) && error.code !== 'forbidden') {
+          this.refuse(doc, pending.op.path, error, 'push')
+          delete doc.pending
+          await this.save(doc)
+          return false
+        }
         if (!(error instanceof AbeleError) || error.code !== 'invalid_path') throw error
         delete doc.pending
         await this.save(doc)
         return false
       }
       if (result.status === 'rejected') {
+        if (pending.op.op === 'mkdir' && refusalCodes.has(result.code)) {
+          this.refuse(doc, pending.op.path, result, 'push')
+          delete doc.pending
+          await this.save(doc)
+          return false
+        }
         delete doc.pending
         await this.save(doc)
         if (
@@ -252,7 +361,13 @@ export class V2Directories {
       await this.save(doc)
       return true
     }
-    if (doc.pending && !(await record(doc.pending))) return
+    const pending = doc.pending
+    if (
+      pending &&
+      !(await record(pending)) &&
+      !(pending.op.op === 'mkdir' && this.refusalFor(pending.op.path))
+    )
+      return
     const local: Array<{ path: string; identity: string; mtime: number }> = []
     const inventory = beforeReplay
     for await (const dir of this.fs.listDirectories()) {
@@ -272,6 +387,9 @@ export class V2Directories {
         old.identity = current.identity
       }
     }
+    doc.refused = doc.refused?.filter(
+      (item) => item.direction === 'pull' || local.some((dir) => wirePath(dir.path) === item.path)
+    )
     await this.save(doc)
     const missing = doc.directories.filter(
       (d) =>
@@ -286,6 +404,7 @@ export class V2Directories {
     for (const old of roots.sort((a, b) => a.path.length - b.path.length)) {
       this.signal?.throwIfAborted()
       const moved = local.find((l) => l.identity === old.identity)
+      if (this.refusalFor(old.path) || (moved && this.refusalFor(moved.path))) continue
       // A widened/reset scope needs its snapshot before absence is a deletion.
       // The next ordinary cycle can delete missing folders on a known baseline.
       if (!moved && (await this.state.getCursor()) === 0) continue
@@ -315,6 +434,7 @@ export class V2Directories {
     }
     for (const dir of local.sort((a, b) => a.path.length - b.path.length)) {
       this.signal?.throwIfAborted()
+      if (this.refusalFor(dir.path)) continue
       if (doc.directories.some((d) => d.path === wirePath(dir.path))) continue
       doc.pending = {
         key: crypto.randomUUID(),

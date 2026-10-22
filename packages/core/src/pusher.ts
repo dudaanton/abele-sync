@@ -5,6 +5,7 @@ import {
   type CommitResponse,
   type ErrorCode,
   type JoinPrefer,
+  type V2CommitOp,
 } from '@abele/sync-protocol'
 import { notifyApplied, type AppliedChange } from './applied.js'
 import { pool } from './apply.js'
@@ -49,9 +50,9 @@ export { batches } from './pushBatches.js'
 /** How many blobs are uploaded at once when the caller names no number. */
 const DEFAULT_CONCURRENCY = 2
 
-/** An op the server would not take, and what it said about it. */
+/** An op the server or host refused, and its explanation. Directories name their subtree. */
 export interface RejectedOp {
-  op: CommitOp
+  op: CommitOp | Extract<V2CommitOp, { op: 'mkdir' }>
   code: ErrorCode
   message: string
 }
@@ -83,6 +84,7 @@ export interface PushReport {
   merged: number
   /** Ops whose bytes were copied aside, leaving the head where it was. */
   conflicts: number
+  /** File refusals and refused mkdir subtrees. A mkdir has a path, no file id or sha. */
   rejected: RejectedOp[]
   /** True when the server read an answer back rather than applying a batch. */
   replayed: boolean
@@ -194,7 +196,7 @@ export async function push(
   await pusher.refresh(scan)
   const newKey = opts.keys ?? (() => crypto.randomUUID())
   const sources = sourcesFromScan(fs, scan, state)
-  const all = batches(pusher.sendable(preferring(scan.ops, opts.prefer)))
+  const all = batches(await pusher.sendable(preferring(scan.ops, opts.prefer)))
   const progress = opts.onProgress
   if (progress !== undefined)
     pusher.countDown(
@@ -328,10 +330,20 @@ class Pusher {
    * file stays as it is, the engine keeps its path clear of the pulls, and the next scan
    * offers it again, to be turned away here again until its bytes or the cap change.
    */
-  sendable(ops: CommitOp[]): CommitOp[] {
+  async sendable(ops: CommitOp[], checkPaths = true): Promise<CommitOp[]> {
     const kept: CommitOp[] = []
     for (const op of ops) {
-      const refusal = 'sha' in op ? this.refused.get(op.sha) : undefined
+      const path =
+        checkPaths && this.client.pathRefusal
+          ? op.op === 'create'
+            ? op.path
+            : op.op === 'move'
+              ? op.to_path
+              : (await this.state.byFileId(op.file_id))?.wirePath
+          : undefined
+      const refusal =
+        (path === undefined ? undefined : this.client.pathRefusal?.(path)) ??
+        ('sha' in op ? this.refused.get(op.sha) : undefined)
       const wait = 'sha' in op ? this.waiting.get(op.sha) : undefined
       if (refusal === undefined && wait === undefined) {
         kept.push(op)
@@ -420,7 +432,9 @@ class Pusher {
     }
     await this.state.setJournal(journal)
     await this.upload(ops, sources)
-    const sending = this.sendable(ops)
+    // Path refusals filter fresh work before journaling. An uncertain old request
+    // must replay unchanged, even if a later mkdir was refused for its parent.
+    const sending = await this.sendable(ops, false)
     if (sending.length === 0) {
       await this.state.setJournal(null)
       return

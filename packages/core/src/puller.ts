@@ -1,4 +1,4 @@
-import type { ChangeItem } from '@abele/sync-protocol'
+import type { ChangeItem, ErrorCode } from '@abele/sync-protocol'
 import type { EngineClient } from './engineClient.js'
 import type { ExpectedWrites } from './echo.js'
 import type { FileSystem } from './fs.js'
@@ -91,6 +91,8 @@ export interface PullOptions {
 }
 
 export interface PullReport {
+  /** Explicit host directory refusals, passed over without content requests. */
+  rejected?: Array<{ change: ChangeItem; code: ErrorCode; message: string }>
   /** Changes this run brought onto the disk. */
   applied: number
   /** Changes the local edits made it unsafe to apply, in the order they were read. */

@@ -475,6 +475,18 @@ export class Puller {
     const staged: Staged[] = []
     for (const change of wanted) {
       checkCancellation(this.opts.signal)
+      const refusal = this.client.pathRefusal?.(change.path)
+      if (refusal) {
+        ;(this.report.rejected ??= []).push({
+          change,
+          code: refusal.code,
+          message: refusal.message,
+        })
+        this.report.skipped++
+        this.resolve(change)
+        await completed?.(change)
+        continue
+      }
       const stage = await this.staging(change)
       if (stage === null) taking.push(change)
       else staged.push(stage)

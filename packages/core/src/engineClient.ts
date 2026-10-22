@@ -69,4 +69,10 @@ export interface EngineClient {
   scanLocal?(fs: FileSystem, signal?: AbortSignal, changed?: ReadonlySet<string>): Promise<void>
   syncDirectories?(): Promise<void>
   finishPull?(): Promise<void>
+  /** Durable per-directory refusals suppress requests for the entire subtree until
+   * an explicit rescan, disappearance, remote satisfaction, or generation reset. */
+  directoryRefusals?(): readonly import('./v2Directories.js').DirectoryRefusal[]
+  pathRefusal?(path: string): import('./pusher.js').Refusal | undefined
+  /** Clear refusals after prepare and a durable manifest rewind. Engine rescan orders this. */
+  retryRefusedDirectories?(): Promise<void>
 }

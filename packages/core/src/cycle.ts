@@ -97,6 +97,7 @@ export class SyncCycle {
   unscanned = true
   /** Set by `rescan`: the next run winds the cursor back to 0 before it pulls. */
   rewind = false
+  retryRefusedDirectories = false
   /** Set once a run has started or ended with the cursor above 0: no preference is sent again. */
   private joined = false
   /** Only a batch this live engine just sent is known not to originate in a restored profile. */
@@ -215,6 +216,7 @@ export class SyncCycle {
    */
   async cycle(): Promise<SyncReport> {
     const { client, fs, state } = this.ctx.opts
+    if (this.retryRefusedDirectories) this.rewind = true
     const inventory = scanSnapshot(fs, () => this.ctx.signal?.())
     const scanningFs = stoppableListings(inventory.fs, () => this.ctx.signal?.())
     const generationBefore = await state.getMeta?.(GENERATION_KEY)
@@ -316,10 +318,7 @@ export class SyncCycle {
       (await this.holds.decision()) === null
     ) {
       if (this.rewind) {
-        this.rewind = false
-        await state.setCursor(0)
-        await state.setMeta?.('pull-manifest-progress', null)
-        await state.setMeta?.('pull-manifest-page', null)
+        await this.rewindPull()
       }
       const holding = await this.holds.held()
       await this.ctx.watch.examine()
@@ -382,10 +381,7 @@ export class SyncCycle {
     if (filed?.decision.kind === 'restore') await this.gate.putBack(filed.decision)
 
     if (this.rewind) {
-      this.rewind = false
-      await state.setCursor(0)
-      await state.setMeta?.('pull-manifest-progress', null)
-      await state.setMeta?.('pull-manifest-page', null)
+      await this.rewindPull()
     }
     // Carried out once the feed is rewound: killed before that, the next run does it again.
     if (filed?.decision.kind === 'restore') await this.holds.settle(filed.raw)
@@ -521,6 +517,16 @@ export class SyncCycle {
       this.ctx.set({ cursor: secondPull.cursor })
     }
     if (!this.ctx.stopping()) await client.finishPull?.()
+    // Include refusals discovered by either pull, not only directory publication.
+    for (const refusal of client.directoryRefusals?.() ?? []) {
+      pushed.rejected.push({
+        op: { op: 'mkdir', path: refusal.path },
+        code: refusal.code,
+        message: refusal.message,
+      })
+      this.kept.add(refusal.path)
+    }
+    this.ctx.set({ pending: this.kept.size })
     if (reconciliation && reconciliation.phase !== 'complete') {
       const unresolved =
         (await this.holds.list()).length > 0 ||
@@ -553,6 +559,20 @@ export class SyncCycle {
   private async joinMarked(): Promise<boolean> {
     const state = this.ctx.opts.state
     return state.getMeta !== undefined && (await state.getMeta(JOIN_KEY)) !== null
+  }
+
+  private async rewindPull(): Promise<void> {
+    const { client, state } = this.ctx.opts
+    this.rewind = false
+    await state.setCursor(0)
+    await state.setMeta?.('pull-manifest-progress', null)
+    await state.setMeta?.('pull-manifest-page', null)
+    // After a crash, either the refusal remains visible or the durable cursor
+    // forces a fresh manifest. Never retire the obligation before its rewind.
+    if (this.retryRefusedDirectories) {
+      await client.retryRefusedDirectories?.()
+      this.retryRefusedDirectories = false
+    }
   }
 
   private async scanWork<T>(work: () => Promise<T>): Promise<T> {
@@ -620,6 +640,10 @@ export class SyncCycle {
   private async leftBy(pushed: PushReport): Promise<Set<string>> {
     const kept = new Set(pushed.kept)
     for (const { op } of pushed.rejected) {
+      if (op.op === 'mkdir') {
+        kept.add(op.path)
+        continue
+      }
       if (op.op === 'create') {
         // A refused create whose bytes the state now records under that path was sent again
         // in this very run — a replayed batch the server turned away, then the scan's own —

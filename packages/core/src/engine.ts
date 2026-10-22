@@ -248,6 +248,7 @@ export class SyncEngine implements ExclusiveOperationPort {
    * sync, so what the pulls passed over is fetched. The cursor goes back to 0 at the start of
    * the run rather than here, so a pull under way is not writing its own position over it.
    * Everything the device already has is known by its version and passed over.
+   * Explicitly retries persisted directory refusals after the host's policy or quota changes.
    */
   rescan(): Promise<SyncReport> {
     try {
@@ -256,6 +257,7 @@ export class SyncEngine implements ExclusiveOperationPort {
       return Promise.reject(error)
     }
     this.cycle.rewind = true
+    this.cycle.retryRefusedDirectories = true
     return this.sync()
   }
 

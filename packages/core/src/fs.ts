@@ -48,6 +48,9 @@ export interface FileSystem extends Partial<StreamingFileSystem> {
   listChildren?(
     parent: string
   ): Promise<Array<{ path: string; kind: 'file' | 'directory'; identity?: string }>>
+  /** A definitive per-path refusal may throw AbeleError (quota_exceeded, leaves_scope,
+   * invalid_path, too_large, scripts_forbidden, path_taken, case_collision or forbidden).
+   * Ordinary I/O errors must retain their error type and abort the run. */
   mkdir?(path: string): Promise<void>
   moveDirectory?(from: string, to: string): Promise<void>
   /** Removes only an empty directory: untracked/local bytes are never swept recursively. */

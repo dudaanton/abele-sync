@@ -166,6 +166,7 @@ export class V2EngineClient implements EngineClient {
       },
       signal
     )
+    await this.directories.loadRefusals()
     await this.directories.retireRecreatedDelete()
     const members = JSON.parse((await state.getMeta(MEMBERS_KEY)) ?? '[]') as StateEntry[]
     this.restoreAssets.clear()
@@ -455,6 +456,15 @@ export class V2EngineClient implements EngineClient {
   }
   syncDirectories() {
     return this.directories?.scan() ?? Promise.resolve()
+  }
+  directoryRefusals() {
+    return this.directories?.refusals() ?? []
+  }
+  pathRefusal(path: string) {
+    return this.directories?.refusalFor(path)
+  }
+  async retryRefusedDirectories() {
+    await this.directories?.loadRefusals(true)
   }
   finishPull() {
     return this.directories?.finishPull() ?? Promise.resolve()

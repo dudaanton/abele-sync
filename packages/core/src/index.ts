@@ -3,6 +3,7 @@ export const CORE_VERSION = 1
 export * from './accessClient.js'
 export * from './engineClient.js'
 export * from './v2Client.js'
+export type { DirectoryRefusal } from './v2Directories.js'
 export { DEFAULT_SIMPLE_UPLOAD_BYTES, type ClientOptions } from './http.js'
 export * from './defer.js'
 export * from './deletes.js'
