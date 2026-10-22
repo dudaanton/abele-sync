@@ -135,6 +135,7 @@ export async function conditionalFile(
       path: op.path,
       expected: op.expected,
       effect: op.effect.kind,
+      to: op.effect.kind === 'move' ? op.effect.to : undefined,
       receipt: op.effect.kind === 'write' ? op.effect.receipt : undefined,
       stageId: op.effect.kind === 'install' ? op.effect.stageId : undefined,
     }),
@@ -321,6 +322,7 @@ async function recoverFolder(root: string, location: string, check: () => void):
       const intent = JSON.parse(raw) as {
         path: string
         effect?: string
+        to?: string
         receipt?: string
         sentinel?: { dev: number; ino: number }
         expected?: { size: number; mtime: number; sha: string } | null
@@ -330,18 +332,23 @@ async function recoverFolder(root: string, location: string, check: () => void):
         victim = await containedIn(root, `.abele-sync/${location}/${id}/victim`)
       check()
       let installed = false
+      const destination =
+        intent.effect === 'move' && intent.to ? await containedIn(root, intent.to) : target
       try {
-        const dataPath = intent.stageId
-          ? await containedIn(root, `.abele-sync/stages/${valid(intent.stageId)}/data`)
-          : `${folder}/data`
-        const [data, named] = await Promise.all([lstat(dataPath), lstat(target)])
+        const dataPath =
+          intent.effect === 'move'
+            ? victim
+            : intent.stageId
+              ? await containedIn(root, `.abele-sync/stages/${valid(intent.stageId)}/data`)
+              : `${folder}/data`
+        const [data, named] = await Promise.all([lstat(dataPath), lstat(destination)])
         installed = data.isFile() && data.dev === named.dev && data.ino === named.ino
       } catch (error) {
         if (!isMissing(error)) throw error
       }
       // An installed inode proves publication, not that its public name survived
       // fsync. Make that name durable before retiring any displaced bytes/evidence.
-      if (installed) await syncParents(target, root)
+      if (installed) await syncParents(destination, root)
       let hasVictim = false
       let info
       try {
