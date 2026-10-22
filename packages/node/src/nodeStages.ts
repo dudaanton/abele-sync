@@ -166,11 +166,12 @@ export class NodeStages {
             lstat(await this.path(id, 'data')),
             lstat(await containedIn(this.root, current.target)),
           ])
-          return (
+          const installed =
             a.dev === b.dev &&
             a.ino === b.ino &&
             same(await this.host.fingerprint(current.target), current.sealed)
-          )
+          if (installed) await syncParents(await containedIn(this.root, current.target), this.root)
+          return installed
         } catch (error) {
           if (isMissing(error)) return false
           throw error

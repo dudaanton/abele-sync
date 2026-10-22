@@ -339,6 +339,9 @@ async function recoverFolder(root: string, location: string, check: () => void):
       } catch (error) {
         if (!isMissing(error)) throw error
       }
+      // An installed inode proves publication, not that its public name survived
+      // fsync. Make that name durable before retiring any displaced bytes/evidence.
+      if (installed) await syncParents(target, root)
       let hasVictim = false
       let info
       try {
@@ -410,13 +413,14 @@ export async function installedFile(
     }
     const target = await containedIn(root, path)
     const [a, b] = await Promise.all([lstat(data), lstat(target)])
-    return (
+    const installed =
       a.isFile() &&
       b.isFile() &&
       a.ino === b.ino &&
       a.dev === b.dev &&
       (await fingerprint(target)) === sha
-    )
+    if (installed) await syncParents(target, root)
+    return installed
   } catch (error) {
     if (isMissing(error)) return false
     throw error
