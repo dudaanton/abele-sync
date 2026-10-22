@@ -310,12 +310,29 @@ export class VerdictPlanner {
       return
     }
     const shas = new Set<string>()
+    const versions = new Map<string, Answered>()
     for (const at of run) {
       const sha = writes.get(at)
-      if (sha !== undefined && wanted.has(sha)) shas.add(sha)
+      if (sha !== undefined && wanted.has(sha)) {
+        shas.add(sha)
+        const result = this.results[at]
+        if (result && result.status !== 'rejected') versions.set(sha, result)
+      }
     }
+    // A V2 digest lookup can discover a manifest and mutate the client's captured
+    // root ledger. Receipt identity already authorizes a content-only request;
+    // use it inside recording instead of running read-decoding effects there.
+    const content = this.client.readEffects
+      ? {
+          getBlob: (sha: string) => {
+            const version = versions.get(sha)
+            if (!version) throw new EngineError('protocol', 'missing receipt content identity')
+            return this.client.versionBytes(version.file_id, version.version_id, this.opts.signal)
+          },
+        }
+      : this.client
     await pool([...shas], this.concurrency, async (sha) => {
-      const bytes = await bytesFor(this.client, this.fs, sha, local, this.hash)
+      const bytes = await bytesFor(content, this.fs, sha, local, this.hash)
       if (bytes !== null) fetched.set(sha, bytes)
       else this.opts.log?.(`push: the server's bytes for ${sha} do not hash to it; not written`)
     })
