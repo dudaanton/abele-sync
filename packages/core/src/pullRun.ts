@@ -295,6 +295,9 @@ export class Puller {
         this.syncHeld()
         for (const id of progress.seen) this.seen.add(id)
         if (progress.coverageComplete) {
+          // Manifest coverage is complete: guarded deletes may only be noted
+          // during inventory, never while following or retrying feed changes.
+          this.walking = false
           // Newer feed events can settle an old hold, but a changed ledger base
           // alone cannot prove that the held remote version was applied.
           this.reached = progress.head

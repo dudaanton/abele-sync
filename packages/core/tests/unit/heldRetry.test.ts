@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest'
 import type { ChangeItem } from '@abele/sync-protocol'
 import { MemoryFileSystem, MemoryStateStore, ExpectedWrites, sha256 } from '../../src/index.js'
-import { pull } from '../../src/puller.js'
+import { pull, type PullOptions } from '../../src/puller.js'
 import type { EngineClient } from '../../src/engineClient.js'
 
 async function fixture() {
@@ -42,14 +42,92 @@ async function fixture() {
     getBlob: async (sha: string) => bodies[hashes.indexOf(sha)]!,
   } as unknown as EngineClient
   const dirty = new Set(['file.bin'])
-  const run = () =>
+  const run = (options: Partial<PullOptions> = {}) =>
     pull(client, fs, state, {
       dirty,
       expected: new ExpectedWrites(),
       filter: { excluded: () => false },
+      ...options,
     })
-  return { fs, state, add, run, dirty, bodies }
+  return { fs, state, add, run, dirty, bodies, hashes }
 }
+
+async function trackedFixture() {
+  const f = await fixture()
+  await f.state.put({
+    path: 'file.bin',
+    wirePath: 'file.bin',
+    fileId: 'file',
+    versionId: 'v0',
+    sha: f.hashes[1]!,
+    size: 1,
+    mtime: 1,
+  })
+  return f
+}
+
+it('D-113 holds newer guarded-delete feed changes when resuming a completed manifest', async () => {
+  const f = await trackedFixture()
+  expect((await f.run()).held.map((change) => change.version_id)).toEqual(['v1'])
+  await f.fs.remove('file.bin')
+  f.add(2)
+  const retry = await f.run({ noted: new Set(['file.bin']) })
+  expect(retry.held.map((change) => change.version_id)).toEqual(['v2'])
+  expect(retry.cursor).toBeLessThan(2)
+  expect(retry.applied).toBe(0)
+  expect((await f.state.get('file.bin'))?.versionId).toBe('v0')
+})
+
+it('I7: randomized protection combinations distinguish manifest notes from following holds', async () => {
+  let random = 113
+  const modes = ['walking', 'following', 'checkpoint'] as const
+  // Enumerate every protection bit, randomizing occupants and combinations in each mode.
+  for (const mode of modes)
+    for (let mask = 0; mask < 512; mask++) {
+      random = (Math.imul(random, 1664525) + 1013904223) >>> 0
+      const f = await trackedFixture()
+      if (mode === 'checkpoint') await f.run()
+      if (mode === 'following') await f.state.setCursor(1)
+      const missing = (random & 1) !== 0
+      if (missing) await f.fs.remove('file.bin')
+      else if ((random & 4) !== 0) await f.fs.writeAtomic('file.bin', new Uint8Array([9]), 1)
+      const untracked = (mask & 64) !== 0
+      if (untracked) await f.state.delete('file.bin')
+      const dirty = (mask & 1) !== 0
+      const held = (mask & 2) !== 0
+      const guarded = (mask & 4) !== 0
+      const noted = guarded || (mask & 128) !== 0 ? new Set(['file.bin']) : new Set<string>()
+      f.dirty.clear()
+      if (dirty || held || guarded) f.dirty.add('file.bin')
+      const excluded = (mask & 32) !== 0
+      const options: Partial<PullOptions> = {
+        noted,
+        protectMissing: (mask & 8) !== 0,
+        preserveMissing: (mask & 16) !== 0 ? new Set(['file']) : new Set(),
+        recheck: (mask & 256) !== 0 ? new Set(['file']) : new Set(),
+        filter: { excluded: () => excluded },
+      }
+      f.add(2)
+      const report = await f.run(options)
+      const context = `${mode}, mask ${mask}, missing ${missing}, untracked ${untracked}`
+      if (!excluded && f.dirty.size > 0) {
+        // Only manifest inventory may note a guarded delete. Its newer feed version must hold.
+        expect(
+          report.held.some((change) => change.version_id === 'v2'),
+          context
+        ).toBe(true)
+        expect(report.cursor, context).toBeLessThan(2)
+      }
+      for (const change of report.held) {
+        const retry = await f.run(options)
+        expect(
+          retry.held.some((item) => item.version_id === change.version_id),
+          context
+        ).toBe(true)
+        expect(retry.cursor, context).toBeLessThan(change.seq)
+      }
+    }
+})
 
 it('D-110 retries v3 held after a later page adopts v2 instead of trusting the original null base', async () => {
   const f = await fixture()
