@@ -1,4 +1,9 @@
-import { AbeleError, type CommitOpResult, type V2CommitOp } from '@abele/sync-protocol'
+import {
+  AbeleError,
+  type ChangeItem,
+  type CommitOpResult,
+  type V2CommitOp,
+} from '@abele/sync-protocol'
 import { expect, it, vi } from 'vitest'
 import { MemoryFileSystem } from '../../src/fs.js'
 import { MemoryStateStore } from '../../src/state.js'
@@ -24,6 +29,132 @@ class DirectoryFs extends MemoryFileSystem {
     this.dirs.set(path, path)
   }
 }
+
+it('D-136 never publishes a refused event past queued accepted work', async () => {
+  const fs = new MemoryFileSystem(),
+    state = new MemoryStateStore()
+  await state.setCursor(1)
+  const sha = await sha256(new Uint8Array([1]))
+  const change = (seq: number, path: string): ChangeItem => ({
+    seq,
+    path,
+    kind: 'attachment',
+    file_id: path,
+    version_id: String(seq),
+    op: 'create',
+    prev_path: null,
+    sha,
+    size: 1,
+    mtime: 1,
+    actor: { kind: 'system', id: 'test', name: 'test' },
+    at: '',
+  })
+  const client = {
+    changes: async () => ({
+      items: [change(2, 'a'), change(3, 'blocked/b')],
+      next_since: 3,
+      head_seq: 3,
+    }),
+    pathRefusal: (path: string) =>
+      path.startsWith('blocked/') ? { code: 'leaves_scope', message: 'policy' } : undefined,
+    getBlob: async () => {
+      throw new Error('download interrupted')
+    },
+  } as unknown as EngineClient
+  await expect(
+    pull(client, fs, state, {
+      expected: new ExpectedWrites(),
+      dirty: new Set(),
+      filter: { excluded: () => false },
+    })
+  ).rejects.toThrow()
+  expect(await state.getCursor()).toBeLessThan(2)
+})
+
+it('D-137 replays a refused deletion after rewind even though it is absent from manifest', async () => {
+  const fs = new MemoryFileSystem(),
+    state = new MemoryStateStore(),
+    bytes = new Uint8Array([1])
+  const sha = await sha256(bytes)
+  await fs.writeAtomic('blocked/a', bytes, 1)
+  await state.put({
+    fileId: 'a',
+    versionId: 'v1',
+    path: 'blocked/a',
+    wirePath: 'blocked/a',
+    sha,
+    size: 1,
+    mtime: 1,
+  })
+  await state.setCursor(1)
+  let refusing = true
+  const deleted: ChangeItem = {
+    kind: 'attachment',
+    seq: 2,
+    file_id: 'a',
+    version_id: 'v2',
+    path: 'blocked/a',
+    prev_path: null,
+    op: 'delete',
+    sha: null,
+    size: null,
+    mtime: null,
+    actor: { kind: 'system', id: 'test', name: 'test' },
+    at: '',
+  }
+  const client = {
+    manifest: async () => ({ items: [], next: null, head_seq: 2 }),
+    changes: async (since: number) => ({
+      items: since < 2 ? [deleted] : [],
+      next_since: 2,
+      head_seq: 2,
+    }),
+    pathRefusal: () => (refusing ? { code: 'leaves_scope', message: 'policy' } : undefined),
+  } as unknown as EngineClient
+  const options = {
+    expected: new ExpectedWrites(),
+    dirty: new Set<string>(),
+    filter: { excluded: () => false },
+  }
+  await pull(client, fs, state, options)
+  expect(await fs.stat('blocked/a')).not.toBeNull()
+  refusing = false
+  await state.setCursor(0)
+  await pull(client, fs, state, options)
+  expect(await fs.stat('blocked/a')).toBeNull()
+  expect(await state.byFileId('a')).toBeNull()
+})
+
+it('D-138 retires the old refusal when its directory moves to an allowed path', async () => {
+  const fs = new DirectoryFs(),
+    state = new MemoryStateStore()
+  const mkdir = fs.mkdir.bind(fs)
+  fs.mkdir = async (path) => {
+    if (path === 'blocked') throw new AbeleError('leaves_scope', 'policy')
+    await mkdir(path)
+  }
+  const dirs = new V2Directories(
+    fs,
+    state,
+    () => true,
+    async () => []
+  )
+  await dirs.receive({
+    kind: 'directory',
+    path: 'blocked',
+    file_id: 'dir',
+    version_id: 'v1',
+    mtime: 1,
+  })
+  await dirs.receive({
+    kind: 'directory',
+    path: 'allowed',
+    file_id: 'dir',
+    version_id: 'v2',
+    mtime: 1,
+  })
+  expect(dirs.refusals()).toEqual([])
+})
 
 it('does not abandon a started directory retry state write on pause', async () => {
   const controller = new AbortController(),

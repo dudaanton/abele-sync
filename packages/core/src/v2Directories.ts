@@ -164,6 +164,11 @@ export class V2Directories {
     if (!this.fs.mkdir || !this.fs.listDirectories)
       throw new AbeleError('invalid_request', 'host directory filesystem ports are required')
     const doc = await this.read()
+    const previousIncoming = doc.incoming?.find((directory) => directory.file_id === item.file_id)
+    if (previousIncoming && previousIncoming.path !== item.path) {
+      doc.refused = doc.refused?.filter((entry) => entry.path !== previousIncoming.path)
+      this.indexRefusals(doc.refused ?? [])
+    }
     if (this.refusalFor(item.path)?.direction === 'pull') {
       // Keep the latest identity without retrying mkdir. A delayed departure of an
       // older directory at this spelling must not retire the replacement's refusal.

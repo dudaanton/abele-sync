@@ -43,11 +43,15 @@ export class PullHolds {
   private heap: { id: string; seq: number }[] = []
   private generation: string | null = null
 
-  constructor(private readonly state: StateStore) {}
+  constructor(
+    private readonly state: StateStore,
+    private readonly progressKey = HELD_PROGRESS,
+    private readonly key = pullHoldKey
+  ) {}
 
   async load(): Promise<void> {
     this.generation = (await this.state.getMeta?.(GENERATION_KEY)) ?? null
-    const raw = JSON.parse((await this.state.getMeta?.(HELD_PROGRESS)) ?? 'null') as
+    const raw = JSON.parse((await this.state.getMeta?.(this.progressKey)) ?? 'null') as
       Header | LegacyHeader | null
     if (raw === null || raw.generation !== this.generation) return
     const originalHead = raw.head
@@ -73,7 +77,7 @@ export class PullHolds {
     let previous: string | null = null
     for (let id = raw.first; id !== null;) {
       if (this.records.has(id)) throw new Error('cyclic pull hold index')
-      const value = await this.state.getMeta?.(pullHoldKey(id))
+      const value = await this.state.getMeta?.(this.key(id))
       if (value == null) throw new Error('missing durable pull hold')
       const node = JSON.parse(value) as Node
       this.records.set(id, node)
@@ -183,7 +187,7 @@ export class PullHolds {
   ): Promise<void> {
     for (const id of this.changed) {
       const node = this.records.get(id)
-      await tx.setMeta?.(pullHoldKey(id), node === undefined ? null : JSON.stringify(node))
+      await tx.setMeta?.(this.key(id), node === undefined ? null : JSON.stringify(node))
     }
     this.header =
       this.first === null
@@ -196,7 +200,7 @@ export class PullHolds {
             first: this.first,
             last: this.last,
           }
-    await tx.setMeta?.(HELD_PROGRESS, this.header === null ? null : JSON.stringify(this.header))
+    await tx.setMeta?.(this.progressKey, this.header === null ? null : JSON.stringify(this.header))
     this.changed.clear()
   }
 }

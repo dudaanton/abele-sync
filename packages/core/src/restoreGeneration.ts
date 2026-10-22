@@ -7,6 +7,7 @@ export const RECONCILING_KEY = 'server-restore-reconciling'
 export const MEMBERS_KEY = 'server-restore-members'
 const RESET_KEYS = [
   'pull-held-progress',
+  'pull-refused-progress',
   'pull-manifest-progress',
   'pull-manifest-page',
   'v2-local-note-cache',
@@ -45,19 +46,24 @@ export async function reconcileGeneration(state: StateStore, generation: string 
     ...((await state.metadataKeys?.('pull-write:')) ?? []),
     ...((await state.metadataKeys?.('pull-evict:')) ?? []),
     ...((await state.metadataKeys?.('pull-held:')) ?? []),
+    ...((await state.metadataKeys?.('pull-refused:')) ?? []),
   ])
   // The linked index also supports hosts without metadata enumeration.
-  const held = JSON.parse((await state.getMeta('pull-held-progress')) ?? 'null') as {
-    first?: string | null
-  } | null
-  const seenHolds = new Set<string>()
-  for (let id = held?.first ?? null; id !== null;) {
-    if (seenHolds.has(id)) throw new Error('cyclic pull hold index')
-    seenHolds.add(id)
-    const key = `pull-held:${encodeURIComponent(id)}`
-    pullKeys.add(key)
-    const node = JSON.parse((await state.getMeta(key)) ?? 'null') as { next: string | null } | null
-    id = node?.next ?? null
+  for (const prefix of ['pull-held', 'pull-refused']) {
+    const held = JSON.parse((await state.getMeta(`${prefix}-progress`)) ?? 'null') as {
+      first?: string | null
+    } | null
+    const seenHolds = new Set<string>()
+    for (let id = held?.first ?? null; id !== null;) {
+      if (seenHolds.has(id)) throw new Error('cyclic pull hold index')
+      seenHolds.add(id)
+      const key = `${prefix}:${encodeURIComponent(id)}`
+      pullKeys.add(key)
+      const node = JSON.parse((await state.getMeta(key)) ?? 'null') as {
+        next: string | null
+      } | null
+      id = node?.next ?? null
+    }
   }
   const recovering =
     old !== null ||
