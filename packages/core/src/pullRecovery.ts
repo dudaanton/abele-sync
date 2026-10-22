@@ -8,6 +8,7 @@ import { PullPlacer } from './pullPlace.js'
 import type { StateEntry, StateStore } from './state.js'
 import { checkCancellation } from './cancellation.js'
 import { discardPullStage, stageMissing } from './pullStages.js'
+import { isFileFailure, type FileRetries } from './fileRetry.js'
 
 interface Intent {
   receiptId?: string
@@ -92,7 +93,7 @@ export async function recoverPendingPullWrites(
   state: StateStore,
   fileIds: readonly string[],
   client?: Pick<EngineClient, 'getBlob' | 'openVersion'>,
-  opts: { signal?: AbortSignal; expected?: ExpectedWrites } = {}
+  opts: { signal?: AbortSignal; expected?: ExpectedWrites; retries?: FileRetries } = {}
 ): Promise<void> {
   const placer = new PullPlacer(
     client ?? {
@@ -114,52 +115,76 @@ export async function recoverPendingPullWrites(
     checkCancellation(opts.signal)
     const raw = await state.getMeta?.(`pull-write:${fileId}`)
     if (raw == null) continue
-    const intent = decodePullIntent(raw, fileId),
-      entry = await state.byFileId(fileId)
-    const change: ChangeItem = {
-      seq: 1,
-      file_id: fileId,
-      version_id: intent.versionId,
-      path: intent.wirePath,
-      op: intent.from === null ? 'modify' : 'move',
-      prev_path: intent.from,
-      sha: intent.sha,
-      size: intent.size,
-      mtime: intent.mtime,
-      kind: 'attachment',
-      actor: { kind: 'system', id: 'recovery', name: 'recovery' },
-      at: '',
-    }
-    if (
-      entry?.versionId === intent.versionId &&
-      entry.wirePath === intent.wirePath &&
-      entry.path === intent.target &&
-      entry.sha === intent.sha &&
-      entry.size === intent.size
-    ) {
-      await placer.settled(change)
-      continue
-    }
-    if ((await placer.pending.matching(change, entry)) === null)
-      throw new ExternalStateError('recovery-required')
-    await placer.adopt(change, entry)
-    if (
-      (intent.stageId !== undefined || (intent.from !== null && client !== undefined)) &&
-      (await state.getMeta?.(`pull-write:${fileId}`)) != null
-    ) {
-      if (intent.stageId !== undefined && (!client?.openVersion || !fs.reopenStage))
-        throw new ExternalStateError('recovery-required')
-      try {
-        await placer.place(change, intent.sha!, entry, new Map(), new Map())
-      } catch (error) {
-        if (!stageMissing(error) || intent.stageId === undefined) throw error
-        await discardPullStage(fs, intent.stageId)
-        await placer.pending.clear(fileId)
+    let path = `pull-write:${fileId}`
+    if (opts.retries && !opts.retries.ready(path)) continue
+    // A broken record may have displaced its original name. Keep that ledger
+    // base protected as well as the destination until recovery settles.
+    const entry = await state.byFileId(fileId)
+    const protectedPaths = new Set(entry ? [entry.wirePath] : [])
+    try {
+      const intent = decodePullIntent(raw, fileId)
+      path = intent.wirePath
+      protectedPaths.add(path)
+      if (opts.retries && !opts.retries.ready(path)) continue
+      const change: ChangeItem = {
+        seq: 1,
+        file_id: fileId,
+        version_id: intent.versionId,
+        path: intent.wirePath,
+        op: intent.from === null ? 'modify' : 'move',
+        prev_path: intent.from,
+        sha: intent.sha,
+        size: intent.size,
+        mtime: intent.mtime,
+        kind: 'attachment',
+        actor: { kind: 'system', id: 'recovery', name: 'recovery' },
+        at: '',
       }
+      if (
+        entry?.versionId === intent.versionId &&
+        entry.wirePath === intent.wirePath &&
+        entry.path === intent.target &&
+        entry.sha === intent.sha &&
+        entry.size === intent.size
+      ) {
+        await placer.settled(change)
+        await opts.retries?.succeeded(path, 'recovery')
+        await opts.retries?.succeeded(`pull-write:${fileId}`, 'recovery')
+        for (const name of protectedPaths) await opts.retries?.succeeded(name, 'recovery')
+        continue
+      }
+      if ((await placer.pending.matching(change, entry)) === null)
+        throw new ExternalStateError('recovery-required')
+      await placer.adopt(change, entry)
+      if (
+        (intent.stageId !== undefined || (intent.from !== null && client !== undefined)) &&
+        (await state.getMeta?.(`pull-write:${fileId}`)) != null
+      ) {
+        if (intent.stageId !== undefined && (!client?.openVersion || !fs.reopenStage))
+          throw new ExternalStateError('recovery-required')
+        try {
+          await placer.place(change, intent.sha!, entry, new Map(), new Map())
+        } catch (error) {
+          if (!stageMissing(error) || intent.stageId === undefined) throw error
+          await discardPullStage(fs, intent.stageId)
+          await placer.pending.clear(fileId)
+        }
+      }
+      // adopt either recorded the completed installation or preserved both local bytes
+      // and the earlier base, retiring only a definite not-written intent.
+      if ((await state.getMeta?.(`pull-write:${fileId}`)) != null)
+        throw new ExternalStateError('recovery-required')
+      await opts.retries?.succeeded(path, 'recovery')
+      await opts.retries?.succeeded(`pull-write:${fileId}`, 'recovery')
+      for (const name of protectedPaths) await opts.retries?.succeeded(name, 'recovery')
+    } catch (error) {
+      checkCancellation(opts.signal)
+      if (!opts.retries || !(isFileFailure(error) || error instanceof ExternalStateError))
+        throw error
+      await opts.retries.failed(path, 'recovery', error, error instanceof ExternalStateError)
+      for (const name of protectedPaths)
+        if (name !== path)
+          await opts.retries.failed(name, 'recovery', error, error instanceof ExternalStateError)
     }
-    // adopt either recorded the completed installation or preserved both local bytes
-    // and the earlier base, retiring only a definite not-written intent.
-    if ((await state.getMeta?.(`pull-write:${fileId}`)) != null)
-      throw new ExternalStateError('recovery-required')
   }
 }

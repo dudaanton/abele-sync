@@ -6,6 +6,20 @@ import { Http } from '../src/http.js'
 
 afterEach(() => vi.restoreAllMocks())
 
+it('archives retained receipt answers and their retry schedule across a server restore', async () => {
+  const state = new MemoryStateStore()
+  await reconcileGeneration(state, 'old')
+  await state.setMeta('push-receipt:file', 'old server answer')
+  await state.setMeta('file-retry:file.bin', 'old retry schedule')
+  await reconcileGeneration(state, 'new')
+  expect(await state.getMeta('push-receipt:file')).toBeNull()
+  expect(await state.getMeta('file-retry:file.bin')).toBeNull()
+  expect(JSON.parse((await state.getMeta('retired-generation:old'))!).metadata).toMatchObject({
+    'push-receipt:file': 'old server answer',
+    'file-retry:file.bin': 'old retry schedule',
+  })
+})
+
 it('archives untracked pull intents on first contact and atomically retires all pull authority', async () => {
   const state = new MemoryStateStore()
   const raw = JSON.stringify({ base: null, stageId: 'retain-staged-bytes' })

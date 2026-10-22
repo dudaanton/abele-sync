@@ -22,6 +22,8 @@ import { WatchReports } from './watchReports.js'
 import { TransferBudget } from './streaming.js'
 import { requestReconciliation } from './reconciliation.js'
 import { SyncCancelled } from './cancellation.js'
+import { fileErrors } from './fileRetry.js'
+export type { WaitingFile } from './fileRetry.js'
 
 export { classifyFailure, joinFinished } from './engineTypes.js'
 export { SyncCancelled } from './cancellation.js'
@@ -130,6 +132,7 @@ export class SyncEngine implements ExclusiveOperationPort {
           })
     this.opts = {
       ...hands,
+      fs: fileErrors(hands.fs),
       transferBudget: this.transferBudget,
       client: stoppableClient(hands.client, () => this.cancellation.signal, this.activeWrites),
     }
@@ -250,15 +253,29 @@ export class SyncEngine implements ExclusiveOperationPort {
    * Everything the device already has is known by its version and passed over.
    * Explicitly retries persisted directory refusals after the host's policy or quota changes.
    */
-  rescan(): Promise<SyncReport> {
+  async rescan(): Promise<SyncReport> {
     try {
       this.opts.recovery?.assertReady()
     } catch (error) {
       return Promise.reject(error)
     }
+    await this.exclusive(() => this.cycle.retries.retryNow())
     this.cycle.rewind = true
     this.cycle.retryRefusedDirectories = true
     return this.sync()
+  }
+
+  /** Retry file-local failures immediately, including records held for review. */
+  async retryNow(): Promise<SyncReport> {
+    await this.exclusive(() => this.cycle.retries.retryNow())
+    return this.sync()
+  }
+
+  async waitingFiles(): Promise<import('./fileRetry.js').WaitingFile[]> {
+    return this.exclusive(async () => {
+      await this.cycle.retries.load()
+      return this.cycle.retries.list()
+    })
   }
 
   /** Verify all local content once and review every outgoing delete, in the sync queue. */
@@ -426,9 +443,11 @@ export class SyncEngine implements ExclusiveOperationPort {
   private async run(): Promise<SyncReport> {
     this.heard = null
     this.set({ state: 'syncing' })
+    let completed = false
     try {
       this.opts.recovery?.assertReady()
       const report = await this.cycle.cycle()
+      completed = true
       this.wake.succeeded()
       this.set({
         state: this.paused || this.stopping ? 'paused' : 'idle',
@@ -450,6 +469,13 @@ export class SyncEngine implements ExclusiveOperationPort {
       }
       this.fail(error)
       throw error
+    } finally {
+      const waitingFiles = this.cycle.retries.list()
+      this.set({ waiting: waitingFiles.length, waitingFiles })
+      if (waitingFiles.length) this.log(`sync: ${waitingFiles.length} waiting`)
+      // File timers must not bypass network/auth/server failure handling.
+      const next = completed ? this.cycle.retries.next() : null
+      this.wake.scheduleFiles(next === null ? null : Math.max(0, next - this.now()))
     }
   }
 

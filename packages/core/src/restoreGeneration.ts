@@ -47,6 +47,8 @@ export async function reconcileGeneration(state: StateStore, generation: string 
     ...((await state.metadataKeys?.('pull-evict:')) ?? []),
     ...((await state.metadataKeys?.('pull-held:')) ?? []),
     ...((await state.metadataKeys?.('pull-refused:')) ?? []),
+    ...((await state.metadataKeys?.('push-receipt:')) ?? []),
+    ...((await state.metadataKeys?.('file-retry:')) ?? []),
   ])
   // The linked index also supports hosts without metadata enumeration.
   for (const prefix of ['pull-held', 'pull-refused']) {

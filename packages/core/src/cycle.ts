@@ -17,7 +17,7 @@ import {
 import { EngineError } from './errors.js'
 import { sha256 } from './hash.js'
 import { pull, type PullReport } from './puller.js'
-import { push, resumeJournal, type PushReport, type Refusal } from './pusher.js'
+import { push, resumeJournal, resumeReceipts, type PushReport, type Refusal } from './pusher.js'
 import { scan, type CaseCollision, type ScanFilter } from './scanner.js'
 import { AsideMarks, ScopeMarks, type ScopeRecord } from './scope.js'
 import { isExcluded } from './selective.js'
@@ -32,6 +32,7 @@ import { scanSnapshot } from './scanSnapshot.js'
 import { readReconciliation } from './reconciliation.js'
 import { recoverPendingPullWrites } from './pullRecovery.js'
 import { recoverPullEvictions } from './pullEvictions.js'
+import { FileRetries } from './fileRetry.js'
 import { GENERATION_KEY, MEMBERS_KEY, RECONCILING_KEY } from './restoreGeneration.js'
 import {
   reconciliationScan,
@@ -75,6 +76,7 @@ export interface CycleContext {
 const JOIN_KEY = 'join-open'
 
 export class SyncCycle {
+  readonly retries: FileRetries
   readonly filter: ScanFilter
   /**
    * The server's own cap. Pulls exclude larger files; clients opting into size
@@ -118,6 +120,7 @@ export class SyncCycle {
 
   constructor(private readonly ctx: CycleContext) {
     const { opts } = ctx
+    this.retries = new FileRetries(opts.state, ctx.now, ctx.log)
     const scriptsFolder = opts.scriptsFolder ?? DEFAULT_SCRIPTS_FOLDER
     const localFilter: ScanFilter = {
       excluded: (path, size) =>
@@ -216,6 +219,8 @@ export class SyncCycle {
    */
   async cycle(): Promise<SyncReport> {
     const { client, fs, state } = this.ctx.opts
+    await this.retries.load()
+    if (this.retries.list().some((row) => this.retries.ready(row.path))) this.refused.clear()
     if (this.retryRefusedDirectories) this.rewind = true
     const inventory = scanSnapshot(fs, () => this.ctx.signal?.())
     const scanningFs = stoppableListings(inventory.fs, () => this.ctx.signal?.())
@@ -233,6 +238,7 @@ export class SyncCycle {
       true
     )
     if (generationBefore !== (await state.getMeta?.(GENERATION_KEY))) {
+      await this.retries.load()
       this.staging.records.invalidate()
       this.refused.clear()
       this.kept.clear()
@@ -241,8 +247,15 @@ export class SyncCycle {
       this.ctx.log('sync: server generation observed; reconciling with local files preserved')
     }
     const log = this.ctx.log
+    if (this.retries.list().some((row) => this.retries.ready(row.path)))
+      await client.retryRefusedDirectories?.(
+        this.retries
+          .list()
+          .filter((row) => this.retries.ready(row.path))
+          .map((row) => row.path)
+      )
     await fs.recoverConditionalFiles?.()
-    await recoverPullEvictions(fs, state, this.ctx.signal?.())
+    await recoverPullEvictions(fs, state, this.ctx.signal?.(), this.retries)
     const pendingFiles = new Set(
       ((await state.metadataKeys?.('pull-write:')) ?? []).map((key) =>
         key.slice('pull-write:'.length)
@@ -252,8 +265,10 @@ export class SyncCycle {
     await recoverPendingPullWrites(fs, state, [...pendingFiles], client, {
       expected: this.ctx.expected,
       signal: this.ctx.signal?.(),
+      retries: this.retries,
     })
     const common = {
+      retries: this.retries,
       signal: this.ctx.signal?.(),
       ...(this.ctx.opts.transferBudget === undefined
         ? {}
@@ -271,6 +286,7 @@ export class SyncCycle {
           }),
       log,
     }
+    await resumeReceipts(client, fs, state, common)
 
     // Read before a rescan winds the cursor back: only a device that has not joined yet joins.
     // A join a process started and did not finish is marked in the state, so a restart after
@@ -350,7 +366,8 @@ export class SyncCycle {
         this.unscanned,
         client,
         this.ctx.signal?.(),
-        comparisonCursor
+        comparisonCursor,
+        this.retries
       )
     )
     const reconciliation = inspection.reconciliation
@@ -447,6 +464,7 @@ export class SyncCycle {
         : undefined
     const found = await this.scanWork(() =>
       scan(scanningFs, state, this.scanFilter, {
+        retries: this.retries,
         signal: this.ctx.signal?.(),
         persistHints: true,
         known: observed,
@@ -527,8 +545,31 @@ export class SyncCycle {
       this.kept.add(refusal.path)
     }
     this.ctx.set({ pending: this.kept.size })
+    for (const { op, code, message } of pushed.rejected) {
+      const path =
+        'path' in op
+          ? op.path
+          : op.op === 'move'
+            ? op.to_path
+            : 'file_id' in op
+              ? (await state.byFileId(op.file_id))?.wirePath
+              : undefined
+      if (path !== undefined)
+        await this.retries.failed(path, 'push', new Error(`${code}: ${message}`))
+    }
+    for (const op of judged) {
+      const path =
+        op.op === 'create'
+          ? op.path
+          : op.op === 'move'
+            ? op.to_path
+            : (await state.byFileId(op.file_id))?.wirePath
+      if (path !== undefined && !this.kept.has(path) && !pushed.rejected.some((r) => r.op === op))
+        await this.retries.succeeded(path, 'push')
+    }
     if (reconciliation && reconciliation.phase !== 'complete') {
       const unresolved =
+        this.retries.list().length > 0 ||
         (await this.holds.list()).length > 0 ||
         sent.rejected.length > 0 ||
         sent.kept.length > 0 ||
@@ -544,6 +585,16 @@ export class SyncCycle {
         }
       })
       this.ctx.set({ reconciliation })
+    }
+    for (const row of this.retries.list()) {
+      if (!this.retries.ready(row.path)) continue
+      if (
+        (row.phase === 'scan' && !found.skipped.some((item) => item.path === row.path)) ||
+        (row.phase === 'pull' &&
+          !(secondPull ?? before).held.some((item) => item.path === row.path)) ||
+        (row.phase === 'push' && !this.kept.has(row.path))
+      )
+        await this.retries.succeeded(row.path, row.phase)
     }
     return {
       pull: before,
@@ -673,6 +724,7 @@ export class SyncCycle {
   ): Promise<PullReport> {
     const { client, fs, state } = this.ctx.opts
     const report = await pull(client, fs, state, {
+      retries: this.retries,
       signal: this.ctx.signal?.(),
       protectMissing: true,
       ...(this.ctx.opts.transferBudget === undefined

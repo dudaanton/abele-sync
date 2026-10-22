@@ -464,8 +464,8 @@ export class V2EngineClient implements EngineClient {
   pathRefusal(path: string) {
     return this.directories?.refusalFor(path)
   }
-  async retryRefusedDirectories() {
-    await this.directories?.loadRefusals(true)
+  async retryRefusedDirectories(paths?: readonly string[]) {
+    await this.directories?.loadRefusals(true, paths)
   }
   finishPull() {
     return this.directories?.finishPull() ?? Promise.resolve()

@@ -1,6 +1,10 @@
-import { transact } from './stateTransaction.js'
+import { transact, savepoint } from './stateTransaction.js'
+import { isFileFailure } from './fileRetry.js'
 import {
   AbeleError,
+  CommitOpSchema,
+  CommitOpResultSchema,
+  type CommitOpResult,
   type CommitOp,
   type CommitResponse,
   type ErrorCode,
@@ -103,6 +107,7 @@ export interface PushReport {
 
 /** What a replay needs: everything but the keys, which the journal already holds. */
 export interface ResumeOptions {
+  retries?: import('./fileRetry.js').FileRetries
   signal?: AbortSignal
   onApplied?: import('./applied.js').AppliedOptions['onApplied']
   transferBudget?: import('./streaming.js').TransferBudget
@@ -288,6 +293,38 @@ const emptyReport = (): PushReport => ({
   kept: [],
 })
 
+/** Failed receipt placement is durable independently of the uncertain request
+ * journal. It contains the server's answer, never a new commit to resend. */
+export async function resumeReceipts(
+  client: EngineClient,
+  fs: FileSystem,
+  state: StateStore,
+  opts: ResumeOptions
+): Promise<void> {
+  if (!opts.retries) return
+  for (const key of (await state.metadataKeys?.('push-receipt:')) ?? []) {
+    checkCancellation(opts.signal)
+    const raw = await state.getMeta?.(key)
+    if (!raw) continue
+    let row: { path: string; op: CommitOp; result: CommitOpResult }
+    try {
+      const value = JSON.parse(raw)
+      row = {
+        path: value.path,
+        op: CommitOpSchema.parse(value.op),
+        result: CommitOpResultSchema.parse(value.result),
+      }
+      if (typeof row.path !== 'string') throw new Error('invalid receipt path')
+    } catch (error) {
+      await opts.retries.failed(key, 'recovery', error, true)
+      continue
+    }
+    if (!opts.retries.ready(row.path)) continue
+    const pusher = new Pusher(client, fs, state, opts, emptyReport(), new Map())
+    await pusher.receipt(key, row)
+  }
+}
+
 /** One run of the pusher: the adapters, the options and the report it is filling in. */
 class Pusher {
   private readonly transferBudget: TransferBudget
@@ -324,6 +361,83 @@ class Pusher {
     this.recorder = new VerdictRecorder(fs, state, opts, report, this.hash, this.refused, disk)
   }
 
+  async receipt(
+    key: string,
+    row: { path: string; op: CommitOp; result: CommitOpResult }
+  ): Promise<void> {
+    const verdicts = await this.planner.plan([row.op], [row.result])
+    try {
+      const previous = row.op.op === 'create' ? null : await this.state.byFileId(row.op.file_id)
+      const keptBefore = this.report.kept.length
+      if (verdicts.failures?.has(0)) throw verdicts.failures.get(0)
+      if (verdicts.staged.size) await this.opts.onDefer?.([...verdicts.staged.values()])
+      await transact(this.state, async (tx) => {
+        await this.recorder.withState(tx).take(row.op, row.result, 0, verdicts)
+        await tx.setMeta?.(key, null)
+      })
+      await this.opts.retries?.succeeded(row.path, 'recovery')
+      await this.opts.retries?.succeeded(key, 'recovery')
+      const result = row.result
+      if (
+        result.status !== 'rejected' &&
+        !verdicts.bad.has(0) &&
+        !verdicts.staged.has(0) &&
+        !verdicts.stale.has(0) &&
+        !verdicts.aside.has(0) &&
+        this.report.kept.length === keptBefore &&
+        !touchesDeferred(
+          this.opts.defer,
+          result.path,
+          previous?.wirePath,
+          result.status === 'conflict' ? result.conflict_path : null
+        )
+      ) {
+        await notifyApplied(this.opts, {
+          path: result.path,
+          origin: 'local',
+          fileId: result.file_id,
+          kind:
+            row.op.op === 'delete' && result.status === 'applied'
+              ? 'delete'
+              : row.op.op === 'move'
+                ? 'move'
+                : 'upsert',
+          ...(row.op.op === 'move' && previous ? { from: previous.wirePath } : {}),
+        })
+      }
+    } catch (error) {
+      checkCancellation(this.opts.signal)
+      if (!this.opts.retries || !isFileFailure(error)) throw error
+      await this.opts.retries.failed(row.path, 'recovery', error)
+    } finally {
+      await this.planner.discardStages(verdicts)
+    }
+  }
+
+  private async retainReceipt(
+    op: CommitOp,
+    result: CommitOpResult,
+    error: unknown,
+    tx: StateStore
+  ): Promise<void> {
+    if (!this.opts.retries || !isFileFailure(error)) throw error
+    const path =
+      op.op === 'create'
+        ? op.path
+        : op.op === 'move'
+          ? op.to_path
+          : (await tx.byFileId(op.file_id))?.wirePath
+    if (path === undefined) throw error
+    const identity =
+      result.status !== 'rejected' ? result.file_id : 'file_id' in op ? op.file_id : path
+    await tx.setMeta!(
+      `push-receipt:${encodeURIComponent(identity)}`,
+      JSON.stringify({ path, op, result })
+    )
+    await this.opts.retries.failed(path, 'recovery', error, false, tx)
+    this.report.kept.push(path)
+  }
+
   /**
    * The ops worth sending: every one whose bytes the server has not already refused for
    * good. The rest are reported refused in the server's own words, without a request — the
@@ -334,7 +448,7 @@ class Pusher {
     const kept: CommitOp[] = []
     for (const op of ops) {
       const path =
-        checkPaths && this.client.pathRefusal
+        (checkPaths && this.client.pathRefusal) || this.opts.retries
           ? op.op === 'create'
             ? op.path
             : op.op === 'move'
@@ -346,6 +460,15 @@ class Pusher {
         ('sha' in op ? this.refused.get(op.sha) : undefined)
       const wait = 'sha' in op ? this.waiting.get(op.sha) : undefined
       if (refusal === undefined && wait === undefined) {
+        if (
+          checkPaths &&
+          path !== undefined &&
+          this.opts.retries &&
+          !this.opts.retries.ready(path)
+        ) {
+          this.report.kept.push(path)
+          continue
+        }
         kept.push(op)
         continue
       }
@@ -512,7 +635,17 @@ class Pusher {
                   ? null
                   : await tx.byFileId(op.file_id)
               const keptBefore = this.report.kept.length
-              await recorder.take(op, results[at], at, verdicts)
+              try {
+                if (verdicts.failures?.has(at)) throw verdicts.failures.get(at)
+                await savepoint(tx, (sub) =>
+                  recorder.withState(sub).take(op, results[at], at, verdicts)
+                )
+              } catch (error) {
+                checkCancellation(this.opts.signal)
+                await this.retainReceipt(op, results[at]!, error, tx)
+                recorded++
+                continue
+              }
               recorded++
               const result = results[at]!
               if (
@@ -596,7 +729,24 @@ class Pusher {
       if (count === undefined) wanted.push(op.sha)
     }
     await pool(wanted, this.concurrency, async (sha) => {
-      await this.uploadOne(sha, sources)
+      try {
+        await this.uploadOne(sha, sources)
+      } catch (error) {
+        checkCancellation(this.opts.signal)
+        if (!this.opts.retries || !isFileFailure(error)) throw error
+        for (const op of ops)
+          if ('sha' in op && op.sha === sha) {
+            const path =
+              op.op === 'create' ? op.path : (await this.state.byFileId(op.file_id))?.wirePath
+            if (path === undefined) throw error
+            await this.opts.retries.failed(path, 'push', error)
+            this.report.kept.push(path)
+          }
+        this.waiting.set(sha, {
+          code: 'conflict',
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
       this.fall(users.get(sha) ?? 0)
     })
   }

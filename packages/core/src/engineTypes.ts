@@ -27,6 +27,9 @@ export type EngineState = 'idle' | 'syncing' | 'offline' | 'paused' | 'error'
 export type SyncFailure = 'offline' | 'unauthorized' | 'other'
 
 export interface EngineStatus {
+  /** File-local failures waiting for their retry time or explicit recovery review. */
+  waiting?: number
+  waitingFiles?: readonly import('./fileRetry.js').WaitingFile[]
   reconciliation?: import('./reconciliation.js').ReconciliationState | null
   state: EngineState
   /**

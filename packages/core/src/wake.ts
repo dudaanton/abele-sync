@@ -38,6 +38,7 @@ export interface WakeContext {
 export class Wake {
   private unsubscribe: (() => void) | null = null
   private retry: Timer | null = null
+  private files: Timer | null = null
   private reconnect: Timer | null = null
   private grace: Timer | null = null
   private fallback: Timer | null = null
@@ -139,6 +140,16 @@ export class Wake {
     })
   }
 
+  scheduleFiles(ms: number | null): void {
+    if (this.files !== null) clearTimeout(this.files)
+    this.files = null
+    if (ms === null || !this.ctx.live()) return
+    this.files = after(Math.max(1, ms), () => {
+      this.files = null
+      this.ctx.trigger('waiting files')
+    })
+  }
+
   /** Open the socket again after a wait, and nothing more: `held` says when it is back. */
   private reconnectLater(): void {
     if (!this.ctx.live() || this.reconnect !== null) return
@@ -163,10 +174,11 @@ export class Wake {
   }
 
   clearTimers(): void {
-    for (const timer of [this.retry, this.reconnect, this.fallback]) {
+    for (const timer of [this.retry, this.reconnect, this.fallback, this.files]) {
       if (timer !== null) clearTimeout(timer)
     }
     this.retry = null
+    this.files = null
     this.reconnect = null
     this.fallback = null
     this.clearGrace()

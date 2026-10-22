@@ -180,6 +180,39 @@ export const changedState = () =>
   new EngineError('conflict', 'state changed outside the transaction; retry')
 
 const legacyQueue = new WeakMap<StateStore, Promise<unknown>>()
+/** A per-record savepoint inside an existing transaction, including legacy hosts.
+ * Failed work never publishes its patch into the surrounding transaction. */
+export async function savepoint<T>(
+  state: StateStore,
+  work: (tx: StateStore) => Promise<T>
+): Promise<T> {
+  const patch = new StateTransaction(state)
+  try {
+    const result = await work(patch)
+    for (const op of patch.mutations) {
+      switch (op.kind) {
+        case 'put':
+          await state.put(op.entry)
+          break
+        case 'delete':
+          await state.delete(op.path)
+          break
+        case 'cursor':
+          await state.setCursor(op.value)
+          break
+        case 'journal':
+          await state.setJournal(op.value)
+          break
+        case 'meta':
+          await state.setMeta!(op.key, op.value)
+          break
+      }
+    }
+    return result
+  } finally {
+    patch.close()
+  }
+}
 /** Compatibility for old callback-without-argument stores. Serialize engine transactions
  * and use the captured store only if the host has not advertised scoped support.
  * Legacy hosts MUST reserve exclusive root-store access for the entire callback; this

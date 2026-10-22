@@ -9,6 +9,7 @@ import type { StateEntry, StateStore } from './state.js'
 import { LocalPaths, rememberedCollisions, wirePath as localToWire } from './localPaths.js'
 import { checkCancellation } from './cancellation.js'
 import { scanHintEpoch, readScanHint, writeScanHint } from './scanHints.js'
+import { isFileFailure } from './fileRetry.js'
 
 /**
  * The scanner: what is on disk against what was last synced, as the ops a push commits.
@@ -74,6 +75,7 @@ export interface ScanResult {
 }
 
 export interface ScanOptions {
+  retries?: import('./fileRetry.js').FileRetries
   signal?: AbortSignal
   /** Durable scan hints only; uploads and pull writes still verify their actual bytes. */
   persistHints?: boolean
@@ -382,6 +384,11 @@ export async function scan(
   for (const [wirePath, info] of files) {
     checkCancellation(opts.signal)
     const entry = entries.get(wirePath)
+    if (opts.retries && !opts.retries.ready(wirePath, 'scan')) {
+      if (entry === undefined) unreadCandidate = true
+      skip(info.path, 'waiting for file retry')
+      continue
+    }
     const observed = opts.known?.infos.get(wirePath)
     const known =
       opts.revalidate !== 'all' &&
@@ -398,6 +405,7 @@ export async function scan(
     }
     if (
       entry &&
+      !opts.retries?.has(wirePath, 'scan') &&
       known === undefined &&
       !revalidate.has(wirePath) &&
       !opts.verifyPaths?.has(wirePath) &&
@@ -413,6 +421,7 @@ export async function scan(
     try {
       const hint =
         opts.persistHints &&
+        !opts.retries?.has(wirePath, 'scan') &&
         opts.revalidate !== 'all' &&
         !opts.verifyPaths?.has(wirePath) &&
         !(typeof opts.revalidate === 'number' && revalidate.has(wirePath))
@@ -431,6 +440,8 @@ export async function scan(
         }
       }
     } catch (error) {
+      checkCancellation(opts.signal)
+      if (isFileFailure(error)) await opts.retries?.failed(wirePath, 'scan', error)
       // Read after list is a race: the file may be gone or locked. Leave it for the next scan.
       // Only a fresh path can be paired with a missing tracked file, including
       // across directories. An unread tracked path already has its own identity.
@@ -438,6 +449,7 @@ export async function scan(
       skip(info.path, reasonOf(error))
       continue
     }
+    await opts.retries?.succeeded(wirePath, 'scan')
     hashes.set(wirePath, sha)
     diskPaths.set(wirePath, info.path)
     infos.set(wirePath, info)
@@ -463,6 +475,7 @@ export async function scan(
   const missing = [...entries.values()].filter(
     (entry) =>
       !inventory.blocked(entry.wirePath) &&
+      (!opts.retries || opts.retries.ready(entry.wirePath, 'scan')) &&
       !present.has(entry.wirePath) &&
       !filter.excluded(entry.wirePath, entry.size)
   )
@@ -482,7 +495,16 @@ export async function scan(
           )
             return false
           const before = await opts.previous(lost)
-          return before !== null && alike(before, await fs.read(path))
+          try {
+            return before !== null && alike(before, await fs.read(path))
+          } catch (error) {
+            checkCancellation(opts.signal)
+            if (!opts.retries || !isFileFailure(error)) throw error
+            await opts.retries.failed(found, 'scan', error)
+            unreadCandidate = true
+            skip(path, reasonOf(error))
+            return false
+          }
         })
 
   const ops: CommitOp[] = []

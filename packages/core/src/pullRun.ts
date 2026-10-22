@@ -1,4 +1,5 @@
 import { transact } from './stateTransaction.js'
+import { isFileFailure } from './fileRetry.js'
 import {
   AbeleError,
   type ChangeItem,
@@ -564,6 +565,11 @@ export class Puller {
     const destinations = new Map(wanted.filter((c) => c.op !== 'delete').map((c) => [c.path, c]))
     for (const change of wanted) {
       checkCancellation(this.opts.signal)
+      if (this.opts.retries && !this.opts.retries.ready(change.path, 'pull')) {
+        this.hold(change)
+        await finish(change)
+        continue
+      }
       // Retain the identity as an obligation until the later occupant is actually
       // installed. Do not install an obsolete occupant (or adopt its local edit).
       const occupant = destinations.get(change.path)
@@ -594,9 +600,14 @@ export class Puller {
         await finish(change)
         continue
       }
-      const stage = await this.staging(change)
-      if (stage === null) taking.push(change)
-      else staged.push(stage)
+      try {
+        const stage = await this.staging(change)
+        if (stage === null) taking.push(change)
+        else staged.push(stage)
+      } catch (error) {
+        if (!(await this.retryFailure(change, error))) throw error
+        await finish(change)
+      }
     }
     await this.stageAll(staged)
     for (const { change } of staged) {
@@ -617,13 +628,28 @@ export class Puller {
         // Keep the durable obligation until this attempt has actually resolved it.
         this.attemptHeld = false
         const base = (await this.state.byFileId(change.file_id))?.versionId ?? null
-        await this.take(change, fetched, local)
+        if (this.opts.retries && !this.opts.retries.ready(change.path, 'pull')) this.hold(change)
+        else
+          try {
+            await this.take(change, fetched, local)
+            await this.opts.retries?.succeeded(change.path, 'pull')
+          } catch (error) {
+            if (!(await this.retryFailure(change, error))) throw error
+          }
         if (this.attemptHeld) this.holds.setBase(change.file_id, base)
         else this.resolve(change)
         await finish(change)
       }
     }
     this.firstHeld = this.holds.earliest()
+  }
+
+  private async retryFailure(change: ChangeItem, error: unknown): Promise<boolean> {
+    checkCancellation(this.opts.signal)
+    if (!this.opts.retries || !isFileFailure(error)) return false
+    await this.opts.retries.failed(change.path, 'pull', error)
+    this.hold(change)
+    return true
   }
 
   /**
@@ -911,41 +937,49 @@ export class Puller {
     const seen = new Set<string>()
     for (const change of changes) {
       checkCancellation(this.opts.signal)
-      const sha = change.sha
-      if (sha === null || change.op === 'delete') continue
-      if (this.fs.beginAtomicWrite && this.fs.reopenStage && this.client.openVersion) continue
-      if (seen.has(sha) || local.has(sha)) continue
-      if (this.passedOver(change)) continue
-      const entry = await this.state.byFileId(change.file_id)
-      if (entry?.versionId === change.version_id || entry?.sha === sha) continue
-      if (this.isDirty(change, entry)) continue
-      if (entry !== null && (await this.placer.edited(entry))) continue
-      if (
-        entry !== null &&
-        this.opts.protectMissing &&
-        !this.opts.recheck?.has(entry.fileId) &&
-        (await this.fs.stat(entry.path)) === null
-      )
-        continue
-      // Something on disk that nothing has synced: a device syncing over a copy of the vault
-      // it was handed, or somebody's unsynced work. The apply adopts the first and holds the
-      // second, and wants no bytes from the server for either.
-      let target: string
       try {
-        target = await this.placer.targetOf(change, entry)
-      } catch (error) {
-        // A known collision is held by take(); it needs no content prefetch.
-        if (error instanceof AbeleError && error.code === 'path_taken') continue
-        if (error instanceof EngineError && error.code === 'conflict' && error.cause === undefined)
+        const sha = change.sha
+        if (sha === null || change.op === 'delete') continue
+        if (this.fs.beginAtomicWrite && this.fs.reopenStage && this.client.openVersion) continue
+        if (seen.has(sha) || local.has(sha)) continue
+        if (this.passedOver(change)) continue
+        const entry = await this.state.byFileId(change.file_id)
+        if (entry?.versionId === change.version_id || entry?.sha === sha) continue
+        if (this.isDirty(change, entry)) continue
+        if (entry !== null && (await this.placer.edited(entry))) continue
+        if (
+          entry !== null &&
+          this.opts.protectMissing &&
+          !this.opts.recheck?.has(entry.fileId) &&
+          (await this.fs.stat(entry.path)) === null
+        )
           continue
-        throw error
+        // Something on disk that nothing has synced: a device syncing over a copy of the vault
+        // it was handed, or somebody's unsynced work. The apply adopts the first and holds the
+        // second, and wants no bytes from the server for either.
+        let target: string
+        try {
+          target = await this.placer.targetOf(change, entry)
+        } catch (error) {
+          // A known collision is held by take(); it needs no content prefetch.
+          if (error instanceof AbeleError && error.code === 'path_taken') continue
+          if (
+            error instanceof EngineError &&
+            error.code === 'conflict' &&
+            error.cause === undefined
+          )
+            continue
+          throw error
+        }
+        if ((await this.fs.stat(target)) !== null) {
+          if ((await this.state.get(target)) === null) continue
+          if (await this.placer.matchesTarget(change, entry)) continue
+        }
+        seen.add(sha)
+        wanted.set(sha, change)
+      } catch (error) {
+        if (!(await this.retryFailure(change, error))) throw error
       }
-      if ((await this.fs.stat(target)) !== null) {
-        if ((await this.state.get(target)) === null) continue
-        if (await this.placer.matchesTarget(change, entry)) continue
-      }
-      seen.add(sha)
-      wanted.set(sha, change)
     }
 
     const fetched = new Map<string, Uint8Array>()
@@ -973,6 +1007,7 @@ export class Puller {
           await this.placer.matchesTarget(change, await this.state.byFileId(change.file_id), true)
         )
           return
+        if (await this.retryFailure(change, error)) return
         throw error
       }
       if (bytes === null) this.placer.disbelieve(sha)

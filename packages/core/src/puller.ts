@@ -26,6 +26,7 @@ import type { StateStore } from './state.js'
  */
 
 export interface PullOptions {
+  retries?: import('./fileRetry.js').FileRetries
   signal?: AbortSignal
   /** Early engine pulls preserve offline local deletes until the scanner judges them. */
   protectMissing?: boolean

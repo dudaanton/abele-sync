@@ -74,5 +74,5 @@ export interface EngineClient {
   directoryRefusals?(): readonly import('./v2Directories.js').DirectoryRefusal[]
   pathRefusal?(path: string): import('./pusher.js').Refusal | undefined
   /** Clear refusals after prepare and a durable manifest rewind. Engine rescan orders this. */
-  retryRefusedDirectories?(): Promise<void>
+  retryRefusedDirectories?(paths?: readonly string[]): Promise<void>
 }

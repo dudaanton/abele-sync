@@ -126,10 +126,11 @@ export class V2Directories {
     this.indexRefusals(doc.refused ?? [])
     return state.setMeta!(KEY, JSON.stringify(doc))
   }
-  async loadRefusals(retry = false): Promise<void> {
+  async loadRefusals(retry = false, paths?: readonly string[]): Promise<void> {
     const doc = await this.read()
     if (retry && doc.refused?.length) {
-      doc.refused = []
+      doc.refused =
+        paths === undefined ? [] : doc.refused.filter((item) => !paths.includes(item.path))
       await this.save(doc)
     }
   }

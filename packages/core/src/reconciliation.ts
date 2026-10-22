@@ -1,4 +1,5 @@
 import { transact } from './stateTransaction.js'
+import { isFileFailure, type FileRetries } from './fileRetry.js'
 import type { FileInfo, FileSystem } from './fs.js'
 import { revalidationPaths, scan, type ScanFilter, type ScanResult } from './scanner.js'
 import type { StateEntry, StateStore } from './state.js'
@@ -331,7 +332,8 @@ export async function reconciliationScan(
   startup = true,
   client?: EngineClient,
   signal?: AbortSignal,
-  observedCursor?: number
+  observedCursor?: number,
+  retries?: FileRetries
 ): Promise<{ found: ScanResult; reconciliation: ReconciliationState | null; basis: StateStore }> {
   const comparisonCursor = observedCursor ?? (await state.getCursor())
   const basis = retiredEntries ? await comparisonState(state, retiredEntries) : state
@@ -370,8 +372,16 @@ export async function reconciliationScan(
   if (older.length > 1) {
     for (const { entry, info } of older) {
       checkCancellation(signal)
-      if ((await fingerprintFile(fs, info.path, sha256, signal)).sha !== entry.sha)
-        changedOlder.push({ entry, info })
+      if (retries && !retries.ready(entry.wirePath, 'scan')) continue
+      try {
+        if ((await fingerprintFile(fs, info.path, sha256, signal)).sha !== entry.sha)
+          changedOlder.push({ entry, info })
+      } catch (error) {
+        checkCancellation(signal)
+        if (!retries || !isFileFailure(error)) throw error
+        await retries.failed(entry.wirePath, 'scan', error)
+        continue
+      }
       if (changedOlder.length > 1) {
         reason = 'multiple tracked files have changed content with older timestamps'
         break
@@ -390,7 +400,10 @@ export async function reconciliationScan(
     head > comparisonCursor
   ) {
     const { entry, info } = (changedOlder[0] ?? older[0])!
-    if (!entry.wirePath.toLowerCase().endsWith('.md')) {
+    if (
+      !entry.wirePath.toLowerCase().endsWith('.md') &&
+      (!retries || retries.ready(entry.wirePath, 'scan'))
+    ) {
       const latest = (
         await client.versions(entry.fileId, { limit: 1 }).catch((error) => {
           if (error instanceof AbeleError && error.code === 'not_found') return []
@@ -403,9 +416,16 @@ export async function reconciliationScan(
         latest.sha !== null &&
         info.mtime > latest.mtime
       ) {
-        const { sha } = await fingerprintFile(fs, info.path, sha256, signal)
-        if (sha !== entry.sha && sha !== latest.sha)
-          reason = 'backdated local binary diverges from a newer remote version with an older clock'
+        try {
+          const { sha } = await fingerprintFile(fs, info.path, sha256, signal)
+          if (sha !== entry.sha && sha !== latest.sha)
+            reason =
+              'backdated local binary diverges from a newer remote version with an older clock'
+        } catch (error) {
+          checkCancellation(signal)
+          if (!retries || !isFileFailure(error)) throw error
+          await retries.failed(entry.wirePath, 'scan', error)
+        }
       }
     }
   }
@@ -472,6 +492,7 @@ export async function reconciliationScan(
   let found: ScanResult
   if (reconciliation?.phase === 'requested') {
     found = await scan(fs, basis, filter, {
+      retries,
       revalidate: 'all',
       pairMoves: false,
       signal,
@@ -493,6 +514,11 @@ export async function reconciliationScan(
     const epoch = await scanHintEpoch(state)
     for (const [path, info] of files) {
       checkCancellation(signal)
+      if (retries && !retries.ready(path, 'scan')) {
+        found.dirty.add(path)
+        found.skipped.push({ path: info.path, reason: 'waiting for file retry' })
+        continue
+      }
       const entry = entries.get(path)!
       const changed = info.size !== entry.size || info.mtime !== entry.mtime
       if (changed) found.dirty.add(path)
@@ -525,6 +551,8 @@ export async function reconciliationScan(
           })
         }
       } catch (error) {
+        checkCancellation(signal)
+        if (isFileFailure(error)) await retries?.failed(path, 'scan', error)
         found.skipped.push({
           path: info.path,
           reason: error instanceof Error ? error.message : String(error),

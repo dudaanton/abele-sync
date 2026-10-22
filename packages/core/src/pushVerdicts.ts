@@ -9,6 +9,7 @@ import {
 } from './apply.js'
 import type { EngineClient } from './engineClient.js'
 import { checkCancellation } from './cancellation.js'
+import { isFileFailure } from './fileRetry.js'
 import { touchesDeferred, type Staged } from './defer.js'
 import { EngineError } from './errors.js'
 import type { FileSystem } from './fs.js'
@@ -26,6 +27,7 @@ import type { StateEntry, StateStore } from './state.js'
 
 /** What one commit's results need before the state is touched: bytes, and what to do with them. */
 export interface Verdicts {
+  failures?: Map<number, unknown>
   stages: Map<number, AtomicStage>
   /**
    * sha → bytes, for the writes of the run being recorded that need some this disk does not
@@ -110,6 +112,7 @@ export class VerdictPlanner {
    */
   async plan(ops: CommitOp[], results: CommitOpResult[]): Promise<Verdicts> {
     this.results = results
+    const failures = new Map<number, unknown>()
     const stale = new Set<number>()
     const writes = new Map<number, string>()
     const bad = new Map<number, string>()
@@ -126,68 +129,74 @@ export class VerdictPlanner {
     }> = []
     for (const [at, result] of results.entries()) {
       if (at > 0) checkCancellation(this.opts.signal)
-      if (result.status === 'rejected') continue
-      const op = ops[at]
-      if (op === undefined) continue
-      // A path the wire would never carry names nothing on this disk. Nothing is fetched for
-      // it and nothing recorded under it; `take` reports it as the server's refusal in reverse.
-      const problem = resultProblem(result)
-      if (problem !== null) {
-        bad.set(at, problem)
-        continue
-      }
-      // The scanner never emits one, so no journal can hold one either.
-      if (op.op === 'restore')
-        throw new EngineError('protocol', 'the pusher does not send restores')
-      // A delete the server took leaves nothing on disk to protect and nothing to write.
-      if (result.status === 'applied' && op.op === 'delete') continue
+      try {
+        if (result.status === 'rejected') continue
+        const op = ops[at]
+        if (op === undefined) continue
+        // A path the wire would never carry names nothing on this disk. Nothing is fetched for
+        // it and nothing recorded under it; `take` reports it as the server's refusal in reverse.
+        const problem = resultProblem(result)
+        if (problem !== null) {
+          bad.set(at, problem)
+          continue
+        }
+        // The scanner never emits one, so no journal can hold one either.
+        if (op.op === 'restore')
+          throw new EngineError('protocol', 'the pusher does not send restores')
+        // A delete the server took leaves nothing on disk to protect and nothing to write.
+        if (result.status === 'applied' && op.op === 'delete') continue
 
-      const previous = await this.state.byFileId(result.file_id)
-      const sent = sentBy(op, previous)
-      const incoming = this.incomingSha(op, result, sent)
-      const target = await this.disk.targetOf(result.path, result.file_id)
-      const file = await this.disk.whereIs(previous, target)
-      const moves =
-        previous !== null &&
-        previous.path !== target &&
-        (await this.fs.stat(previous.path)) !== null
-      const touches = touchesDeferred(
-        this.opts.defer,
-        result.path,
-        previous?.wirePath,
-        op.op === 'create' ? op.path : op.op === 'move' ? op.to_path : null,
-        result.status === 'conflict' ? result.conflict_path : null
-      )
-      // A matching SHA at the source is not consent to install it at another path. Test the
-      // final placement, including both ends of a move, before the accepted-unchanged shortcut.
-      if (
-        touches &&
-        (moves || result.sha === null || !(await this.disk.holds(target, result.sha)))
-      ) {
-        lookups.push({
-          at,
-          result,
-          sentSha: sent?.sha ?? null,
-          base: previous?.versionId ?? null,
-          local: { path: file, sha: op.op === 'delete' ? null : (sent?.sha ?? null) },
-        })
-        continue
-      }
-      if (incoming === null) continue
-      if (await this.disk.holds(file, incoming)) {
+        const previous = await this.state.byFileId(result.file_id)
+        const sent = sentBy(op, previous)
+        const incoming = this.incomingSha(op, result, sent)
+        const target = await this.disk.targetOf(result.path, result.file_id)
+        const file = await this.disk.whereIs(previous, target)
+        const moves =
+          previous !== null &&
+          previous.path !== target &&
+          (await this.fs.stat(previous.path)) !== null
+        const touches = touchesDeferred(
+          this.opts.defer,
+          result.path,
+          previous?.wirePath,
+          op.op === 'create' ? op.path : op.op === 'move' ? op.to_path : null,
+          result.status === 'conflict' ? result.conflict_path : null
+        )
+        // A matching SHA at the source is not consent to install it at another path. Test the
+        // final placement, including both ends of a move, before the accepted-unchanged shortcut.
+        if (
+          touches &&
+          (moves || result.sha === null || !(await this.disk.holds(target, result.sha)))
+        ) {
+          lookups.push({
+            at,
+            result,
+            sentSha: sent?.sha ?? null,
+            base: previous?.versionId ?? null,
+            local: { path: file, sha: op.op === 'delete' ? null : (sent?.sha ?? null) },
+          })
+          continue
+        }
+        if (incoming === null) continue
+        if (await this.disk.holds(file, incoming)) {
+          writes.set(at, incoming)
+          continue
+        }
+        if (!(await this.disk.untouched(op, sent, file))) {
+          stale.add(at)
+          continue
+        }
+        if (sent !== null && this.opts.filter?.excluded(result.path, result.size)) {
+          aside.set(at, await this.asideOf(op, result, sent.sha, previous))
+          continue
+        }
         writes.set(at, incoming)
-        continue
+        wanted.add(incoming)
+      } catch (error) {
+        checkCancellation(this.opts.signal)
+        if (!this.opts.retries || !isFileFailure(error)) throw error
+        failures.set(at, error)
       }
-      if (!(await this.disk.untouched(op, sent, file))) {
-        stale.add(at)
-        continue
-      }
-      if (sent !== null && this.opts.filter?.excluded(result.path, result.size)) {
-        aside.set(at, await this.asideOf(op, result, sent.sha, previous))
-        continue
-      }
-      writes.set(at, incoming)
-      wanted.add(incoming)
     }
     // Each history paged through `concurrency` at a time rather than one after another
     //, then taken in the results' order, so what is staged and said is the same.
@@ -227,6 +236,7 @@ export class VerdictPlanner {
     }
     const runs = runsWithin([...results.keys()], downloads, budget)
     const verdicts: Verdicts = {
+      failures,
       stages: new Map(),
       fetched: new Map(),
       runs,
@@ -272,39 +282,46 @@ export class VerdictPlanner {
     fetched.clear()
     if (this.fs.beginAtomicWrite && this.fs.reopenStage && this.client.openVersion) {
       for (const at of run) {
-        const sha = writes.get(at)
-        if (sha === undefined || !wanted.has(sha) || stale.has(at)) continue
-        const result = this.results[at]
-        if (!result || result.status === 'rejected') continue
-        const target = await disk.targetOf(result.path, result.file_id)
-        const previous = await state.byFileId(result.file_id)
-        const sourcePath = await disk.whereIs(previous, target)
-        const base =
-          (await this.fs.stat(sourcePath)) === null
-            ? null
-            : await fingerprintFile(this.fs, sourcePath, this.hash)
-        const stage = await this.fs.beginAtomicWrite(target, result.mtime, base)
+        if (verdicts.failures?.has(at)) continue
         try {
-          const source = await this.client.openVersion(
-            result.file_id,
-            result.version_id,
-            {
-              sha,
-              size: result.size,
-            },
-            this.opts.signal
-          )
-          await receiveToStage(
-            source,
-            stage,
-            { sha, size: result.size },
-            this.opts.transferBudget ?? this.budget,
-            this.opts.signal
-          )
-          verdicts.stages.set(at, stage)
+          const sha = writes.get(at)
+          if (sha === undefined || !wanted.has(sha) || stale.has(at)) continue
+          const result = this.results[at]
+          if (!result || result.status === 'rejected') continue
+          const target = await disk.targetOf(result.path, result.file_id)
+          const previous = await state.byFileId(result.file_id)
+          const sourcePath = await disk.whereIs(previous, target)
+          const base =
+            (await this.fs.stat(sourcePath)) === null
+              ? null
+              : await fingerprintFile(this.fs, sourcePath, this.hash)
+          const stage = await this.fs.beginAtomicWrite(target, result.mtime, base)
+          try {
+            const source = await this.client.openVersion(
+              result.file_id,
+              result.version_id,
+              {
+                sha,
+                size: result.size,
+              },
+              this.opts.signal
+            )
+            await receiveToStage(
+              source,
+              stage,
+              { sha, size: result.size },
+              this.opts.transferBudget ?? this.budget,
+              this.opts.signal
+            )
+            verdicts.stages.set(at, stage)
+          } catch (error) {
+            await stage.discard()
+            throw error
+          }
         } catch (error) {
-          await stage.discard()
-          throw error
+          checkCancellation(this.opts.signal)
+          if (!this.opts.retries || !isFileFailure(error)) throw error
+          verdicts.failures?.set(at, error)
         }
       }
       return
@@ -332,9 +349,15 @@ export class VerdictPlanner {
         }
       : this.client
     await pool([...shas], this.concurrency, async (sha) => {
-      const bytes = await bytesFor(content, this.fs, sha, local, this.hash)
-      if (bytes !== null) fetched.set(sha, bytes)
-      else this.opts.log?.(`push: the server's bytes for ${sha} do not hash to it; not written`)
+      try {
+        const bytes = await bytesFor(content, this.fs, sha, local, this.hash)
+        if (bytes !== null) fetched.set(sha, bytes)
+        else this.opts.log?.(`push: the server's bytes for ${sha} do not hash to it; not written`)
+      } catch (error) {
+        checkCancellation(this.opts.signal)
+        if (!this.opts.retries || !isFileFailure(error)) throw error
+        for (const at of run) if (writes.get(at) === sha) verdicts.failures?.set(at, error)
+      }
     })
     for (const at of run) {
       const sha = writes.get(at)
