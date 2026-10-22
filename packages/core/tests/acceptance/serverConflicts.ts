@@ -108,7 +108,12 @@ export async function conflictServerFacet(number: number, f: AcceptanceFixture) 
   let prefix = ''
   const readers: V2SyncClient[][] = []
   if (number === 99) {
-    for (const d of f.devices) for (const id of [...d.connections.keys()]) await d.disconnect(id)
+    // This facet provisions group connections itself. Creating six folder
+    // connections only to close their durable stores adds no tested behavior.
+    for (const d of f.devices) {
+      expect(d.connections.size).toBe(0)
+      d.network.limitRequests(1000)
+    }
     for (const [i, owner] of owners.entries()) {
       const tokens: string[] = []
       const clients: V2SyncClient[] = []

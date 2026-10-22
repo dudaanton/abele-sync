@@ -223,7 +223,8 @@ export async function acceptanceFixture(
   dialect: Dialect = 'sqlite',
   engineClient: EngineClientFactory = (encoded, _connection, transport) =>
     new V2EngineClient(encoded, { fetch: transport }),
-  engineOptions: Pick<EngineOptions, 'defer'> = {}
+  engineOptions: Pick<EngineOptions, 'defer'> = {},
+  setup: { connectRoots?: boolean } = {}
 ) {
   const scratch = resolve('.scratch')
   await mkdir(scratch, { recursive: true })
@@ -245,7 +246,7 @@ export async function acceptanceFixture(
       devices.push(
         await AcceptanceDevice.create(join(dir, name), name, engineClient, engineOptions)
       )
-    for (let index = 0; index < roots.length; index++) {
+    for (let index = 0; setup.connectRoots !== false && index < roots.length; index++) {
       const root = roots[index]!
       const owner = AccessClient.fromToken(root.token, { fetch })
       for (const device of devices) {

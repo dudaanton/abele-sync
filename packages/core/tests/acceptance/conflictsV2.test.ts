@@ -9,7 +9,7 @@ describe.each(process.env.ABELE_TEST_PG_URL ? (['sqlite', 'pg'] as const) : (['s
       it(
         `${number} preserves both variants, forwards one copy and becomes idle`,
         async () => {
-          const f = await acceptanceFixture(dialect)
+          const f = await acceptanceFixture(dialect, undefined, {}, { connectRoots: number !== 99 })
           try {
             await conflictServerFacet(number, f)
           } finally {

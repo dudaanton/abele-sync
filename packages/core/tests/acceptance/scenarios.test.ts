@@ -46,7 +46,8 @@ for (const dialect of process.env.ABELE_TEST_PG_URL
             fixture = await acceptanceFixture(
               dialect,
               undefined,
-              facetEngineOptions(scenario.number)
+              facetEngineOptions(scenario.number),
+              { connectRoots: scenario.number !== 99 }
             )
             if (stage1ServerFacets.has(scenario.number)) await serverFacet(scenario.number, fixture)
             else if (stage2ServerFacets.has(scenario.number))
