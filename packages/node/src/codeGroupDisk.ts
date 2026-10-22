@@ -223,7 +223,7 @@ export class CodeGroupDisk {
         )
         disk.assertOwningLedger()
         if (vault.state.getMeta(disk.marker) !== 'committed') await disk.rollback()
-      } else if ((await readdir(disk.work)).length) {
+      } else if (!(await initialSaveOnly(disk.work))) {
         throw new ExternalStateError('recovery-required', {
           cause: 'unjournaled installation material must be retained',
         })
@@ -231,6 +231,24 @@ export class CodeGroupDisk {
       await disk.discard()
     }
   }
+}
+
+/** Before the first journal is published, only its private temp ancestry can exist.
+ * Never classify draft blobs, symlinks or unknown material as disposable. */
+async function initialSaveOnly(work: string): Promise<boolean> {
+  async function only(folder: string, child?: string): Promise<boolean> {
+    for (const entry of await readdir(folder, { withFileTypes: true })) {
+      if (child === undefined) {
+        if (!entry.isFile() || !/^[a-f0-9]{24}$/.test(entry.name)) return false
+      } else {
+        if (entry.name !== child || !entry.isDirectory()) return false
+        if (!(await only(join(folder, child), child === '.abele-sync' ? 'tmp' : undefined)))
+          return false
+      }
+    }
+    return true
+  }
+  return only(work, '.abele-sync')
 }
 
 async function matches(fs: NodeFileSystem, images: Images): Promise<boolean> {
