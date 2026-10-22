@@ -12,6 +12,8 @@ export interface WaitingFile {
   reason: string
   quarantined: boolean
   local?: boolean
+  /** Durable recovery obligation; scheduling alone is never an owner. */
+  owner?: string
 }
 const PREFIX = 'file-retry:'
 const key = (path: string) => PREFIX + encodeURIComponent(path)
@@ -52,6 +54,7 @@ export class FileRetries {
           if (
             !row ||
             typeof row.path !== 'string' ||
+            (row.owner !== undefined && typeof row.owner !== 'string') ||
             key(row.path) !== name ||
             !['pull', 'push', 'scan', 'recovery'].includes(row.phase) ||
             !Number.isSafeInteger(row.attempts) ||
@@ -81,7 +84,41 @@ export class FileRetries {
         rows.set(row.path, row)
       }
     }
+    const owners = [...rows.values()].some((row) => row.phase === 'recovery')
+      ? await this.recoveryOwners()
+      : new Map<string, string>()
+    for (const row of rows.values()) {
+      if (row.phase !== 'recovery' || row.reason.startsWith('invalid retry metadata: ')) continue
+      const owner = row.owner ?? owners.get(row.path)
+      if (!owner || !owners.has(owner)) {
+        await this.state.setMeta?.(key(row.path), null)
+        rows.delete(row.path)
+      } else row.owner = owner
+    }
     this.rows = rows
+  }
+  private async recoveryOwners(): Promise<Map<string, string>> {
+    const owners = new Map<string, string>()
+    for (const prefix of ['push-receipt:', 'pull-write:', 'pull-evict:']) {
+      for (const name of (await this.state.metadataKeys?.(prefix)) ?? []) {
+        const raw = await this.state.getMeta?.(name)
+        if (raw == null) continue
+        owners.set(name, name)
+        let value
+        try {
+          value = JSON.parse(raw)
+        } catch {
+          /* damaged records still own their review */
+        }
+        for (const path of [value?.path, value?.wirePath, value?.base?.wirePath])
+          if (typeof path === 'string') owners.set(path, name)
+        if (prefix !== 'push-receipt:') {
+          const entry = await this.state.byFileId(name.slice(prefix.length))
+          if (entry) owners.set(entry.wirePath, name)
+        }
+      }
+    }
+    return owners
   }
   list(): WaitingFile[] {
     return [...this.rows.values()].map((row) => ({ ...row }))
@@ -101,10 +138,18 @@ export class FileRetries {
       path = path.slice(0, at)
     }
   }
-  next(): number | null {
+  async next(): Promise<number | null> {
     let next: number | null = null
+    let owners: Map<string, string> | undefined
     for (const row of this.rows.values())
-      if (!row.quarantined) next = Math.min(next ?? row.nextAt, row.nextAt)
+      if (!row.quarantined) {
+        if (row.phase === 'recovery') {
+          owners ??= await this.recoveryOwners()
+          const owner = row.owner ?? owners.get(row.path)
+          if (!owner || !owners.has(owner)) continue
+        }
+        next = Math.min(next ?? row.nextAt, row.nextAt)
+      }
     return next
   }
   async failed(
@@ -112,7 +157,8 @@ export class FileRetries {
     phase: RetryPhase,
     error: unknown,
     quarantine = false,
-    state = this.state
+    state = this.state,
+    owner?: string
   ): Promise<void> {
     // Multiple phases can see the same failed path in one cycle; count one attempt.
     const prior = this.rows.get(path)
@@ -127,6 +173,7 @@ export class FileRetries {
       reason: error instanceof Error ? error.message : String(error),
       quarantined: quarantine || (phase === 'recovery' && attempts >= 3),
       local: error instanceof FileOperationError,
+      ...((owner ?? prior?.owner) ? { owner: owner ?? prior?.owner } : {}),
     }
     if (!state.setMeta || !state.metadataKeys) throw error
     await state.setMeta(key(path), JSON.stringify(row))
@@ -141,7 +188,8 @@ export class FileRetries {
     )
       return
     await state.setMeta?.(key(path), null)
-    this.rows.delete(path)
+    // A scoped mutation is only tentative until its caller commits and reloads.
+    if (state === this.state) this.rows.delete(path)
   }
   async retryNow(): Promise<void> {
     await this.load()

@@ -481,7 +481,7 @@ export class SyncEngine implements ExclusiveOperationPort {
       this.set({ waiting: waitingFiles.length, waitingFiles })
       if (waitingFiles.length) this.log(`sync: ${waitingFiles.length} waiting`)
       // File timers must not bypass network/auth/server failure handling.
-      const next = completed ? this.cycle.retries.next() : null
+      const next = completed ? await this.cycle.retries.next() : null
       this.wake.scheduleFiles(next === null ? null : Math.max(0, next - this.now()))
     }
   }

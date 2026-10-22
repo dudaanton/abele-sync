@@ -92,7 +92,7 @@ it('persists 5-second exponential backoff capped at five minutes, including subt
   )
   for (const delay of [5000, 10000, 20000, 40000, 80000, 160000, 300000, 300000]) {
     await retries.failed('folder', 'push', new Error('refused'))
-    expect(retries.next()).toBe(now + delay)
+    expect(await retries.next()).toBe(now + delay)
     expect(retries.ready('folder/file.bin')).toBe(false)
     retries = new FileRetries(
       state,
@@ -119,7 +119,7 @@ it('quarantines only the recovery record after three failed attempts', async () 
   }
   expect(retries.ready('broken.bin')).toBe(false)
   expect(retries.ready('healthy.bin')).toBe(true)
-  expect(retries.next()).toBeNull()
+  expect(await retries.next()).toBeNull()
   await retries.retryNow()
   expect(retries.ready('broken.bin')).toBe(true)
 })

@@ -407,9 +407,10 @@ class Pusher {
     if (!(await receiptStillCurrent(this.state, row))) {
       await transact(this.state, async (tx) => {
         await tx.setMeta?.(key, null)
+        await this.opts.retries?.succeeded(row.path, 'recovery', tx)
+        await this.opts.retries?.succeeded(key, 'recovery', tx)
       })
-      await this.opts.retries?.succeeded(row.path, 'recovery')
-      await this.opts.retries?.succeeded(key, 'recovery')
+      await this.opts.retries?.load()
       return
     }
     const verdicts = await this.planner.plan([row.op], [row.result])
@@ -423,9 +424,10 @@ class Pusher {
         current = await receiptStillCurrent(tx, row)
         if (current) await this.recorder.withState(tx).take(row.op, row.result, 0, verdicts)
         await tx.setMeta?.(key, null)
+        await this.opts.retries?.succeeded(row.path, 'recovery', tx)
+        await this.opts.retries?.succeeded(key, 'recovery', tx)
       })
-      await this.opts.retries?.succeeded(row.path, 'recovery')
-      await this.opts.retries?.succeeded(key, 'recovery')
+      await this.opts.retries?.load()
       const result = row.result
       if (
         current &&
@@ -458,7 +460,7 @@ class Pusher {
     } catch (error) {
       checkCancellation(this.opts.signal)
       if (!this.opts.retries || !isFileFailure(error)) throw error
-      await this.opts.retries.failed(row.path, 'recovery', error)
+      await this.opts.retries.failed(row.path, 'recovery', error, false, this.state, key)
     } finally {
       await this.planner.discardStages(verdicts)
     }
@@ -485,7 +487,14 @@ class Pusher {
       `push-receipt:${encodeURIComponent(identity)}`,
       JSON.stringify({ path, op, result, base })
     )
-    await this.opts.retries.failed(path, 'recovery', error, false, tx)
+    await this.opts.retries.failed(
+      path,
+      'recovery',
+      error,
+      false,
+      tx,
+      `push-receipt:${encodeURIComponent(identity)}`
+    )
     this.report.kept.push(path)
   }
 
