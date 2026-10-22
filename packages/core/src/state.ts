@@ -1,4 +1,5 @@
 import type { CommitOp } from '@abele/sync-protocol'
+import { caseKey } from '@abele/sync-protocol'
 import { StateTransaction, changedState, type StateMutation } from './stateTransaction.js'
 
 /** What the engine remembers about one synced file between runs. */
@@ -36,6 +37,9 @@ export interface StateStore {
   get(path: string): Promise<StateEntry | null>
   byFileId(fileId: string): Promise<StateEntry | null>
   all(): AsyncIterable<StateEntry>
+  /** All possible case/Unicode aliases (caseKey equality), including exact spelling.
+   * Optional index; callers filter using the filesystem's stricter collision key. */
+  pathCandidates?(path: string): AsyncIterable<StateEntry>
   /** Upserts by `path` and indexes `fileId`. */
   put(entry: StateEntry): Promise<void>
   delete(path: string): Promise<void>
@@ -70,6 +74,7 @@ export class MemoryStateStore implements StateStore {
   private revision = 0
   /** Keyed by path. */
   private entries = new Map<string, StateEntry>()
+  private paths = new Map<string, Set<string>>()
   /** fileId → the path that file was last put under. */
   private index = new Map<string, string>()
   private cursor = 0
@@ -78,6 +83,15 @@ export class MemoryStateStore implements StateStore {
 
   private change<K, V>(map: Map<K, V>, key: K, value: V | undefined): void {
     this.revision++
+    if (map === this.entries) {
+      const path = key as string,
+        folded = caseKey(path)
+      const names = this.paths.get(folded) ?? new Set<string>()
+      if (value === undefined) names.delete(path)
+      else names.add(path)
+      if (names.size) this.paths.set(folded, names)
+      else this.paths.delete(folded)
+    }
     if (value === undefined) map.delete(key)
     else map.set(key, value)
   }
@@ -94,6 +108,13 @@ export class MemoryStateStore implements StateStore {
 
   async *all(): AsyncIterable<StateEntry> {
     for (const entry of [...this.entries.values()]) yield { ...entry }
+  }
+
+  async *pathCandidates(path: string): AsyncIterable<StateEntry> {
+    for (const name of this.paths.get(caseKey(path)) ?? []) {
+      const entry = await this.get(name)
+      if (entry !== null) yield entry
+    }
   }
 
   /**

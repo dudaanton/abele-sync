@@ -1,3 +1,4 @@
+import { pathOccupant } from './pathOccupant.js'
 import { replayAuthority } from './replayAuthority.js'
 import { resolveLocalFile } from './localPaths.js'
 import { transact, savepoint } from './stateTransaction.js'
@@ -354,7 +355,14 @@ async function receiptStillCurrent(
       throw error
     }
     const source = destination.id === id ? current : await state.byFileId(destination.id)
-    if (!replayAuthority(destination.id, destination.base, source, await state.get(target)))
+    if (
+      !replayAuthority(
+        destination.id,
+        destination.base,
+        source,
+        await pathOccupant(fs, state, target, destination.id)
+      )
+    )
       return false
   }
   if (row.base !== undefined)

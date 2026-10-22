@@ -1,4 +1,5 @@
 import { EngineError } from './errors.js'
+import { caseKey } from '@abele/sync-protocol'
 import type { Journal, StateEntry, StateStore } from './state.js'
 
 export type StateMutation =
@@ -60,6 +61,18 @@ export class StateTransaction implements StateStore {
     for (const entry of this.entries.values()) {
       this.check()
       if (entry !== null) yield { ...entry }
+    }
+  }
+  async *pathCandidates(path: string): AsyncIterable<StateEntry> {
+    this.check()
+    const key = caseKey(path)
+    for await (const entry of this.parent.pathCandidates?.(path) ?? this.parent.all()) {
+      this.check()
+      if (!this.entries.has(entry.path) && caseKey(entry.path) === key) yield entry
+    }
+    for (const entry of this.entries.values()) {
+      this.check()
+      if (entry !== null && caseKey(entry.path) === key) yield { ...entry }
     }
   }
   async put(entry: StateEntry): Promise<void> {

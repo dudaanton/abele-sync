@@ -156,14 +156,18 @@ it('receipt and journal retries cannot steal paths from identities installed by 
 })
 
 it.each([
-  ['receipt', 'new.bin', 'new.bin'],
-  ['journal', 'new.bin', 'new.bin'],
-  ['receipt', 'Café.bin', 'Cafe\u0301.bin'],
-  ['journal', 'Café.bin', 'Cafe\u0301.bin'],
+  ['receipt', 'new.bin', 'new.bin', 'exact'],
+  ['journal', 'new.bin', 'new.bin', 'exact'],
+  ['receipt', 'Café.bin', 'Cafe\u0301.bin', 'exact'],
+  ['journal', 'Café.bin', 'Cafe\u0301.bin', 'exact'],
+  ['receipt', 'note.bin', 'NOTE.bin', 'case'],
+  ['journal', 'note.bin', 'NOTE.bin', 'case'],
+  ['receipt', 'Café.bin', 'Cafe\u0301.bin', 'normalizing'],
+  ['journal', 'Café.bin', 'Cafe\u0301.bin', 'normalizing'],
 ] as const)(
   'D-149 %s replay preserves a replacement destination at %s (%s) even with equal bytes',
-  async (kind, wire, path) => {
-    const f = await fixture()
+  async (kind, wire, path, mode) => {
+    const f = await fixture(mode)
     const source = {
       path: 'old.bin',
       wirePath: 'old.bin',
@@ -224,8 +228,11 @@ it.each([
   }
 )
 
-async function fixture() {
-  const fs = new MemoryFileSystem(),
+async function fixture(mode?: string) {
+  const fs = new MemoryFileSystem({
+      caseInsensitive: mode === 'case',
+      normalizing: mode === 'normalizing',
+    }),
     state = new MemoryStateStore()
   const bytes = new Uint8Array([1]),
     sha = await sha256(bytes)

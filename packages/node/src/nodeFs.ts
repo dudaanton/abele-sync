@@ -56,6 +56,9 @@ const WATCH_MAX_WAIT_MS = 2000
 const STABLE_GAP_MS = 200
 
 export interface NodeFileSystemOptions {
+  /** Volume's name-equivalence key when known. Without a volume capability probe,
+   * conservatively fold case/Unicode; platform alone does not determine APFS rules. */
+  pathKey?: (path: string) => string
   /**
    * Extra folder names skipped by `list` and by the watcher. Root-relative and root-only: a
    * vault folder that happens to carry one of these names deeper down is synced like any other.
@@ -90,6 +93,7 @@ export interface NodeFileSystemOptions {
  * is swept by `sweepTemp`, which the daemon calls once it holds the lock and nobody else does.
  */
 export class NodeFileSystem implements FileSystem {
+  readonly pathKey: (path: string) => string
   async conditionalFile(operation: ConditionalFileOperation): Promise<boolean> {
     const applied = await conditionalFile(this.base, operation, () => this.checkEffect())
     if (applied && (operation.effect.kind === 'remove' || operation.effect.kind === 'move'))
@@ -126,6 +130,7 @@ export class NodeFileSystem implements FileSystem {
     private readonly root: string,
     options: NodeFileSystemOptions = {}
   ) {
+    this.pathKey = options.pathKey ?? caseKey
     this.base = resolve(root)
     this.effectGuard = options.effectGuard
     this.stages = new NodeStages(

@@ -44,3 +44,26 @@ The host must document its tier and the checked tier's final-check-to-mutation
 gap. Desktop hosts with native identity support can continue to use the exclusive
 tier. Host-side coordination must still serialize the host's own pending writes;
 neither tier grants authority to ignore local edits or bypass core review gates.
+
+## Physical-name authority
+
+`FileSystem.pathKey(path)` reports the volume's collision key, including parent
+components: exact names, NFC for normalization-only hosts, or protocol `caseKey`
+for hosts folding case and Unicode. It must agree with host collision checks and
+stay stable for the adapter's lifetime. Inodes and content hashes are not name
+keys; independent hard-link names remain distinct.
+
+Preflight, adoption, receipt replay, approval settlement and ledger publication
+look up destination ownership through this key. An exact row cannot hide another
+identity under an alias. Optional `StateStore.pathCandidates(path)` returns all
+rows with equal protocol `caseKey`; core filters by the host key. Transaction
+handles must include pending puts/deletes. Memory and SQLite provide indexes;
+legacy stores fall back to `all()` and should implement the index for large vaults.
+
+Without a host key, core conservatively folds case and Unicode and holds foreign
+aliases rather than evicting them. Node uses this conservative default because
+platform alone cannot determine volume rules; a verified volume policy can be
+provided through `NodeFileSystemOptions.pathKey`. The plugin must report its host
+policy and forward this port through wrappers. No persisted-state migration is
+needed. Unknown policies can cause extra holds, but cannot authorize replacement
+of a differently spelled foreign file.

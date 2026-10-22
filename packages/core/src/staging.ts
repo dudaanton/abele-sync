@@ -1,3 +1,4 @@
+import { pathOccupant } from './pathOccupant.js'
 import { replayAuthority } from './replayAuthority.js'
 import { transact } from './stateTransaction.js'
 import { normalisePath, type ChangeItem, type CommitOp } from '@abele/sync-protocol'
@@ -395,7 +396,7 @@ export class Staging {
       await state.delete(entry.path)
       return 'kept'
     }
-    const occupant = await state.get(target)
+    const occupant = await pathOccupant(fs, state, target, change.file_id)
     if (
       !replayAuthority(
         change.file_id,
@@ -413,7 +414,7 @@ export class Staging {
           change.file_id,
           one.base === null ? null : { fileId: change.file_id, versionId: one.base },
           await tx.byFileId(change.file_id),
-          await tx.get(target)
+          await pathOccupant(fs, tx, target, change.file_id)
         )
       )
         return false

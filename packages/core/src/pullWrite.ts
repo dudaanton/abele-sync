@@ -2,6 +2,8 @@ import type { ChangeItem } from '@abele/sync-protocol'
 import { EngineError } from './errors.js'
 import type { StateEntry, StateStore } from './state.js'
 import { replayAuthority } from './replayAuthority.js'
+import { pathOccupant } from './pathOccupant.js'
+import type { FileSystem } from './fs.js'
 
 /** Intent saved before a pull touches the disk, retired atomically with its ledger update. */
 interface PendingPullWrite {
@@ -26,7 +28,10 @@ const sameEntry = (a: StateEntry | null, b: StateEntry | null): boolean =>
 
 /** A store without durable metadata cannot prove a previous process's write; never infer it. */
 export class PendingPullWrites {
-  constructor(private readonly state: StateStore) {}
+  constructor(
+    private readonly state: StateStore,
+    private readonly fs?: FileSystem
+  ) {}
 
   async prepare(
     change: ChangeItem,
@@ -80,7 +85,12 @@ export class PendingPullWrites {
       saved.target === target &&
       sameEntry(base, current) &&
       (await this.matching(change, current)) !== null &&
-      replayAuthority(change.file_id, saved.base, current, await this.state.get(target))
+      replayAuthority(
+        change.file_id,
+        saved.base,
+        current,
+        await pathOccupant(this.fs, this.state, target, change.file_id)
+      )
     )
   }
 

@@ -1,3 +1,4 @@
+import { pathOccupant } from './pathOccupant.js'
 import { replayAuthority } from './replayAuthority.js'
 import { transact } from './stateTransaction.js'
 import { AbeleError, caseKey, normalisePath, type ChangeItem } from '@abele/sync-protocol'
@@ -58,7 +59,7 @@ export class PullPlacer {
     >,
     private readonly hash: (bytes: Uint8Array) => Promise<string>
   ) {
-    this.pending = new PendingPullWrites(state)
+    this.pending = new PendingPullWrites(state, fs)
     this.paths = LocalPaths.filePass(fs, state)
     this.budget = opts.transferBudget ?? new TransferBudget()
   }
@@ -124,7 +125,7 @@ export class PullPlacer {
       return false
     }
     if (normalisePath(pending.target) !== change.path) return notWritten()
-    const occupant = await this.state.get(pending.target)
+    const occupant = await pathOccupant(this.fs, this.state, pending.target, change.file_id)
     if (!replayAuthority(change.file_id, pending.base, entry, occupant)) return false
     // A moved source recreated since the crash belongs to the user; do not remove it.
     if (pending.from !== null && (await this.fs.stat(pending.from)) !== null) return notWritten()
@@ -183,7 +184,7 @@ export class PullPlacer {
     if (from !== null && (await this.fs.stat(from)) !== null) return false
     const before = await this.fs.stat(target)
     if (before === null) return false
-    const occupant = await this.state.get(target)
+    const occupant = await pathOccupant(this.fs, this.state, target, change.file_id)
     if (
       !newest &&
       occupant !== null &&
@@ -255,7 +256,7 @@ export class PullPlacer {
     await transact(this.state, async (tx) => {
       await tx.delete(entry.path)
       await tx.setMeta?.(scanHintKey(entry.path), null)
-      await new PendingPullWrites(tx).clear(entry.fileId)
+      await new PendingPullWrites(tx, this.fs).clear(entry.fileId)
     })
     await notifyApplied(this.opts, {
       path: entry.wirePath,
@@ -353,7 +354,7 @@ export class PullPlacer {
       return false
     }
     if (pending) {
-      const occupant = await this.state.get(target)
+      const occupant = await pathOccupant(this.fs, this.state, target, change.file_id)
       if (!replayAuthority(change.file_id, pending.base, entry, occupant)) return false
     }
     if (pending?.stageId && this.fs.reopenStage && this.client.openVersion) {
@@ -632,9 +633,12 @@ export class PullPlacer {
     sha: string,
     observed: FileInfo | null
   ): Promise<Target> {
-    const occupant = await this.state.get(target)
+    const occupant = await pathOccupant(this.fs, this.state, target, change.file_id)
     if (occupant !== null) {
       if (occupant.fileId === change.file_id) return { free: observed }
+      // Unknown hosts use conservative name equivalence. An alias may therefore
+      // be a distinct public file: never evict it as an exact-path replacement.
+      if (occupant.path !== target) return 'held'
       if (this.opts.dirty.has(occupant.wirePath) || (await this.edited(occupant))) {
         return 'held'
       }
@@ -699,21 +703,22 @@ export class PullPlacer {
     const stageId = await this.pending.stageId(change)
     const receiptId = await this.pending.receiptId(change)
     const recorded = await transact(this.state, async (tx) => {
-      if (!(await new PendingPullWrites(tx).authorizes(change, base, target))) return false
+      if (!(await new PendingPullWrites(tx, this.fs).authorizes(change, base, target))) return false
       const current = await tx.byFileId(change.file_id)
-      let occupant = await tx.get(target)
+      let occupant = await pathOccupant(this.fs, tx, target, change.file_id)
       // Only a fresh authoritative snapshot may replace a verified equal
       // occupant. Saved intents cannot take this branch, even with equal bytes.
       if (occupant !== null && occupant.fileId !== change.file_id && freshReplacement !== null) {
         if (
+          occupant.path !== target ||
           !replayAuthority(change.file_id, base, current, null) ||
           !(['path', 'wirePath', 'fileId', 'versionId', 'sha', 'size', 'mtime'] as const).every(
             (field) => occupant![field] === freshReplacement[field]
           )
         )
           return false
-        await tx.delete(target)
-        occupant = null
+        await tx.delete(occupant.path)
+        occupant = await pathOccupant(this.fs, tx, target, change.file_id)
       }
       if (!replayAuthority(change.file_id, base, current, occupant)) return false
       if (from !== null) await tx.delete(from)
@@ -729,7 +734,7 @@ export class PullPlacer {
       await tx.setMeta?.(scanHintKey(target), null)
       await tx.setMeta?.(`pull-base:${target}`, null)
       if (from !== null) await tx.setMeta?.(scanHintKey(from), null)
-      if (stageId === undefined) await new PendingPullWrites(tx).clear(change.file_id)
+      if (stageId === undefined) await new PendingPullWrites(tx, this.fs).clear(change.file_id)
       return true
     })
     if (!recorded) return false

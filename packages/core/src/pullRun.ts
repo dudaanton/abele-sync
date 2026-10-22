@@ -1,3 +1,4 @@
+import { pathOccupant } from './pathOccupant.js'
 import { transact } from './stateTransaction.js'
 import { replayAuthority } from './replayAuthority.js'
 import { isFileFailure } from './fileRetry.js'
@@ -775,7 +776,14 @@ export class Puller {
         this.hold(change)
         return
       }
-      if (!replayAuthority(change.file_id, entry, entry, await this.state.get(target))) {
+      if (
+        !replayAuthority(
+          change.file_id,
+          entry,
+          entry,
+          await pathOccupant(this.fs, this.state, target, change.file_id)
+        )
+      ) {
         this.hold(change)
         return
       }
@@ -989,7 +997,7 @@ export class Puller {
           throw error
         }
         if ((await this.fs.stat(target)) !== null) {
-          if ((await this.state.get(target)) === null) continue
+          if ((await pathOccupant(this.fs, this.state, target, change.file_id)) === null) continue
           if (await this.placer.matchesTarget(change, entry)) continue
         }
         seen.add(sha)

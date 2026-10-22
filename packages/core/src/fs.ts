@@ -32,6 +32,11 @@ export interface FileInfo {
  * the daemon over Node's `fs`; the engine and its tests use `MemoryFileSystem`.
  */
 export interface FileSystem extends Partial<StreamingFileSystem> {
+  /** Stable collision key for vault-relative names, including parent components.
+   * Equal keys mean names may address one file. Report the host's case/Unicode
+   * rules, never content hashes or inode numbers (hard links remain distinct names).
+   * Omission conservatively folds case and Unicode; it must not imply exact names. */
+  pathKey?(path: string): string
   /** Apply an effect only after accepting its expected base (see docs/migration-0.3.md).
    * Exclusive hosts compare the displaced regular file at the mutation boundary and
    * publish into an exclusive destination. Checked hosts compare fresh SHA-256/size,
@@ -115,6 +120,8 @@ export interface MemoryFileSystemOptions {
    * a name are one file, listed under the spelling it was created or renamed with.
    */
   caseInsensitive?: boolean
+  /** Fold canonical Unicode spellings without folding case. */
+  normalizing?: boolean
 }
 
 /**
@@ -133,7 +140,16 @@ export class MemoryFileSystem implements FileSystem {
   private readonly fold: (path: string) => string
 
   constructor(opts: MemoryFileSystemOptions = {}) {
-    this.fold = opts.caseInsensitive === true ? caseKey : (path) => path
+    this.fold =
+      opts.caseInsensitive === true
+        ? caseKey
+        : opts.normalizing
+          ? (path) => path.normalize('NFC')
+          : (path) => path
+  }
+
+  pathKey(path: string): string {
+    return this.fold(path)
   }
 
   async *list(): AsyncIterable<FileInfo> {

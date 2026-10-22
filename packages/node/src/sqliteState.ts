@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { lstatSync, mkdirSync, realpathSync } from 'node:fs'
 import { dirname } from 'node:path'
 import SqliteDatabase, { type Database, type Statement } from 'better-sqlite3'
+import { caseKey } from '@abele/sync-protocol'
 import {
   EngineError,
   ExternalStateError,
@@ -71,6 +72,42 @@ interface Row {
  * shared port's `ExternalStateError` semantics, including aborted and unknown commit outcomes.
  */
 export class SqliteStateStore implements StateStore, ExternalStatePort {
+  private candidatePaths: Map<string, Set<string>> | undefined
+  private candidateVersion: unknown
+  private candidateAdds = 0
+
+  private indexCandidate(path: string): void {
+    if (!this.candidatePaths) return
+    const key = caseKey(path),
+      names = this.candidatePaths.get(key) ?? new Set<string>()
+    names.add(path)
+    this.candidatePaths.set(key, names)
+    // Deleted or rolled-back names are harmless (reads below revalidate rows).
+    // Bound retained names during long sessions with many renames.
+    if (++this.candidateAdds > 10000) this.candidatePaths = undefined
+  }
+
+  async *pathCandidates(path: string): AsyncIterable<StateEntry> {
+    const version = guard('cannot read state revision', () =>
+      this.db.pragma('data_version', { simple: true })
+    )
+    if (!this.candidatePaths || version !== this.candidateVersion) {
+      const rows = guard('cannot index state paths', () => this.selectAll.all() as Row[])
+      this.candidatePaths = new Map()
+      this.candidateVersion = version
+      this.candidateAdds = 0
+      for (const row of rows) {
+        const key = caseKey(row.path),
+          names = this.candidatePaths.get(key) ?? new Set<string>()
+        names.add(row.path)
+        this.candidatePaths.set(key, names)
+      }
+    }
+    for (const name of this.candidatePaths.get(caseKey(path)) ?? []) {
+      const entry = await this.get(name)
+      if (entry !== null) yield entry
+    }
+  }
   readonly transactionScoped = true
   private revision = 0
   readonly externalDurability = 'durable' as const
@@ -222,6 +259,7 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
   }
 
   async put(entry: StateEntry): Promise<void> {
+    this.indexCandidate(entry.path)
     this.write(`cannot record ${entry.path}`, () => {
       this.clearClashes.run(entry.path, entry.fileId, entry.wirePath)
       this.upsert.run({
@@ -361,6 +399,7 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
     switch (op.kind) {
       case 'put': {
         const e = op.entry
+        this.indexCandidate(e.path)
         this.clearClashes.run(e.path, e.fileId, e.wirePath)
         this.upsert.run({
           path: e.path,

@@ -26,6 +26,7 @@ const methods: Array<{
   result: unknown
   iterable?: boolean
 }> = [
+  { name: 'pathKey', args: ['NOTE.bin'], result: 'note.bin' },
   { name: 'list', args: [], result: [info], iterable: true },
   {
     name: 'listDirectories',

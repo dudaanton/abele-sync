@@ -2,6 +2,7 @@ import { replayAuthority } from './replayAuthority.js'
 import { transact } from './stateTransaction.js'
 import {
   AbeleError,
+  caseKey,
   V2CommitOpSchema,
   V2ManifestItemSchema,
   PathSchema,
@@ -369,7 +370,12 @@ export class V2Directories {
         expected,
         identity(current),
         identity(
-          doc.directories.find((d) => d.path.normalize('NFC') === result.path.normalize('NFC'))
+          doc.directories.find(
+            (d) =>
+              d.file_id !== result.file_id &&
+              (this.fs.pathKey?.(d.path) ?? caseKey(d.path)) ===
+                (this.fs.pathKey?.(result.path) ?? caseKey(result.path))
+          ) ?? current
         )
       )
       if (

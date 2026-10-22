@@ -6,6 +6,7 @@ import { SyncCancelled } from '../../src/cancellation.js'
 // This exhaustive port inventory makes a new FileSystem method a type error until
 // its pause behavior is explicitly classified. Cleanup never publishes public bytes.
 const ports = {
+  pathKey: 'read',
   conditionalFile: 'effect',
   installedFile: 'read',
   discardInstallation: 'cleanup',

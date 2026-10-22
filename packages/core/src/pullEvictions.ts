@@ -1,3 +1,4 @@
+import { pathOccupant } from './pathOccupant.js'
 import { transact } from './stateTransaction.js'
 import { replayAuthority } from './replayAuthority.js'
 import { normalisePath, validatePath } from '@abele/sync-protocol'
@@ -38,7 +39,7 @@ export async function recoverPullEvictions(
     try {
       const absent = (await fs.stat(base.path)) === null
       await transact(state, async (tx) => {
-        const entry = await tx.get(base.path)
+        const entry = await pathOccupant(fs, tx, base.path, base.fileId)
         const same =
           replayAuthority(base.fileId, base, await tx.byFileId(base.fileId), entry) &&
           entry !== null &&

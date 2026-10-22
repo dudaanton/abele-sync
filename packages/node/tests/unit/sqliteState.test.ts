@@ -367,6 +367,39 @@ describe('SqliteStateStore', () => {
     expect(await collect(store)).toEqual([entry()])
   })
 
+  it('D-154 alias candidates track scoped writes, rollback and external commits', async () => {
+    const candidates = async (s: typeof store) => {
+      const found = []
+      for await (const row of s.pathCandidates('NOTE.md')) found.push(row.path)
+      return found
+    }
+    expect(await candidates(store)).toEqual([])
+    await store.put({ ...entry(), path: 'Note.md' })
+    expect(await candidates(store)).toEqual(['Note.md'])
+    await expect(
+      store.transaction(async (tx) => {
+        await tx.delete('Note.md')
+        await tx.put({ ...entry(), path: 'note.md' })
+        const found = []
+        for await (const row of tx.pathCandidates!('NOTE.md')) found.push(row.path)
+        expect(found).toEqual(['note.md'])
+        throw new Error('rollback')
+      })
+    ).rejects.toThrow('rollback')
+    expect(await candidates(store)).toEqual(['Note.md'])
+    const other = SqliteStateStore.open(file)
+    try {
+      await other.put({ ...entry(), path: 'note.md' })
+      expect(await candidates(store)).toEqual(['note.md'])
+    } finally {
+      other.close()
+    }
+    await store.transaction(async (tx) => {
+      await tx.delete('note.md')
+    })
+    expect(await candidates(store)).toEqual([])
+  })
+
   it('copies the journal out, ops and all', async () => {
     await store.setJournal(journal())
     const fetched = await store.getJournal()
