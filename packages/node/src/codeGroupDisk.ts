@@ -1,8 +1,8 @@
-import { mkdtemp, readdir, rename, rm } from 'node:fs/promises'
+import { link, lstat, mkdtemp, readdir, rename, rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { basename, dirname, join, resolve } from 'node:path'
 import { EngineError, ExternalStateError, isEngineOwn } from '@abele/sync-core'
-import { normalisePath, validatePath } from '@abele/sync-protocol'
+import { caseKey, normalisePath, validatePath } from '@abele/sync-protocol'
 import {
   CodeDraft,
   GroupBlobs,
@@ -13,7 +13,7 @@ import {
 } from './codeDraft.js'
 import { NodeFileSystem } from './nodeFs.js'
 import { syncParents, syncPath } from './nodeFsDurability.js'
-import { ownTempFolder, realTempFolder } from './nodeFsGuard.js'
+import { containedIn, isMissing, ownTempFolder, realTempFolder } from './nodeFsGuard.js'
 import type { NodeReplica as OpenVault } from './replica.js'
 
 const FOLDER = 'code-approvals'
@@ -95,6 +95,15 @@ export class CodeGroupDisk {
       if (!(await matches(this.vault.disk, step.before)))
         throw new EngineError('conflict', 'code changed immediately before group placement')
       this.journal.attempted = index
+      step.spelling = {}
+      for (const path of Object.keys(step.before)) step.spelling[path] = await this.actualName(path)
+      if (step.op.kind === 'move') {
+        const proof = join(this.work, `move-inode-${index}`)
+        await link(await containedIn(resolve(this.vault.dir), step.op.from), proof)
+        await syncParents(proof, resolve(this.vault.dir))
+        const info = await lstat(proof, { bigint: true })
+        step.moveIdentity = `${info.dev}:${info.ino}`
+      }
       await this.save() // Persist intent before the rename/unlink, including a write that later fails to fsync.
       this.check()
       const op = step.op
@@ -128,69 +137,133 @@ export class CodeGroupDisk {
     this.assertOwningLedger()
     if (this.journal === null || this.vault.state.getMeta(this.marker) === 'committed') return
     const blobs = new GroupBlobs(new NodeFileSystem(join(this.work, 'blobs')))
-    let conflicted = false
     for (const step of this.journal.steps.slice(0, this.journal.attempted + 1).reverse()) {
       this.check()
       const before = await matches(this.vault.disk, step.before)
       const after = await matches(this.vault.disk, step.after)
-      // Case-only names can resolve to one file with identical bytes/metadata on both sides.
-      // Reversing that move is safe even if it never landed, and restores the original spelling.
-      if (before && (step.op.kind !== 'move' || !after)) continue
-      if (!after) {
-        // An edited destination of a completed move belongs to the user. Keep its
-        // new name rather than undoing the edit or blocking every future startup.
-        // Conditional recovery has already retired the private source alias.
-        if (
-          step.op.kind === 'move' &&
-          (await this.vault.disk.stat(step.op.from)) === null &&
-          (await this.vault.disk.stat(step.op.to)) !== null
-        )
+      const op = step.op
+      let protect: string | null = null
+      if (op.kind === 'move') {
+        const source = step.spelling?.[op.from] ?? op.from
+        const named = await this.actualName(op.to)
+        const proven =
+          !!step.moveIdentity &&
+          (await this.moveProof(step)) === step.moveIdentity &&
+          (await this.identity(op.to)) === step.moveIdentity
+        if (!proven && named === op.to) protect = named
+        if (before && named !== op.to) {
+          await this.restoreBefore(step, blobs)
           continue
-        // Preserve the user's edit, but still undo our other members instead of leaving
-        // companion files installed merely because the first rollback target changed.
-        conflicted = true
-        continue
+        }
+        // An edited destination is authoritative only with the identity persisted
+        // before publication, and with its real spelling rather than stat aliases.
+        if (!after && proven && named === op.to && (await this.actualName(source)) !== source)
+          continue
+        if (after && proven && named === op.to) {
+          if (
+            await this.vault.disk.conditionalFile({
+              path: op.to,
+              expected: step.after[op.to] ?? null,
+              effect: { kind: 'move', to: source },
+            })
+          )
+            continue
+        }
+      } else if (after && !before) {
+        // Restore via absence-only publication at the original physical spelling.
+        // The backup is durable throughout the gap between removal and restoration.
+        await this.vault.disk.conditionalFile({
+          path: op.path,
+          expected: step.after[op.path] ?? null,
+          effect: { kind: 'remove' },
+        })
       }
-      this.check()
-      if (step.op.kind === 'move') {
+      await this.restoreBefore(step, blobs, protect)
+    }
+  }
+
+  private async identity(path: string): Promise<string | null> {
+    try {
+      const info = await lstat(await containedIn(resolve(this.vault.dir), path), { bigint: true })
+      return info.isFile() ? `${info.dev}:${info.ino}` : null
+    } catch (error) {
+      if (isMissing(error)) return null
+      throw error
+    }
+  }
+
+  private async moveProof(step: GroupStep): Promise<string | null> {
+    try {
+      const info = await lstat(join(this.work, `move-inode-${this.journal!.steps.indexOf(step)}`), {
+        bigint: true,
+      })
+      return info.isFile() ? `${info.dev}:${info.ino}` : null
+    } catch (error) {
+      if (isMissing(error)) return null
+      throw error
+    }
+  }
+
+  private async actualName(path: string): Promise<string | null> {
+    const identity = await this.identity(path)
+    if (identity === null) return null
+    const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''
+    for (const entry of await this.vault.disk.listChildren(parent)) {
+      if (entry.kind === 'file' && (await this.identity(entry.path)) === identity) return entry.path
+    }
+    return null
+  }
+
+  private async restoreBefore(
+    step: GroupStep,
+    blobs: GroupBlobs,
+    protect: string | null = null
+  ): Promise<void> {
+    const restored = new Set<string>()
+    for (const [key, image] of Object.entries(step.before)) {
+      if (image === null) continue
+      const path = step.spelling?.[key] ?? key
+      if (restored.has(path)) continue
+      restored.add(path)
+      const current = await imageOf(this.vault.disk, path)
+      if (sameImage(current, image) && (await this.actualName(path)) !== protect) {
+        const name = await this.actualName(path)
+        if (name === path) continue
         if (
-          !(await this.vault.disk.conditionalFile({
-            path: step.op.to,
-            expected: step.after[step.op.to] ?? null,
-            effect: { kind: 'move', to: step.op.from },
+          name &&
+          (await this.vault.disk.conditionalFile({
+            path: name,
+            expected: image,
+            effect: { kind: 'move', to: path },
           }))
         )
-          conflicted = true
-      } else {
-        const image = step.before[step.op.path] ?? null
-        if (image === null) {
-          if (
-            !(await this.vault.disk.conditionalFile({
-              path: step.op.path,
-              expected: step.after[step.op.path] ?? null,
-              effect: { kind: 'remove' },
-            }))
-          )
-            conflicted = true
-        } else {
-          const bytes = await blobs.read(image)
-          this.check()
-          if (
-            !(await this.vault.disk.conditionalFile({
-              path: step.op.path,
-              expected: step.after[step.op.path] ?? null,
-              effect: { kind: 'write', bytes, mtime: image.mtime },
-            }))
-          )
-            conflicted = true
-        }
+          continue
+      }
+      const bytes = await blobs.read(image)
+      for (let n = 0; ; n++) {
+        const target =
+          n === 0
+            ? path
+            : `${path}.sync-conflict-${basename(this.work)}-${image.sha.slice(0, 12)}${n > 1 ? `-${n}` : ''}`
+        const have = await imageOf(this.vault.disk, target)
+        if (
+          have?.sha === image.sha &&
+          have.size === image.size &&
+          (await this.actualName(target)) !== protect
+        )
+          break
+        if (have !== null) continue
+        this.check()
+        if (
+          await this.vault.disk.conditionalFile({
+            path: target,
+            expected: null,
+            effect: { kind: 'write', bytes, mtime: image.mtime },
+          })
+        )
+          break
       }
     }
-    if (conflicted)
-      throw new EngineError(
-        'conflict',
-        `code approval recovery found local changes; backups retained in ${this.work}`
-      )
   }
   async discard(): Promise<void> {
     this.check()
@@ -333,6 +406,26 @@ function parseJournal(value: unknown, vault: string): Journal {
     if (step === null || typeof step !== 'object' || !step.op || typeof step.op !== 'object')
       return fail()
     const op = step.op
+    if (
+      step.moveIdentity !== undefined &&
+      (typeof step.moveIdentity !== 'string' || !/^\d+:\d+$/.test(step.moveIdentity))
+    )
+      return fail()
+    if (step.spelling !== undefined) {
+      if (step.spelling === null || typeof step.spelling !== 'object') return fail()
+      const keys = op.kind === 'move' ? [op.from, op.to] : [op.path]
+      if (
+        JSON.stringify(Object.keys(step.spelling).sort()) !==
+        JSON.stringify([...new Set(keys)].sort())
+      )
+        return fail()
+      for (const [key, value] of Object.entries(step.spelling)) {
+        if (value !== null) {
+          path(value)
+          if (caseKey(key) !== caseKey(value)) return fail()
+        }
+      }
+    }
     if (op.kind === 'move') {
       path(op.from)
       path(op.to)

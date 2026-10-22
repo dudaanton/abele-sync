@@ -44,6 +44,21 @@ async function prepared() {
 }
 
 describe('grouped code placement recovery', () => {
+  it('does not undo an unrelated replacement inode even when its bytes equal the move result', async () => {
+    const group = await CodeGroupDisk.create(vault(), () => true)
+    const draft = await CodeDraft.create(disk, group.work)
+    await draft.move(MAIN, MANIFEST)
+    await expect(
+      state.transaction(async () => {
+        await group.place(draft)
+        throw new Error('stop')
+      })
+    ).rejects.toThrow('stop')
+    await disk.writeAtomic(MANIFEST, encodeText('original()'), 1)
+    await CodeGroupDisk.recover(vault(), () => true)
+    expect(await text(MAIN)).toBe('original()')
+    expect(await text(MANIFEST)).toBe('original()')
+  })
   it('refuses a save at the final group publication boundary', async () => {
     const { group, draft } = await prepared()
     const write = disk.writeAtomic.bind(disk),
@@ -212,7 +227,7 @@ describe('grouped code placement recovery', () => {
     expect(await readdir(join(dir, '.obsidian/plugins/sample'))).toEqual(['main.js'])
   })
 
-  it('retains backups rather than overwriting an external edit during recovery', async () => {
+  it('restores backups visibly rather than overwriting an external edit or blocking recovery', async () => {
     const { group, draft } = await prepared()
     await expect(
       state.transaction(async () => {
@@ -221,11 +236,15 @@ describe('grouped code placement recovery', () => {
       })
     ).rejects.toThrow('stop')
     await disk.writeAtomic(MAIN, encodeText('localAfterInterruption()'), 3)
-    await expect(CodeGroupDisk.recover(vault(), () => true)).rejects.toMatchObject({
-      code: 'conflict',
-    })
+    await CodeGroupDisk.recover(vault(), () => true)
     expect(await text(MAIN)).toBe('localAfterInterruption()')
-    expect(await readdir(group.work)).toContain('journal.json')
+    const copies = (await readdir(join(dir, '.obsidian/plugins/sample'))).filter((name) =>
+      name.startsWith('main.js.sync-conflict-')
+    )
+    expect(copies).toHaveLength(1)
+    expect(await text(`.obsidian/plugins/sample/${copies[0]}`)).toBe('original()')
+    await expect(readdir(group.work)).rejects.toMatchObject({ code: 'ENOENT' })
     expect(state.getMeta('test-queue')).toBe('pending')
+    await CodeGroupDisk.recover(vault(), () => true)
   })
 })

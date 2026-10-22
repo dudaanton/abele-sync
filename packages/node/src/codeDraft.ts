@@ -17,6 +17,10 @@ export interface GroupStep {
   op: GroupOp
   before: Images
   after: Images
+  /** Source inode of a move, persisted before any publication. */
+  moveIdentity?: string
+  /** Actual pre-operation directory entry spellings, not case-folded aliases. */
+  spelling?: Record<string, string | null>
 }
 
 export const sameImage = (a: Image | null, b: Image | null): boolean =>
