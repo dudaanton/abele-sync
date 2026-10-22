@@ -12,11 +12,16 @@ import { SimScheduler } from './scheduler.js'
 import { seededRuntime } from './runtime.js'
 
 /** Production v2 routes, no listener and no legacy retained-engine application. */
-export async function simServer(scheduler: SimScheduler) {
+export async function simServer(
+  scheduler: SimScheduler,
+  options: { memoryDatabase?: boolean } = {}
+) {
   const restore = seededRuntime(scheduler)
   await mkdir(resolve('.scratch'), { recursive: true })
   const dir = await mkdtemp(resolve('.scratch/sim-'))
-  const handle = createDb(`sqlite://${join(dir, 'server.db')}`)
+  const handle = createDb(
+    options.memoryDatabase ? 'sqlite::memory:' : `sqlite://${join(dir, 'server.db')}`
+  )
   try {
     await runMigrations(handle.db)
     const config = loadConfig({
