@@ -464,7 +464,9 @@ const optional = <K extends string>(key: K, value: string | null): { [P in K]?: 
 
 /** Signal 0 asks the kernel whether the process exists; another user's is alive too. */
 function isAlive(pid: number): boolean {
-  if (pid <= 0) return false
+  // Node's process.kill accepts signed 32-bit PIDs; a malformed lock is not
+  // an operational probe failure, and must not prevent stale-lock recovery.
+  if (!Number.isInteger(pid) || pid <= 0 || pid > 0x7fffffff) return false
   try {
     process.kill(pid, 0)
     return true

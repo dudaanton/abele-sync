@@ -59,6 +59,21 @@ import { join } from 'node:path'
 import { hostname, tmpdir } from 'node:os'
 import { currentBoot, localDaemon } from '../../src/lock.js'
 
+it.each([2147483648, Number.MAX_SAFE_INTEGER, 1e100])(
+  'D-094 rejects out-of-range lock PID %s before probing the process',
+  (pid) => {
+    fault.contents = `${pid}\n${JSON.stringify({ host: hostname(), daemon: true })}`
+    const kill = vi.spyOn(process, 'kill')
+    try {
+      expect(localDaemon('virtual-vault')).toBeNull()
+      expect(kill).not.toHaveBeenCalled()
+    } finally {
+      kill.mockRestore()
+      fault.contents = '{}'
+    }
+  }
+)
+
 it('does not infer a dead lock holder from an unknown process probe failure', () => {
   fault.contents = `424242\n${JSON.stringify({ host: hostname(), daemon: true })}`
   const failure = Object.assign(new Error('process probe unavailable'), { code: 'EIO' })
