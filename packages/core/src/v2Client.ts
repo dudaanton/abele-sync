@@ -429,7 +429,9 @@ export class V2EngineClient implements EngineClient {
           continue
         }
         if (!entry) {
-          await this.directories?.departed(event.file_id)
+          // Directory departure owns its cleanup; only unknown/file identities
+          // need a tombstone in the file feed before their ledger entry exists.
+          if (await this.directories?.departed(event.file_id)) continue
         }
         items.push({
           seq: event.cursor,

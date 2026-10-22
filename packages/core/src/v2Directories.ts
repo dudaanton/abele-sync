@@ -234,7 +234,7 @@ export class V2Directories {
     const old = doc.directories.find((d) => d.file_id === fileId)
     if (!old) {
       await this.save(doc)
-      return false
+      return waiting?.kind === 'directory'
     }
     doc.directories = doc.directories.filter((d) => d.file_id !== fileId)
     if (!keep)
