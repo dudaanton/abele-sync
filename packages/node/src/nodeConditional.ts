@@ -63,9 +63,12 @@ export async function restoreVictim(root: string, path: string, victim: string, 
         await link(victim, destination)
       }
     }
+    // The public name must survive a crash before its only backup is retired.
+    await syncParents(destination, root)
     await unlink(victim)
   }
-  await syncParents([victim, destination], root)
+  await syncParents(destination, root)
+  await syncParents(victim, root)
 }
 
 async function restoring(folder: string, root: string) {
