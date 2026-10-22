@@ -186,7 +186,7 @@ export class VerdictRecorder {
       const bytes = verdicts.fetched.get(incoming)
       if (bytes !== undefined) {
         const base = op.op === 'delete' ? null : sent
-        await this.state.setMeta(`pull-base:${target}`, JSON.stringify({ base }))
+        await this.state.setMeta?.(`pull-base:${target}`, JSON.stringify({ base }))
         if (
           !(await writeExpected(
             this.fs,
