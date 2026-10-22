@@ -381,7 +381,7 @@ async function recoverFolder(root: string, location: string, check: () => void):
         }
       }
       // Preserve only a receipt for a proven installed object, never a victim.
-      if (installed && intent.effect === 'write') {
+      if (installed && intent.effect === 'write' && intent.receipt) {
         const receipt = await containedIn(root, `.abele-sync/installations/${id}`)
         await mkdir(dirname(receipt), { recursive: true })
         await rename(folder, receipt)

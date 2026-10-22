@@ -152,3 +152,7 @@ async function run(cut = 0, exact: 'capture' | 'publication' | '' = '') {
 it('D-068 restarts after group source capture before publication', async () => {
   await run(0, 'capture')
 })
+
+it('D-070 retires a receiptless write interrupted immediately after publication', async () => {
+  await run(0, 'publication')
+})
