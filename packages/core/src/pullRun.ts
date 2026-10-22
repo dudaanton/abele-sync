@@ -407,15 +407,6 @@ export class Puller {
         const page: ManifestResponse =
           progress?.page ?? (await this.client.manifest(cursor, MANIFEST_PAGE))
         head ??= progress?.head ?? page.head_seq
-        // Inventory is a snapshot, not necessarily the current remote version.
-        // Read the tail before adopting any inventory bytes that it supersedes.
-        if (ahead === null) {
-          const tail = await this.readFeed(head)
-          this.feedCache = { since: head, ...tail }
-          ahead = tail.items
-        }
-        const laterFiles = new Set(ahead.map((change) => change.file_id))
-        const laterPaths = new Set(ahead.map((change) => change.path))
         this.manifestHead = head
         progress ??= {
           page,
@@ -439,6 +430,15 @@ export class Puller {
           await saveProgress(tx)
           await this.persist(tx)
         })
+        // Retain the snapshot boundary before awaiting the tail. A crash followed
+        // by a rewind must not turn later feed changes into initial-inventory notes.
+        if (ahead === null) {
+          const tail = await this.readFeed(head)
+          this.feedCache = { since: head, ...tail }
+          ahead = tail.items
+        }
+        const laterFiles = new Set(ahead.map((change) => change.file_id))
+        const laterPaths = new Set(ahead.map((change) => change.path))
         const completed = new Set(checkpoint.completed)
         const pending = page.items.map(asCreate)
         for (const item of page.items) this.seen.add(item.file_id)
@@ -494,10 +494,7 @@ export class Puller {
     this.inventoryComplete = true
     // Re-inventorying cannot skip the feed interval where an older hold may
     // have been resolved (notably by a deletion absent from the live manifest).
-    this.reached =
-      this.heldFiles.size && this.heldHead !== null
-        ? Math.min(head ?? 0, this.heldHead)
-        : (head ?? 0)
+    this.reached = this.heldHead !== null ? Math.min(head ?? 0, this.heldHead) : (head ?? 0)
     await this.save()
   }
 
@@ -567,7 +564,7 @@ export class Puller {
     if (wanted.length === 0) return
     // Every completion path shares this barrier, including staging and refusal.
     // Out-of-order preparation may persist work, but cannot publish past earlier work.
-    const pending = new Set(wanted)
+    const pending = new Set(wanted.map((change) => change.file_id))
     const ordered = [...wanted].sort(
       (a, b) => (this.coverage.get(a.file_id) ?? a.seq) - (this.coverage.get(b.file_id) ?? b.seq)
     )
@@ -578,8 +575,8 @@ export class Puller {
         : (this.coverage.get(ordered[next]!.file_id) ?? ordered[next]!.seq)
     this.pendingSeq = firstSequence()
     const finish = async (change: ChangeItem) => {
-      pending.delete(change)
-      while (next < ordered.length && !pending.has(ordered[next]!)) next++
+      pending.delete(change.file_id)
+      while (next < ordered.length && !pending.has(ordered[next]!.file_id)) next++
       this.pendingSeq = firstSequence()
       await completed?.(change)
     }

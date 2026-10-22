@@ -215,7 +215,7 @@ export class PullHolds {
       await tx.setMeta?.(this.key(id), node === undefined ? null : JSON.stringify(node))
     }
     this.header =
-      this.first === null
+      this.first === null && inventoryComplete
         ? null
         : {
             format: 2,

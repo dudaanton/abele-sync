@@ -335,18 +335,23 @@ it('I7: randomized protection combinations distinguish manifest notes from follo
     }
 })
 
-it('D-110 retries v3 held after a later page adopts v2 instead of trusting the original null base', async () => {
+it('D-110 retains v3 across retries without adopting an intermediate v2 as a clean base', async () => {
   const f = await fixture()
   f.add(1)
   f.add(2)
   const first = await f.run()
   expect(first.held.map((change) => change.version_id)).toEqual(['v3'])
-  expect((await f.state.get('file.bin'))?.versionId).toBe('v2')
+  expect(await f.state.get('file.bin')).toBeNull()
   const retry = await f.run()
   expect(retry.held.map((change) => change.version_id)).toEqual(['v3'])
   expect(retry.cursor).toBeLessThan(3)
   expect(await f.fs.read('file.bin')).toEqual(f.bodies[1])
   f.dirty.clear()
+  // Clearing a scan hint cannot authorize replacing an untracked local file.
+  // Coalescing deliberately never established the historical v2 as its base.
+  expect((await f.run()).held.map((change) => change.version_id)).toEqual(['v3'])
+  expect(await f.fs.read('file.bin')).toEqual(f.bodies[1])
+  await f.fs.writeAtomic('file.bin', f.bodies[2]!, 2)
   const resumed = await f.run()
   expect(resumed.held).toEqual([])
   expect(resumed.cursor).toBe(3)
