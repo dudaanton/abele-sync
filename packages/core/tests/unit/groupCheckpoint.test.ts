@@ -52,11 +52,12 @@ it('D-032 restores group membership for untracked files in a resumed manifest pa
   const controller = new AbortController(),
     first = makeClient()
   await first.prepare(fs, state)
-  const write = fs.writeAtomic.bind(fs)
+  const write = fs.conditionalFile.bind(fs)
   let writes = 0
-  fs.writeAtomic = async (...args) => {
-    await write(...args)
+  fs.conditionalFile = async (...args) => {
+    const done = await write(...args)
     if (++writes === 1) controller.abort()
+    return done
   }
   const opts = {
     expected: new ExpectedWrites(),
