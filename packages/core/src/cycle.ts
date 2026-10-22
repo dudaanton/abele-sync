@@ -24,7 +24,7 @@ import type { StateEntry } from './state.js'
 import type { WatchReports } from './watchReports.js'
 import { refreshLocalPaths } from './localPaths.js'
 import { stoppableListings } from './guard.js'
-import { resumesScopeRecheck } from './pullRun.js'
+import { importLegacyPullHolds, resumesScopeRecheck } from './pullRun.js'
 import { scanSnapshot } from './scanSnapshot.js'
 import { readReconciliation } from './reconciliation.js'
 import { recoverPendingPullWrites } from './pullRecovery.js'
@@ -285,6 +285,7 @@ export class SyncCycle {
     // Before the server is asked anything, so a narrowing is recorded even offline. A file
     // that came back into scope is settled by a manifest walk, so a widening always walks it,
     // whether or not the host asked for the rescan.
+    await importLegacyPullHolds(state)
     await this.recordScope(this.ctx.signal?.())
     const scope = await this.scope.review(scanningFs, this.filter)
     for (const path of scope.forgotten) {

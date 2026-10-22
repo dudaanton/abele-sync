@@ -67,6 +67,48 @@ const progressPage = (progress: ManifestProgress, page: ManifestResponse) =>
     recheck: progress.recheck,
   })
 
+/** Upgrade before scope/decision rewinds can retire the legacy inventory keys. */
+export async function importLegacyPullHolds(state: StateStore): Promise<void> {
+  const legacy = JSON.parse(
+    (await state.getMeta?.(MANIFEST_PROGRESS)) ?? 'null'
+  ) as ManifestProgress | null
+  const generation = (await state.getMeta?.(GENERATION_KEY)) ?? null
+  if (legacy === null || (legacy.generation ?? null) !== generation) return
+  const payload = JSON.parse(
+    (await state.getMeta?.(MANIFEST_PAGE_DATA)) ?? '{}'
+  ) as CachedManifestPage
+  const changes = legacy.heldChanges ?? payload.heldChanges ?? []
+  if (changes.length === 0) return
+  const old = JSON.parse((await state.getMeta?.(HELD_PROGRESS)) ?? 'null') as HeldProgress | null
+  const progress: HeldProgress =
+    old?.generation === generation
+      ? old
+      : {
+          generation,
+          head: legacy.head,
+          inventoryComplete: legacy.coverageComplete ?? false,
+          holds: [],
+        }
+  const holds = new Map(progress.holds.map((held) => [held.change.file_id, held]))
+  for (const change of changes) {
+    if (holds.has(change.file_id)) continue
+    holds.set(change.file_id, {
+      change,
+      base: (await state.byFileId(change.file_id))?.versionId ?? null,
+      firstSeq: change.seq,
+    })
+  }
+  progress.holds = [...holds.values()]
+  await state.transaction(async () => {
+    await state.setMeta?.(HELD_PROGRESS, JSON.stringify(progress))
+    await state.setMeta?.(
+      MANIFEST_PROGRESS,
+      progressHeader({ ...legacy, firstHeld: null, heldChanges: [] })
+    )
+    await state.setMeta?.(MANIFEST_PAGE_DATA, JSON.stringify({ ...payload, heldChanges: [] }))
+  })
+}
+
 /** Repeated scope marks describe the walk already in progress, not a new rewind. */
 export async function resumesScopeRecheck(
   state: StateStore,
@@ -197,6 +239,7 @@ export class Puller {
   }
 
   async run(): Promise<void> {
+    await importLegacyPullHolds(this.state)
     this.reached = this.report.cursor
     this.inventoryComplete = this.report.cursor > 0
     const durable = JSON.parse(

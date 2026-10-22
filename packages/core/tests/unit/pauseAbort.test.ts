@@ -125,6 +125,58 @@ it('D-022 retains completed manifest coverage when one local edit stays held', a
   await f.engine.stop()
 })
 
+it('D-116 imports a legacy hold before scope widening clears its checkpoint', async () => {
+  const f = await fixture()
+  const item = { ...f.items[0]!, seq: 50 }
+  await f.state.put({
+    path: item.path,
+    wirePath: item.path,
+    fileId: item.file_id,
+    versionId: 'base',
+    sha: item.sha,
+    size: item.size,
+    mtime: 1,
+  })
+  await f.state.setCursor(49)
+  await new ScopeMarks(f.state).review(f.fs, { excluded: () => true })
+  await f.state.setMeta('held-deletes', JSON.stringify([{ path: item.path, fileId: item.file_id }]))
+  await f.state.setMeta(
+    'pull-manifest-progress',
+    JSON.stringify({
+      generation: null,
+      scope: 'old',
+      head: 100,
+      coverageComplete: true,
+      firstHeld: null,
+      completed: [],
+    })
+  )
+  await f.state.setMeta(
+    'pull-manifest-page',
+    JSON.stringify({
+      items: [],
+      next: null,
+      head_seq: 100,
+      heldChanges: [item],
+      recheck: [],
+      seen: [],
+    })
+  )
+  f.client.state = async () => ({
+    head_seq: 100,
+    settings: { max_file_bytes: 1e9, quota_bytes: null },
+  })
+  f.client.manifest = async () => ({ items: [item], next: null, head_seq: 100 })
+  f.client.changes = async () => ({ items: [], next_since: 100, head_seq: 100 })
+  f.client.versions = async () =>
+    [{ version_id: item.version_id }] as Awaited<ReturnType<EngineClient['versions']>>
+  const report = await f.engine.sync()
+  expect(report.pull.held.map((c) => c.file_id)).toEqual([item.file_id])
+  expect(await f.state.getCursor()).toBeLessThan(50)
+  expect(await f.fs.stat(item.path)).toBeNull()
+  await f.engine.stop()
+})
+
 it('D-035 resumes later manifest pages while unchanged scope recheck marks remain', async () => {
   const f = await fixture()
   await f.fs.writeAtomic('0.md', f.bytes[0]!, 1)
