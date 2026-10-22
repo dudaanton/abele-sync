@@ -430,13 +430,12 @@ export class V2EngineClient implements EngineClient {
         }
         if (!entry) {
           await this.directories?.departed(event.file_id)
-          continue
         }
         items.push({
           seq: event.cursor,
           file_id: event.file_id,
           path: event.path,
-          kind: entry.wirePath.endsWith('.md') ? 'note' : 'attachment',
+          kind: (entry?.wirePath ?? event.path).endsWith('.md') ? 'note' : 'attachment',
           version_id: event.version_id,
           op: 'delete',
           prev_path: null,

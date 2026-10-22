@@ -1,0 +1,81 @@
+import { encodeAccessToken } from '@abele/sync-protocol'
+import { expect, it, vi } from 'vitest'
+import { V2EngineClient, MemoryFileSystem, MemoryStateStore, sha256 } from '../../src/index.js'
+import { pull } from '../../src/puller.js'
+import { ExpectedWrites } from '../../src/echo.js'
+
+it('coalesces creation followed by an untracked tombstone on a later V2 page', async () => {
+  const fs = new MemoryFileSystem(),
+    state = new MemoryStateStore()
+  await state.setCursor(1)
+  const scope = { kind: 'folder' as const, id: 'root', path: 'Root' }
+  const item = {
+    file_id: 'file',
+    version_id: 'created',
+    path: 'a.bin',
+    kind: 'attachment',
+    sha: await sha256(new Uint8Array([1])),
+    size: 1,
+    mtime: 1,
+  }
+  const at = '2026-01-01T00:00:00.000Z'
+  const fetcher = vi.fn(async (url: string | URL | Request) => {
+    const address = new URL(String(url))
+    if (address.pathname === '/v2/connection')
+      return Response.json({
+        protocol: 2,
+        token_id: 'token',
+        space_id: 'space',
+        scope,
+        status: 'active',
+        limits: { max_file_bytes: 10000, quota_bytes: null },
+      })
+    if (address.pathname === '/v2/changes') {
+      const since = Number(address.searchParams.get('since'))
+      return Response.json({
+        items:
+          since === 1
+            ? [
+                {
+                  type: 'content',
+                  file_id: 'file',
+                  path: 'a.bin',
+                  item,
+                  prev_path: null,
+                  cursor: 2,
+                  at,
+                },
+              ]
+            : since === 2
+              ? [
+                  {
+                    type: 'delete',
+                    file_id: 'file',
+                    path: 'a.bin',
+                    version_id: 'deleted',
+                    cursor: 3,
+                    at,
+                  },
+                ]
+              : [],
+        cursor: since === 1 ? 2 : 3,
+        next: since === 1 ? '2' : null,
+      })
+    }
+    return new Response(new Uint8Array([1]))
+  })
+  const client = new V2EngineClient(
+    encodeAccessToken({ v: 1, address: 'https://example.test', key: 'k'.repeat(43), scope }),
+    { fetch: fetcher }
+  )
+  await client.prepare(fs, state, () => false, undefined, true)
+  await pull(client, fs, state, {
+    expected: new ExpectedWrites(),
+    dirty: new Set(),
+    filter: { excluded: () => false },
+  })
+  expect(await fs.stat('a.bin')).toBeNull()
+  expect(await state.byFileId('file')).toBeNull()
+  expect(await state.getCursor()).toBe(3)
+  expect(fetcher.mock.calls.every(([url]) => !String(url).includes('/content'))).toBe(true)
+})
