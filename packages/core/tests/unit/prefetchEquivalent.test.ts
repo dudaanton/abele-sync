@@ -16,7 +16,9 @@ it('holds normalization collisions instead of fetching or failing during prefetc
   })
   const client = {
     manifest: async () => ({
-      items: [{ file_id: 'file', version_id: 'v1', path, sha, size: 1, mtime: 1, kind: 'note' }],
+      items: [
+        { seq: 1, file_id: 'file', version_id: 'v1', path, sha, size: 1, mtime: 1, kind: 'note' },
+      ],
       next: null,
       head_seq: 1,
     }),
@@ -52,6 +54,7 @@ it.each([false, true])(
       manifest: async () => ({
         items: [
           {
+            seq: 1,
             file_id: 'file',
             version_id: 'v1',
             path,
@@ -98,6 +101,7 @@ it.each([true, false])(
       manifest: async () => ({
         items: [
           {
+            seq: 1,
             file_id: 'file',
             version_id: 'v1',
             path,

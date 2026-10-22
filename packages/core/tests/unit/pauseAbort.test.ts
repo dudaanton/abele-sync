@@ -105,7 +105,8 @@ it('D-022 retains completed manifest coverage when one local edit stays held', a
   await f.engine.sync()
   // An equal intermediate version cannot acknowledge unsent typing. Only a
   // successful publication may establish its clean base before held feed resumes.
-  expect(await f.state.getCursor()).toBe(0)
+  // Completed inventory no longer forces zero: the oldest unresolved change is seq 2.
+  expect(await f.state.getCursor()).toBe(1)
   expect(await f.state.get('0.md')).toMatchObject({ versionId: 'old' })
   await f.state.put({
     path: item.path,

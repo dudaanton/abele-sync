@@ -29,9 +29,11 @@ async function fixture() {
     })
   }
   add(0)
+  let cut = -1
   const client = {
     manifest: async () => ({ items: [feed[0]!], head_seq: 1, next: null }),
     changes: async (since: number) => {
+      if (cut-- === 0) throw new Error('page crash')
       const next = feed.find((change) => change.seq > since)
       return {
         items: next ? [next] : [],
@@ -49,7 +51,18 @@ async function fixture() {
       filter: { excluded: () => false },
       ...options,
     })
-  return { fs, state, add, run, dirty, bodies, hashes }
+  return {
+    fs,
+    state,
+    add,
+    run,
+    dirty,
+    bodies,
+    hashes,
+    crashAfterPages: (n: number) => {
+      cut = n
+    },
+  }
 }
 
 async function trackedFixture() {
@@ -65,6 +78,160 @@ async function trackedFixture() {
   })
   return f
 }
+
+async function settlingFixture() {
+  const fs = new MemoryFileSystem(),
+    state = new MemoryStateStore()
+  const bytes = new Uint8Array([1]),
+    sha = await sha256(bytes)
+  for (const id of ['a', 'b'])
+    await state.put({
+      path: `${id}.bin`,
+      wirePath: `${id}.bin`,
+      fileId: id,
+      versionId: 'v0',
+      sha,
+      size: 1,
+      mtime: 1,
+    })
+  const feed: ChangeItem[] = []
+  const add = (id: string, op: 'modify' | 'delete') =>
+    feed.push({
+      seq: feed.length + 1,
+      file_id: id,
+      version_id: `v${feed.length + 1}`,
+      op,
+      path: `${id}.bin`,
+      prev_path: null,
+      sha: op === 'delete' ? null : sha,
+      size: 1,
+      mtime: 1,
+      kind: 'attachment',
+      actor: { kind: 'system', id: 'server', name: 'server' },
+      at: '',
+    })
+  add('a', 'modify')
+  let cut = -1
+  const client = {
+    manifest: async () => ({
+      items: [...new Map(feed.map((c) => [c.file_id, c])).values()].filter(
+        (c) => c.op !== 'delete'
+      ),
+      head_seq: feed.length,
+      next: null,
+    }),
+    changes: async (since: number) => {
+      if (cut-- === 0) throw new Error('page crash')
+      const next = feed.find((change) => change.seq > since)
+      return {
+        items: next ? [next] : [],
+        head_seq: feed.length,
+        next_since: next?.seq ?? feed.length,
+      }
+    },
+    getBlob: async () => bytes,
+  } as unknown as EngineClient
+  const run = (noted = new Set<string>()) =>
+    pull(client, fs, state, {
+      dirty: new Set(['a.bin', 'b.bin']),
+      noted,
+      expected: new ExpectedWrites(),
+      filter: { excluded: () => false },
+    })
+  return {
+    run,
+    add,
+    state,
+    crashAfterPages: (n: number) => {
+      cut = n
+    },
+  }
+}
+
+it('D-114 durably retains a new hold after an earlier page settles the last bootstrap hold', async () => {
+  const f = await settlingFixture()
+  expect((await f.run()).held.map((c) => c.file_id)).toEqual(['a'])
+  f.add('a', 'delete')
+  f.add('b', 'modify')
+  const noted = new Set(['a.bin', 'b.bin'])
+  expect((await f.run(noted)).held.map((c) => c.file_id)).toEqual(['b'])
+  // Inventory cleanup must have no authority over unresolved feed obligations.
+  await f.state.setMeta('pull-manifest-progress', null)
+  await f.state.setMeta('pull-manifest-page', null)
+  const retry = await f.run(noted)
+  expect(retry.held.map((c) => c.file_id)).toEqual(['b'])
+  expect(retry.cursor).toBeLessThan(3)
+  expect((await f.state.byFileId('b'))?.versionId).toBe('v0')
+})
+
+it('commits unresolved holds and their bounded cursor atomically across a failed cursor write', async () => {
+  const f = await settlingFixture()
+  await f.run()
+  f.add('a', 'delete')
+  f.add('b', 'modify')
+  const noted = new Set(['a.bin', 'b.bin'])
+  const setCursor = f.state.setCursor.bind(f.state)
+  let failed = false
+  f.state.setCursor = async (cursor) => {
+    await setCursor(cursor)
+    const progress = JSON.parse((await f.state.getMeta('pull-held-progress')) ?? 'null')
+    if (
+      !failed &&
+      progress?.holds.some(({ change }: { change: ChangeItem }) => change.file_id === 'b')
+    ) {
+      failed = true
+      throw new Error('cursor write crash')
+    }
+  }
+  await expect(f.run(noted)).rejects.toThrow('cursor write crash')
+  expect(failed).toBe(true)
+  expect(await f.state.getCursor()).toBe(2)
+  expect(await f.state.getMeta('pull-held-progress')).toBeNull()
+  const retry = await f.run(noted)
+  expect(retry.held.map((c) => c.file_id)).toEqual(['b'])
+  expect(retry.cursor).toBe(2)
+  expect(JSON.parse((await f.state.getMeta('pull-held-progress'))!).holds).toMatchObject([
+    { change: { seq: 3, path: 'b.bin' }, base: 'v0', firstSeq: 3 },
+  ])
+})
+
+it('I7: randomized page crashes retain holds across walking and following restarts', async () => {
+  let random = 114
+  for (let seed = 0; seed < 64; seed++) {
+    const f = await settlingFixture()
+    random = (Math.imul(random, 1664525) + 1013904223) >>> 0
+    f.crashAfterPages(random % 2)
+    try {
+      await f.run()
+    } catch (error) {
+      expect((error as Error).message).toBe('page crash')
+    }
+    f.add('a', 'delete')
+    f.add('b', 'modify')
+    const noted = new Set(['a.bin', 'b.bin'])
+    for (let restart = 0; restart < 4; restart++) {
+      random = (Math.imul(random, 1664525) + 1013904223) >>> 0
+      if ((random & 1) !== 0) {
+        await f.state.setMeta('pull-manifest-progress', null)
+        await f.state.setMeta('pull-manifest-page', null)
+      }
+      f.crashAfterPages((random >>> 8) % 3)
+      try {
+        await f.run(noted)
+      } catch (error) {
+        expect((error as Error).message).toBe('page crash')
+      }
+      expect(await f.state.getCursor(), `seed ${seed}, restart ${restart}`).toBeLessThan(3)
+    }
+    f.crashAfterPages(-1)
+    const retry = await f.run(noted)
+    expect(
+      retry.held.map((c) => c.file_id),
+      `seed ${seed}`
+    ).toEqual(['b'])
+    expect(retry.cursor).toBeLessThan(3)
+  }
+})
 
 it('D-113 holds newer guarded-delete feed changes when resuming a completed manifest', async () => {
   const f = await trackedFixture()
@@ -108,6 +275,13 @@ it('I7: randomized protection combinations distinguish manifest notes from follo
         filter: { excluded: () => excluded },
       }
       f.add(2)
+      f.crashAfterPages((random >>> 8) % 2)
+      try {
+        await f.run(options)
+      } catch (error) {
+        expect((error as Error).message).toBe('page crash')
+      }
+      f.crashAfterPages(-1)
       const report = await f.run(options)
       const context = `${mode}, mask ${mask}, missing ${missing}, untracked ${untracked}`
       if (!excluded && f.dirty.size > 0) {

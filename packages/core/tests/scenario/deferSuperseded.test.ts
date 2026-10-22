@@ -130,9 +130,11 @@ describe('a staged head whose batch was never recorded', () => {
     await b.write(APP, '{"a":"there, later"}')
     await b.sync()
     // The push stages B's head, and the process dies before the batch's results are recorded.
-    const transaction = a.state.transaction
-    a.state.transaction = async () => {
-      throw new Error('killed')
+    const transaction = a.state.transaction.bind(a.state)
+    a.state.transaction = async (fn) => {
+      // Pull cursor/hold transactions now precede this intended receipt crash.
+      if ((await a.state.getJournal()) !== null) throw new Error('killed')
+      return transaction(fn)
     }
     await expect(a.sync()).rejects.toThrow('killed')
     a.state.transaction = transaction

@@ -25,6 +25,16 @@ import type { StateEntry, StateStore } from './state.js'
 import { checkCancellation } from './cancellation.js'
 import { GENERATION_KEY } from './restoreGeneration.js'
 
+const HELD_PROGRESS = 'pull-held-progress'
+interface HeldProgress {
+  generation: string | null
+  head: number
+  inventoryComplete: boolean
+  // A newer held version replaces the payload, but retains the oldest obligation
+  // until a successful application or explicit decision resolves that file.
+  holds: { change: ChangeItem; base: string | null; firstSeq: number }[]
+}
+
 const MANIFEST_PROGRESS = 'pull-manifest-progress'
 const MANIFEST_PAGE_DATA = 'pull-manifest-page'
 interface ManifestProgress {
@@ -62,7 +72,6 @@ export async function resumesScopeRecheck(
   state: StateStore,
   recheck: ReadonlySet<string>
 ): Promise<boolean> {
-  if ((await state.getCursor()) !== 0) return false
   const progress = JSON.parse(
     (await state.getMeta?.(MANIFEST_PROGRESS)) ?? 'null'
   ) as ManifestProgress | null
@@ -158,8 +167,11 @@ export class Puller {
   private reached = 0
   /** The seq of the earliest held change: where the next run must start again. */
   private firstHeld: number | null = null
-  /** Set when the manifest walk held something, so the next run walks it again. */
-  private walkAgain = false
+  private inventoryComplete = false
+  private heldHead: number | null = null
+  private readonly heldBases = new Map<string, string | null>()
+  private readonly heldSequences = new Map<string, number>()
+  private attemptHeld = false
   /** Every file id a manifest page or a feed page of this run named, applied or not. */
   private readonly seen = new Set<string>()
   private readonly heldFiles = new Map<string, ChangeItem>()
@@ -186,8 +198,43 @@ export class Puller {
 
   async run(): Promise<void> {
     this.reached = this.report.cursor
-    if (this.reached === 0) await this.bootstrap()
-    if (!this.followedCheckpoint) await this.follow()
+    this.inventoryComplete = this.report.cursor > 0
+    const durable = JSON.parse(
+      (await this.state.getMeta?.(HELD_PROGRESS)) ?? 'null'
+    ) as HeldProgress | null
+    if (
+      durable !== null &&
+      durable.generation === ((await this.state.getMeta?.(GENERATION_KEY)) ?? null)
+    ) {
+      for (const { change, base, firstSeq } of durable.holds) {
+        this.heldFiles.set(change.file_id, change)
+        this.heldBases.set(change.file_id, base)
+        this.heldSequences.set(change.file_id, firstSeq)
+      }
+      this.heldHead = durable.head
+      // An explicit rewind (scope/reconciliation) must still inventory the vault.
+      const savedCursor = Math.min(durable.head, ...durable.holds.map((held) => held.firstSeq - 1))
+      this.inventoryComplete = durable.inventoryComplete && this.report.cursor === savedCursor
+      if (this.inventoryComplete) this.reached = durable.head
+      this.syncHeld()
+      await this.client.rememberManifest?.(
+        durable.holds
+          .filter(({ change }) => change.sha !== null)
+          .map(({ change }) => ({
+            ...change,
+            sha: change.sha!,
+            size: change.size ?? 0,
+            mtime: change.mtime ?? 0,
+          }))
+      )
+    }
+    const checkpoint = await this.state.getMeta?.(MANIFEST_PROGRESS)
+    if (checkpoint || this.report.cursor === 0) await this.bootstrap()
+    if (!this.followedCheckpoint) {
+      await this.follow()
+      await this.page([...this.heldFiles.values()])
+      await this.save()
+    }
     if (this.report.bootstrapped) await this.recheck()
   }
 
@@ -246,11 +293,13 @@ export class Puller {
    * and then follows the feed from the head the first page reported: anything committed
    * while the walk ran comes through the feed and lands on top.
    *
-   * The cursor is written once, at the end: a walk that is cut off half way has applied
-   * some of the vault, and a cursor at the head would mean the rest was never asked for.
+   * Until coverage is complete, reached stays zero. Each inventory checkpoint can
+   * persist holds without publishing a cursor that skips the remaining inventory.
    */
   private async bootstrap(): Promise<void> {
     this.report.bootstrapped = true
+    this.inventoryComplete = false
+    this.reached = 0
     let cursor: string | null = null
     let head: number | null = null
     this.walking = true
@@ -291,20 +340,30 @@ export class Puller {
               mtime: change.mtime ?? 0,
             })),
         ])
-        for (const held of progress.heldChanges ?? []) this.heldFiles.set(held.file_id, held)
+        // Import legacy checkpoints once; current checkpoints contain inventory only.
+        for (const held of progress.heldChanges ?? []) {
+          if (this.heldFiles.has(held.file_id)) continue
+          this.heldFiles.set(held.file_id, held)
+          this.heldBases.set(
+            held.file_id,
+            (await this.state.byFileId(held.file_id))?.versionId ?? null
+          )
+          this.heldSequences.set(held.file_id, held.seq)
+        }
         this.syncHeld()
         for (const id of progress.seen) this.seen.add(id)
         if (progress.coverageComplete) {
+          this.bootstrapContext = progress
           // Manifest coverage is complete: guarded deletes may only be noted
           // during inventory, never while following or retrying feed changes.
           this.walking = false
+          this.inventoryComplete = true
           // Newer feed events can settle an old hold, but a changed ledger base
           // alone cannot prove that the held remote version was applied.
           this.reached = progress.head
           await this.follow()
           this.followedCheckpoint = true
           await this.page([...this.heldFiles.values()])
-          this.walkAgain = this.firstHeld !== null
           await this.save()
           return
         }
@@ -323,17 +382,18 @@ export class Puller {
           completed: [],
           seen: [],
           firstHeld: this.firstHeld,
-          heldChanges: [...this.heldFiles.values()],
+          heldChanges: [],
         }
         const checkpoint = progress
         this.bootstrapContext = checkpoint
         const saveProgress = () => {
-          checkpoint.firstHeld = this.firstHeld
+          checkpoint.firstHeld = null
           return this.state.setMeta?.(MANIFEST_PROGRESS, progressHeader(checkpoint))
         }
         await this.state.transaction(async () => {
           await this.state.setMeta?.(MANIFEST_PAGE_DATA, progressPage(checkpoint, page))
           await saveProgress()
+          await this.persist()
         })
         const completed = new Set(checkpoint.completed)
         const pending = page.items.map(asCreate)
@@ -342,15 +402,19 @@ export class Puller {
           async (change) => {
             if (this.heldFiles.get(change.file_id) !== change) {
               checkpoint.completed.push(change.file_id)
-              await saveProgress()
             }
+            await this.state.transaction(async () => {
+              await saveProgress()
+              await this.persist()
+            })
           }
         )
-        checkpoint.heldChanges = [...this.heldFiles.values()]
+        checkpoint.heldChanges = []
         checkpoint.seen = [...this.seen].filter((id) => this.opts.recheck?.has(id))
         await this.state.transaction(async () => {
           await this.state.setMeta?.(MANIFEST_PAGE_DATA, progressPage(checkpoint, page))
           await saveProgress()
+          await this.persist()
         })
         cursor = page.next
         if (cursor !== null) {
@@ -365,7 +429,7 @@ export class Puller {
             completed: [],
             seen: checkpoint.seen,
             firstHeld: this.firstHeld,
-            heldChanges: [...this.report.held],
+            heldChanges: [],
           }
           await this.state.transaction(async () => {
             await this.state.setMeta?.(MANIFEST_PAGE_DATA, progressPage(progress!, next))
@@ -376,13 +440,13 @@ export class Puller {
     } finally {
       this.walking = false
     }
-    // A manifest item's seq is where that file last changed, which may be far behind the
-    // head; winding the cursor back to just before one would replay history the device has
-    // no use for. A bootstrap that held anything is simply not finished, and says so by
-    // leaving the cursor at 0: the next run walks the manifest again, and everything it
-    // did apply is recognised by its version and skipped.
-    this.walkAgain = this.firstHeld !== null
-    this.reached = head ?? 0
+    this.inventoryComplete = true
+    // Re-inventorying cannot skip the feed interval where an older hold may
+    // have been resolved (notably by a deletion absent from the live manifest).
+    this.reached =
+      this.heldFiles.size && this.heldHead !== null
+        ? Math.min(head ?? 0, this.heldHead)
+        : (head ?? 0)
     await this.save()
   }
 
@@ -394,7 +458,7 @@ export class Puller {
       const page = await this.client.changes(this.reached, CHANGES_PAGE)
       await this.page(page.items, async (change) => {
         this.reached = change.seq
-        if (!this.report.bootstrapped || this.heldFiles.size === 0) await this.save()
+        await this.save()
       })
       this.reached = page.next_since
       await this.save()
@@ -434,7 +498,7 @@ export class Puller {
       else staged.push(stage)
     }
     await this.stageAll(staged)
-    for (const { change } of staged) this.heldFiles.delete(change.file_id)
+    for (const { change } of staged) this.resolve(change)
     if (taking.length === 0) {
       this.syncHeld()
       return
@@ -446,11 +510,12 @@ export class Puller {
       const fetched = await this.prefetch(run, local)
       for (const change of run) {
         checkCancellation(this.opts.signal)
-        // Replaying the same checkpoint object must distinguish a fresh hold
-        // from the old hold that is being retried.
-        this.heldFiles.delete(change.file_id)
+        // Keep the durable obligation until this attempt has actually resolved it.
+        this.attemptHeld = false
+        const base = (await this.state.byFileId(change.file_id))?.versionId ?? null
         await this.take(change, fetched, local)
-        if (this.heldFiles.get(change.file_id) !== change) this.heldFiles.delete(change.file_id)
+        if (this.attemptHeld) this.heldBases.set(change.file_id, base)
+        else this.resolve(change)
         await completed?.(change)
       }
     }
@@ -507,58 +572,64 @@ export class Puller {
   /**
    * Where the cursor stands after a page: at what was read, or just before the earliest
    * change this run held, so the next run fetches that change again.
+   * Called only inside a state transaction: the hold record and cursor commit together.
    */
-  private async save(): Promise<void> {
-    if (this.report.bootstrapped && !this.walking) {
-      this.syncHeld()
-      this.walkAgain = this.report.held.length > 0
-      this.report.cursor = this.nextCursor()
-      await this.state.transaction(async () => {
-        await this.state.setCursor(this.report.cursor)
-        if (this.walkAgain) {
-          const progress =
-            (JSON.parse(
-              (await this.state.getMeta?.(MANIFEST_PROGRESS)) ?? 'null'
-            ) as ManifestProgress | null) ?? this.bootstrapContext
-          if (progress !== null) {
-            const payload = JSON.parse(
-              (await this.state.getMeta?.(MANIFEST_PAGE_DATA)) ?? '{}'
-            ) as CachedManifestPage
-            progress.recheck ??= payload.recheck ?? []
-            progress.seen = [
-              ...new Set([
-                ...(progress.seen ?? payload.seen ?? []),
-                ...[...this.seen].filter((id) => progress.recheck.includes(id)),
-              ]),
-            ]
-            Object.assign(progress, {
-              head: this.reached,
-              firstHeld: null,
-              completed: [],
-              heldChanges: this.report.held,
-              coverageComplete: true,
-            })
-            this.bootstrapContext = progress
-            await this.state.setMeta?.(MANIFEST_PROGRESS, progressHeader(progress))
-            await this.state.setMeta?.(
-              MANIFEST_PAGE_DATA,
-              progressPage(progress, { items: [], next: null, head_seq: this.reached })
-            )
-          }
-        } else {
-          await this.state.setMeta?.(MANIFEST_PROGRESS, null)
-          await this.state.setMeta?.(MANIFEST_PAGE_DATA, null)
-        }
-      })
-      return
+  private async persist(): Promise<void> {
+    this.syncHeld()
+    this.report.cursor = Math.min(
+      this.reached,
+      this.firstHeld === null ? this.reached : this.firstHeld - 1
+    )
+    const progress: HeldProgress = {
+      generation: (await this.state.getMeta?.(GENERATION_KEY)) ?? null,
+      head: this.reached,
+      inventoryComplete: this.inventoryComplete,
+      holds: this.report.held.map((change) => ({
+        change,
+        base: this.heldBases.get(change.file_id) ?? null,
+        firstSeq: this.heldSequences.get(change.file_id) ?? change.seq,
+      })),
     }
-    this.report.cursor = this.nextCursor()
+    await this.state.setMeta?.(
+      HELD_PROGRESS,
+      progress.holds.length ? JSON.stringify(progress) : null
+    )
     await this.state.setCursor(this.report.cursor)
   }
 
-  private nextCursor(): number {
-    if (this.walkAgain) return 0
-    return this.firstHeld === null ? this.reached : this.firstHeld - 1
+  private async save(): Promise<void> {
+    await this.state.transaction(async () => {
+      await this.persist()
+      if (!this.report.bootstrapped || this.walking) return
+      if (this.report.held.length && this.bootstrapContext !== null) {
+        const progress = this.bootstrapContext
+        Object.assign(progress, {
+          head: this.reached,
+          firstHeld: null,
+          completed: [],
+          heldChanges: [],
+          coverageComplete: true,
+        })
+        progress.seen = [...this.seen].filter((id) => progress.recheck.includes(id))
+        await this.state.setMeta?.(MANIFEST_PROGRESS, progressHeader(progress))
+        await this.state.setMeta?.(
+          MANIFEST_PAGE_DATA,
+          progressPage(progress, { items: [], next: null, head_seq: this.reached })
+        )
+      } else {
+        await this.state.setMeta?.(MANIFEST_PROGRESS, null)
+        await this.state.setMeta?.(MANIFEST_PAGE_DATA, null)
+      }
+    })
+  }
+
+  private resolve(change: ChangeItem): void {
+    const held = this.heldFiles.get(change.file_id)
+    if (held !== undefined && held.seq <= change.seq) {
+      this.heldFiles.delete(change.file_id)
+      this.heldBases.delete(change.file_id)
+      this.heldSequences.delete(change.file_id)
+    }
   }
 
   /* ── One change ──────────────────────────────────────────────────────── */
@@ -598,7 +669,8 @@ export class Puller {
     }
     if (this.isDirty(change, entry)) {
       if (await this.goneBoth(change, entry)) return
-      if (this.walking && this.isNoted(change, entry)) this.note(change)
+      if (this.walking && !this.heldFiles.has(change.file_id) && this.isNoted(change, entry))
+        this.note(change)
       else this.hold(change)
       return
     }
@@ -709,16 +781,23 @@ export class Puller {
   }
 
   private hold(change: ChangeItem): void {
-    this.heldFiles.set(change.file_id, change)
+    this.attemptHeld = true
+    const previous = this.heldFiles.get(change.file_id)
+    if (previous === undefined || previous.seq <= change.seq)
+      this.heldFiles.set(change.file_id, change)
+    this.heldSequences.set(
+      change.file_id,
+      Math.min(this.heldSequences.get(change.file_id) ?? change.seq, change.seq)
+    )
     this.firstHeld = this.firstHeld === null ? change.seq : Math.min(this.firstHeld, change.seq)
     this.opts.log?.(`pull: holding ${change.op} of ${change.path} at ${change.seq}`)
   }
   private syncHeld(): void {
     this.report.held = [...this.heldFiles.values()]
-    this.firstHeld = this.report.held.reduce<number | null>(
-      (min, change) => (min === null ? change.seq : Math.min(min, change.seq)),
-      null
-    )
+    this.firstHeld = this.report.held.reduce<number | null>((min, change) => {
+      const seq = this.heldSequences.get(change.file_id) ?? change.seq
+      return min === null ? seq : Math.min(min, seq)
+    }, null)
   }
 
   /* ── Bytes ───────────────────────────────────────────────────────────── */

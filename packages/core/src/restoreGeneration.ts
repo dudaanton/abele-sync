@@ -5,6 +5,7 @@ export const GENERATION_KEY = 'server-restore-generation'
 export const RECONCILING_KEY = 'server-restore-reconciling'
 export const MEMBERS_KEY = 'server-restore-members'
 const RESET_KEYS = [
+  'pull-held-progress',
   'pull-manifest-progress',
   'pull-manifest-page',
   'v2-local-note-cache',
