@@ -193,17 +193,26 @@ export class PullPlacer {
     return true
   }
 
+  /** Resolve the physical spelling before considering a content request. */
+  async targetOf(change: ChangeItem, entry: StateEntry | null, fresh = false): Promise<string> {
+    return resolveLocalFile(
+      this.fs,
+      this.state,
+      change.path,
+      entry?.wirePath === change.path ? entry.path : undefined,
+      fresh ? undefined : await this.paths(change.path)
+    )
+  }
+
   /** Equality of actual target bytes makes a prefetch unnecessary regardless of ledger age. */
-  async matchesTarget(change: ChangeItem, entry: StateEntry | null): Promise<boolean> {
+  async matchesTarget(
+    change: ChangeItem,
+    entry: StateEntry | null,
+    fresh = false
+  ): Promise<boolean> {
     if (change.sha === null || change.op === 'delete') return false
     try {
-      const target = await resolveLocalFile(
-        this.fs,
-        this.state,
-        change.path,
-        entry?.wirePath === change.path ? entry.path : undefined,
-        await this.paths(change.path)
-      )
+      const target = await this.targetOf(change, entry, fresh)
       const before = await this.fs.stat(target)
       return (
         before !== null &&

@@ -1,4 +1,10 @@
-import type { ChangeItem, ManifestItem, ManifestResponse } from '@abele/sync-protocol'
+import {
+  AbeleError,
+  type ChangeItem,
+  type ManifestItem,
+  type ManifestResponse,
+} from '@abele/sync-protocol'
+import { EngineError } from './errors.js'
 import {
   changeProblem,
   DEFAULT_PREFETCH_BYTES,
@@ -750,8 +756,18 @@ export class Puller {
       // Something on disk that nothing has synced: a device syncing over a copy of the vault
       // it was handed, or somebody's unsynced work. The apply adopts the first and holds the
       // second, and wants no bytes from the server for either.
-      if ((await this.fs.stat(change.path)) !== null) {
-        if ((await this.state.get(change.path)) === null) continue
+      let target: string
+      try {
+        target = await this.placer.targetOf(change, entry)
+      } catch (error) {
+        // A known collision is held by take(); it needs no content prefetch.
+        if (error instanceof AbeleError && error.code === 'path_taken') continue
+        if (error instanceof EngineError && error.code === 'conflict' && error.cause === undefined)
+          continue
+        throw error
+      }
+      if ((await this.fs.stat(target)) !== null) {
+        if ((await this.state.get(target)) === null) continue
         if (await this.placer.matchesTarget(change, entry)) continue
       }
       seen.add(sha)
@@ -763,16 +779,28 @@ export class Puller {
       checkCancellation(this.opts.signal)
       // A resumed manifest page already names immutable versions. A fresh token client
       // must not rediscover their SHA-to-version mapping by walking the manifest from 0.
-      const bytes = await fetchChecked(
-        {
-          getBlob: () =>
-            this.client.readEffects && this.client.versionBytes
-              ? this.client.versionBytes(change.file_id, change.version_id, this.opts.signal)
-              : this.client.getBlob(sha, this.opts.signal),
-        },
-        sha,
-        this.hash
-      )
+      let bytes: Uint8Array | null
+      try {
+        bytes = await fetchChecked(
+          {
+            getBlob: () =>
+              this.client.readEffects && this.client.versionBytes
+                ? this.client.versionBytes(change.file_id, change.version_id, this.opts.signal)
+                : this.client.getBlob(sha, this.opts.signal),
+          },
+          sha,
+          this.hash
+        )
+      } catch (error) {
+        checkCancellation(this.opts.signal)
+        // A local copy may have arrived while the content request was in flight.
+        // Refresh spelling inventory as well as bytes; a cached absence is stale.
+        if (
+          await this.placer.matchesTarget(change, await this.state.byFileId(change.file_id), true)
+        )
+          return
+        throw error
+      }
       if (bytes === null) this.placer.disbelieve(sha)
       else fetched.set(sha, bytes)
     })
