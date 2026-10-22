@@ -12,16 +12,32 @@ export function stoppableFileEffects(
   fs: FileSystem,
   signalFor: () => AbortSignal | undefined
 ): FileSystem {
-  const effects = new Set([
-    'conditionalFile',
-    'writeAtomic',
-    'move',
-    'remove',
-    'mkdir',
-    'moveDirectory',
-    'removeDirectory',
-    'beginAtomicWrite',
-  ])
+  // Exhaustive by type: adding a filesystem capability requires an explicit
+  // pause policy. Evidence reads/retirement may finish a completed operation;
+  // recovery can publish public bytes and therefore belongs behind the fence.
+  const policy = {
+    conditionalFile: 'effect',
+    installedFile: 'read',
+    discardInstallation: 'cleanup',
+    recoverConditionalFiles: 'effect',
+    list: 'read',
+    listDirectories: 'read',
+    listChildren: 'read',
+    mkdir: 'effect',
+    moveDirectory: 'effect',
+    removeDirectory: 'effect',
+    read: 'read',
+    writeAtomic: 'effect',
+    move: 'effect',
+    remove: 'effect',
+    stat: 'read',
+    watch: 'read',
+    openRead: 'read',
+    fingerprint: 'read',
+    beginAtomicWrite: 'effect',
+    reopenStage: 'effect',
+    discardStage: 'cleanup',
+  } satisfies Record<keyof FileSystem, 'effect' | 'read' | 'cleanup'>
   const stage = (value: object): object =>
     new Proxy(value, {
       get(target, key) {
@@ -37,7 +53,7 @@ export function stoppableFileEffects(
     get(target, key) {
       const method = Reflect.get(target, key)
       if (typeof method !== 'function') return method
-      if (!effects.has(String(key)) && key !== 'reopenStage') return method.bind(target)
+      if (policy[key as keyof FileSystem] !== 'effect') return method.bind(target)
       return async (...args: unknown[]) => {
         checkCancellation(signalFor())
         const result = await method.apply(target, args)
