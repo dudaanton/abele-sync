@@ -1,7 +1,7 @@
 import { caseKey, normalisePath, type CommitOp } from '@abele/sync-protocol'
 import { EngineError } from './errors.js'
 import { touchesDeferred } from './defer.js'
-import { fingerprintFile, type FileSystem } from './fs.js'
+import { fingerprintFile, type FileSystem, type ConditionalFileOperation } from './fs.js'
 import type { ResumeOptions } from './pusher.js'
 import type { StateEntry, StateStore } from './state.js'
 import { resolveLocalFile } from './localPaths.js'
@@ -34,6 +34,10 @@ export function sentBy(op: CommitOp, previous: StateEntry | null): Content | nul
 
 /** The adapters one push runs over, and the spellings its scan found. */
 export class PushDisk {
+  private async effect(op: ConditionalFileOperation): Promise<boolean> {
+    await this.state.setMeta?.(`pull-base:${op.path}`, JSON.stringify({ base: op.expected }))
+    return (await this.fs.conditionalFile?.(op)) ?? false
+  }
   constructor(
     private readonly fs: FileSystem,
     private readonly state: StateStore,
@@ -96,17 +100,36 @@ export class PushDisk {
    * then a `stat` of the old spelling finds the very file at the target, and removing it
    * would unlink the only copy. That file is renamed to the target's spelling instead.
    */
-  async place(previous: StateEntry | null, target: string): Promise<boolean> {
+  async place(
+    previous: StateEntry | null,
+    target: string,
+    expected: Content | null = previous,
+    retainOldCopy = false
+  ): Promise<boolean> {
     if (previous === null || previous.path === target) return true
     const old = await this.fs.stat(previous.path)
     if (old !== null) {
       try {
+        if (expected === null) return false
         const there = await this.fs.stat(target)
-        if (there === null) await this.fs.move(previous.path, target)
-        else if (caseKey(previous.path) === caseKey(target)) {
-          await this.respell(previous.path, target, old, there)
-        } else if (old.size === previous.size && old.mtime === previous.mtime) {
-          await this.fs.remove(previous.path)
+        if (there === null) {
+          if (
+            !(await this.effect({
+              path: previous.path,
+              expected,
+              effect: { kind: 'move', to: target },
+            })) &&
+            !retainOldCopy
+          )
+            return false
+        } else if (caseKey(previous.path) === caseKey(target)) {
+          if (!(await this.respell(previous.path, target, old, there, expected))) return false
+        } else {
+          if (
+            !(await this.effect({ path: previous.path, expected, effect: { kind: 'remove' } })) &&
+            !retainOldCopy
+          )
+            return false
         }
       } catch (error) {
         if (!inTheWay(error)) throw error
@@ -130,17 +153,19 @@ export class PushDisk {
     from: string,
     to: string,
     old: { size: number; mtime: number },
-    there: { size: number; mtime: number }
-  ): Promise<void> {
-    if (old.size !== there.size || old.mtime !== there.mtime) return
+    there: { size: number; mtime: number },
+    expected: Content
+  ): Promise<boolean> {
+    if (old.size !== there.size || old.mtime !== there.mtime) return false
     const a = await fingerprintFile(this.fs, from, this.hash)
     const b = await fingerprintFile(this.fs, to, this.hash)
-    if (a.size !== b.size || a.sha !== b.sha) return
+    if (a.size !== b.size || a.sha !== b.sha) return false
     try {
-      await this.fs.move(from, to)
+      return await this.effect({ path: from, expected, effect: { kind: 'move', to } })
     } catch (error) {
       if (!(error instanceof EngineError) || error.code === 'lost') throw error
       this.opts.log?.(`push: ${from} stays beside ${to}: ${error.message}`)
+      return false
     }
   }
 
@@ -166,7 +191,14 @@ export class PushDisk {
       return
     }
     try {
-      await this.fs.move(at, previous.path)
+      if (
+        !(await this.effect({
+          path: at,
+          expected: previous,
+          effect: { kind: 'move', to: previous.path },
+        }))
+      )
+        return
     } catch (error) {
       if (!inTheWay(error)) throw error
       this.opts.log?.(`push: ${at} stays: ${(error as Error).message}`)

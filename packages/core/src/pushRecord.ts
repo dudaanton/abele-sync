@@ -110,7 +110,16 @@ export class VerdictRecorder {
       this.count(result)
       return
     }
-    if (staged === undefined && !(await this.disk.place(previous, target))) {
+    const sent = sentBy(op, previous)
+    if (
+      staged === undefined &&
+      !(await this.disk.place(
+        previous,
+        target,
+        op.op === 'create' ? previous : sent,
+        op.op === 'create'
+      ))
+    ) {
       // A folder or a link has the target's name. The file and its entry stay where they were,
       // and the path is kept clear of the pulls; the feed brings this verdict again, and the
       // puller holds it, with the same line in the log, until the disk is clear.
@@ -119,7 +128,6 @@ export class VerdictRecorder {
     }
     const incoming = verdicts.writes.get(at)
     const kept = verdicts.aside.get(at)
-    const sent = sentBy(op, previous)
     const checkingSha = incoming ?? (op.op === 'create' ? sent?.sha : undefined)
     // Planning precedes downloads (and later runs may wait much longer). Ask
     // again at the write boundary; a plan is not permission to overwrite typing.
@@ -226,12 +234,22 @@ export class VerdictRecorder {
       })
       return
     }
-    await this.state.delete(target)
     if (aside.kind === 'copy' && result.status === 'conflict') {
       const copy = await this.disk.targetOf(result.conflict_path, result.conflict_file_id)
       if ((await this.fs.stat(copy)) === null) {
         try {
-          await this.fs.move(target, copy)
+          await this.state.setMeta?.(`pull-base:${target}`, JSON.stringify({ base: sent }))
+          if (
+            !(await this.fs.conditionalFile?.({
+              path: target,
+              expected: sent,
+              effect: { kind: 'move', to: copy },
+            }))
+          ) {
+            this.report.kept.push(result.path)
+            return
+          }
+          await this.state.delete(target)
           await this.state.put({
             path: copy,
             wirePath: result.conflict_path,
