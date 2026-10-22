@@ -62,8 +62,11 @@ virtualized; tests drive `sync()` directly and do not call `start()`.
 
 `pullEdits.test.ts` adds I2: for buffered/streaming updates, moves, eviction and
 remote deletion, first collect every scheduled pull await, then replay once per
-boundary with a same-stat local save injected there. Both metadata/state calls
-and host operation boundaries participate. The atomic filesystem port itself is
+boundary with a same-stat local save injected there. Moves run separately for
+saves at the source and at the destination. Metadata/state calls, host operation
+boundaries, and points before/after client page/content/version awaits participate;
+streamed source reads, validation and closure also have scheduler points. Coverage
+assertions require both sides of the client awaits. The atomic filesystem port itself is
 indivisible in the memory model; Node's quarantine/publication races have separate
 host tests. Run the bounded CI property, without the optional exhaustive sweep:
 
