@@ -256,7 +256,8 @@ export class Puller {
       }
       this.heldHead = durable.head
       // An explicit rewind (scope/reconciliation) must still inventory the vault.
-      const savedCursor = Math.min(durable.head, ...durable.holds.map((held) => held.firstSeq - 1))
+      let savedCursor = durable.head
+      for (const held of durable.holds) savedCursor = Math.min(savedCursor, held.firstSeq - 1)
       this.inventoryComplete = durable.inventoryComplete && this.report.cursor === savedCursor
       if (this.inventoryComplete) this.reached = durable.head
       this.syncHeld()
