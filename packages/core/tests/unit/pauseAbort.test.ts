@@ -162,10 +162,11 @@ it('D-116 imports a legacy hold before scope widening clears its checkpoint', as
       seen: [],
     })
   )
-  f.client.state = async () => ({
-    head_seq: 100,
-    settings: { max_file_bytes: 1e9, quota_bytes: null },
-  })
+  f.client.state = async () =>
+    ({
+      head_seq: 100,
+      settings: { max_file_bytes: 1e9, quota_bytes: null },
+    }) as Awaited<ReturnType<EngineClient['state']>>
   f.client.manifest = async () => ({ items: [item], next: null, head_seq: 100 })
   f.client.changes = async () => ({ items: [], next_since: 100, head_seq: 100 })
   f.client.versions = async () =>
