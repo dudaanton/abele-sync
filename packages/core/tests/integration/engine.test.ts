@@ -618,7 +618,8 @@ describe('the engine over the device facet', () => {
     const write = d.fs.conditionalFile.bind(d.fs)
     d.fs.conditionalFile = async (op) => {
       const applied = await write(op)
-      if (applied && op.effect.kind === 'write') writes.push([op.path, decoder.decode(op.effect.bytes)])
+      if (applied && op.effect.kind === 'write')
+        writes.push([op.path, decoder.decode(op.effect.bytes)])
       return applied
     }
 
