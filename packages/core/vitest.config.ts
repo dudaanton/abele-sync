@@ -15,5 +15,11 @@ export default defineConfig({
       },
     ],
   },
-  test: { include: ['tests/**/*.test.ts'], testTimeout: 20_000 },
+  test: {
+    include: ['tests/**/*.test.ts'],
+    testTimeout: 20_000,
+    setupFiles: [
+      fileURLToPath(new URL('./tests/helpers/rootWriteGuard.setup.ts', import.meta.url)),
+    ],
+  },
 })

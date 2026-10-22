@@ -57,3 +57,17 @@ The shared adapter contract in `tests/helpers/stateTransactionContract.ts` opens
 a transaction, suspends it, writes through the root from another task, and then
 rolls back. Both adapters run it, including same-key writes, entries/indexes,
 metadata, cursor and journal. Host ports should run this contract too.
+
+Core and Node tests also enable `tests/helpers/rootWriteGuard.setup.ts`. Its
+Node-only async-context guard detects root writes (including helper/hook writes
+after awaits) originating in a scoped callback. Unrelated callers can still
+write independently. An after-test check retains violations even if a callback
+swallows the thrown error. Ports are instrumented in `beforeEach`, after hoisted
+filesystem mocks have been registered, so crash-injection tests keep their hooks.
+
+Receipt hooks run inside the transaction: use `onCommitted(ops, tx)` and pass
+`tx` into stateful helpers, for example `holds.tally(now, count, window, tx)`.
+`onApplied` runs after ledger publication and `onDefer` runs before/outside the
+ledger transaction; passing a closed handle into these hooks would be wrong.
+Diagnostic logging and hash/filter/defer predicates must not mutate the ledger
+from a transaction callback; the test guard detects such captured-root writes.

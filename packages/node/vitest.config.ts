@@ -25,6 +25,9 @@ export default defineConfig({
   // handler `run` installed, which only means something when each file has a process to itself.
   test: {
     include: ['tests/**/*.test.ts'],
+    setupFiles: [
+      fileURLToPath(new URL('../core/tests/helpers/rootWriteGuard.setup.ts', import.meta.url)),
+    ],
     globalSetup: [
       fileURLToPath(new URL('../server/tests/helpers/build.globalSetup.ts', import.meta.url)),
     ],

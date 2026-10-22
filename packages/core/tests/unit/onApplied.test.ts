@@ -10,6 +10,7 @@ import {
   sha256,
   type EngineClient,
   type FileSystem,
+  type AppliedChange,
 } from '../../src/index.js'
 
 it('reports pull upsert, move and delete once after applying; isolates hook errors', async () => {
@@ -32,7 +33,9 @@ it('reports pull upsert, move and delete once after applying; isolates hook erro
     at: '',
   }
   const client = { getBlob: async () => bytes } as unknown as EngineClient
-  const onApplied = vi.fn(),
+  const onApplied = vi.fn(async (_change: AppliedChange) => {
+      await state.setMeta('pull-notified', 'after-commit')
+    }),
     log = vi.fn()
   const opts = {
     filter: { excluded: () => false },
@@ -48,6 +51,7 @@ it('reports pull upsert, move and delete once after applying; isolates hook erro
     dirty: new Set(['a.md']),
   })
   expect(onApplied).toHaveBeenCalledTimes(1)
+  expect(await state.getMeta('pull-notified')).toBe('after-commit')
   onApplied.mockImplementation(() => {
     throw new Error('host failed')
   })
@@ -123,6 +127,7 @@ it.each([
   const observed: unknown[] = []
   const onApplied = vi.fn(async () => {
     observed.push(await state.getJournal(), (await state.byFileId('f'))?.versionId)
+    await state.setMeta('push-notified', 'after-commit')
   })
   await resumeJournal(client, fs, state, {
     expected: new ExpectedWrites(),
@@ -132,6 +137,7 @@ it.each([
   if (deferred || refused) expect(onApplied).not.toHaveBeenCalled()
   else {
     expect(observed).toEqual([null, 'v2'])
+    expect(await state.getMeta('push-notified')).toBe('after-commit')
     expect(onApplied).toHaveBeenCalledExactlyOnceWith({
       path: 'b.md',
       kind: 'move',
@@ -167,7 +173,9 @@ it('does not report a deferred pull until the host applies it', async () => {
     getBlob: async () => bytes,
   } as unknown as EngineClient
   const onApplied = vi.fn(),
-    onDefer = vi.fn()
+    onDefer = vi.fn(async () => {
+      await state.setMeta('staged-notified', 'outside-transaction')
+    })
   const opts = {
     filter: { excluded: () => false },
     dirty: new Set<string>(),
@@ -176,6 +184,7 @@ it('does not report a deferred pull until the host applies it', async () => {
   }
   const report = await pull(client, fs, state, { ...opts, defer: () => true, onDefer })
   expect(report.deferred).toBe(1)
+  expect(await state.getMeta('staged-notified')).toBe('outside-transaction')
   expect(onApplied).not.toHaveBeenCalled()
   expect(await fs.stat('a.md')).toBeNull()
   await applyStaged(client, fs, state, [change], opts)

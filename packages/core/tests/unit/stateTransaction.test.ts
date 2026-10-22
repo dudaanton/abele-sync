@@ -10,17 +10,29 @@ it('isolates unrelated writes from a suspended memory transaction rollback', asy
 it('keeps tentative writes private, refuses stale publication and expires the capability', async () => {
   const store = new MemoryStateStore()
   let expired!: StateStore
-  await expect(
-    store.transaction(async (tx) => {
-      expired = tx
-      await tx.setCursor(9)
-      await tx.setMeta!('private', 'tentative')
-      expect(await tx.getCursor()).toBe(9)
-      expect(await store.getCursor()).toBe(0)
-      expect(await store.getMeta('private')).toBeNull()
-      await store.setMeta('outside', 'committed')
-    })
-  ).rejects.toMatchObject({ code: 'conflict' })
+  let entered!: () => void, release!: () => void
+  const ready = new Promise<void>((resolve) => {
+    entered = resolve
+  })
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const pending = store.transaction(async (tx) => {
+    expired = tx
+    await tx.setCursor(9)
+    await tx.setMeta!('private', 'tentative')
+    expect(await tx.getCursor()).toBe(9)
+    expect(await store.getCursor()).toBe(0)
+    expect(await store.getMeta('private')).toBeNull()
+    entered()
+    await gate
+  })
+  const rejected = expect(pending).rejects.toMatchObject({ code: 'conflict' })
+  await ready
+  // A separate caller writes independently, rather than capturing the root in tx's chain.
+  await store.setMeta('outside', 'committed')
+  release()
+  await rejected
   expect(await store.getCursor()).toBe(0)
   expect(await store.getMeta('private')).toBeNull()
   expect(await store.getMeta('outside')).toBe('committed')
