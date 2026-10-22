@@ -12,6 +12,7 @@ const crash = vi.hoisted(() => ({
   cut: 0,
   points: [] as string[],
   exact: '',
+  handles: new Set<{ close(): Promise<void> }>(),
 }))
 vi.mock('node:fs/promises', async (original) => {
   const actual = await original<typeof import('node:fs/promises')>()
@@ -40,7 +41,11 @@ vi.mock('node:fs/promises', async (original) => {
         : async (...args: unknown[]) => {
             const value = await boundary(
               `${name}:${String(args[0])}${name === 'rename' || name === 'link' ? `->${String(args[1])}` : ''}`,
-              () => Reflect.apply(fn, actual, args)
+              async () => {
+                const result = await Reflect.apply(fn, actual, args)
+                if (name === 'open') crash.handles.add(result)
+                return result
+              }
             )
             if (name !== 'open') return value
             return new Proxy(value as object, {
@@ -49,9 +54,12 @@ vi.mock('node:fs/promises', async (original) => {
                 return typeof method !== 'function'
                   ? method
                   : (...params: unknown[]) =>
-                      boundary(`handle.${String(key)}:${String(args[0])}`, () =>
-                        method.apply(target, params)
-                      )
+                      boundary(`handle.${String(key)}:${String(args[0])}`, async () => {
+                        const result = await method.apply(target, params)
+                        if (key === 'close')
+                          crash.handles.delete(target as { close(): Promise<void> })
+                        return result
+                      })
               },
             })
           },
@@ -115,6 +123,9 @@ async function run(cut = 0, exact: 'capture' | 'publication' | '' = '') {
     const count = crash.points.length
     crash.armed = false
     crash.dead = false
+    // A real process exit closes descriptors even though its finally blocks never run.
+    for (const handle of crash.handles) await handle.close()
+    crash.handles.clear()
     expect(failed).toBe(cut > 0 || !!exact)
     if (exact === 'capture') expect(await disk.stat('file.bin')).toBeNull()
     // Restart composition, not an artificially reordered sequence of helpers.
@@ -144,6 +155,8 @@ async function run(cut = 0, exact: 'capture' | 'publication' | '' = '') {
   } finally {
     crash.armed = false
     crash.dead = false
+    for (const handle of crash.handles) await handle.close()
+    crash.handles.clear()
     state.close()
     await rm(dir, { recursive: true, force: true })
   }
@@ -156,3 +169,16 @@ it('D-068 restarts after group source capture before publication', async () => {
 it('D-070 retires a receiptless write interrupted immediately after publication', async () => {
   await run(0, 'publication')
 })
+
+it('group restart converges without hidden or leaked objects after every filesystem await', async () => {
+  const count = await run()
+  expect(count).toBeGreaterThan(0)
+  for (let cut = 1; cut <= count; cut++) {
+    try {
+      await run(cut)
+    } catch (error) {
+      throw new Error(`group restart failed at await ${cut}/${count}`, { cause: error })
+    }
+  }
+  console.info(`Group write recovery replayed ${count} filesystem await boundaries`)
+}, 90_000)

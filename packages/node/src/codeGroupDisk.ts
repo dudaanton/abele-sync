@@ -41,7 +41,7 @@ export class CodeGroupDisk {
     }
     check()
     // Persist outside the approval transaction: a rollback must not erase ownership.
-    vault.state.getExternalInstanceId()
+    const ledger = vault.state.getExternalInstanceId()
     const folder = await ownTempFolder(resolve(vault.dir), '.abele-sync', FOLDER, check)
     check()
     const work = await mkdtemp(join(folder, 'group-'))
@@ -51,6 +51,10 @@ export class CodeGroupDisk {
     group.check()
     // The directory is fresh. A marker orphaned by earlier cleanup must not bless this group.
     vault.state.setMeta(group.marker, null)
+    // Give speculative material an owning recovery record before it is allocated.
+    // A crash while first publishing the full plan then has a safe empty predecessor.
+    group.journal = { version: 1, vault: vault.cfg.vaultId, ledger, attempted: -1, steps: [] }
+    await group.save()
     return group
   }
   private get marker(): string {
