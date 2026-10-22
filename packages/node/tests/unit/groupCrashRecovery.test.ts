@@ -1,6 +1,6 @@
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { expect, it, vi } from 'vitest'
 import { encodeText, selectiveDefaults } from '@abele/sync-core'
 
@@ -216,11 +216,12 @@ async function run(
   cut = 0,
   exact: 'capture' | 'publication' | 'first-save' | 'settled-move' | '' = '',
   mode: 'write' | 'remove' | 'move' = 'write',
-  recoveryCut: number | 'restoring' | 'discard' = 0,
+  recoveryCut: number | 'restoring' | 'discard' | 'review' = 0,
   nested = false,
   editMove: boolean | 'replacement' = false,
   caseOnly = false,
-  fold = false
+  fold = false,
+  invalidJournal = false
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'group-cut-'))
   const disk = new NodeFileSystem(dir)
@@ -304,6 +305,15 @@ async function run(
           'a published move must not recreate its source alias'
         ).toBeNull()
     }
+    if (invalidJournal) {
+      const folder = join(dir, '.abele-sync/code-approvals')
+      const group = (await readdir(folder)).find((name) => name.startsWith('group-'))!
+      await new NodeFileSystem(join(folder, group)).writeAtomic(
+        'journal.json',
+        encodeText('{invalid'),
+        0
+      )
+    }
     if (recoveryCut) {
       crash.points = []
       crash.cut = typeof recoveryCut === 'number' ? recoveryCut : 0
@@ -315,7 +325,11 @@ async function run(
             labels.some((label) =>
               recoveryCut === 'restoring'
                 ? label.startsWith('writeFile:') && label.endsWith('/restoring')
-                : label.startsWith('rm.entry:') && label.endsWith('/journal.json')
+                : recoveryCut === 'review'
+                  ? label.startsWith('rename:') &&
+                    label.includes('->') &&
+                    label.includes('/review-group-')
+                  : label.startsWith('rm.entry:') && label.endsWith('/journal.json')
             )
           )
             crash.cut = length
@@ -412,7 +426,14 @@ async function run(
             throw error
           }
         )
-        expect(names, `leaked ${folder} at ${cut}/${exact}`).toEqual([])
+        if (invalidJournal && folder === 'code-approvals') {
+          const reviews = CodeGroupDisk.reviews(vault)
+          expect(reviews).toHaveLength(1)
+          expect(names).toEqual([basename(reviews[0]!.path)])
+          const retained = new NodeFileSystem(join(dir, reviews[0]!.path))
+          expect(new TextDecoder().decode(await retained.read('journal.json'))).toBe('{invalid')
+          expect(await readdir(join(dir, reviews[0]!.path, 'blobs'))).not.toHaveLength(0)
+        } else expect(names, `leaked ${folder} at ${cut}/${exact}`).toEqual([])
       }
     }
     if (nested && failed) {
@@ -525,6 +546,9 @@ it('D-079 recovers after recursive discard removes journal.json before the draft
 })
 it('D-080 preserves a published move edited in place before recovery with one visible inode name', async () => {
   await run(0, 'publication', 'move', 0, false, true)
+})
+it('reconstructs one review record after a crash immediately after invalid-group rename', async () => {
+  await run(0, '', 'write', 'review', false, false, false, false, true)
 })
 it('D-083 preserves the source backup when the published destination is replaced by an unrelated inode', async () => {
   await run(0, 'settled-move', 'move', 0, true, 'replacement')

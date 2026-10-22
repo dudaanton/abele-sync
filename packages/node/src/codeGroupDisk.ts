@@ -25,6 +25,13 @@ interface Journal {
   steps: GroupStep[]
 }
 type Vault = Pick<OpenVault, 'dir' | 'cfg' | 'disk' | 'state' | 'fence'>
+export interface CodeGroupReview {
+  version: 1
+  group: string
+  path: string
+  reason: 'journal-requires-review'
+}
+const REVIEW_KEY = 'code-approval-review:'
 
 /** Disk undo journal paired with the enclosing SQLite transaction's commit marker. */
 export class CodeGroupDisk {
@@ -209,7 +216,12 @@ export class CodeGroupDisk {
     if (identity === null) return null
     const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''
     for (const entry of await this.vault.disk.listChildren(parent)) {
-      if (entry.kind === 'file' && (await this.identity(entry.path)) === identity) return entry.path
+      if (
+        entry.kind === 'file' &&
+        caseKey(entry.path) === caseKey(path) &&
+        (await this.identity(entry.path)) === identity
+      )
+        return entry.path
     }
     return null
   }
@@ -300,6 +312,11 @@ export class CodeGroupDisk {
     const folder = realTempFolder(resolve(vault.dir), '.abele-sync', FOLDER)
     if (folder === null) return
     for (const entry of await readdir(folder, { withFileTypes: true })) {
+      const review = /^review-(group-[a-zA-Z0-9]+)-[a-f0-9-]{36}$/.exec(entry.name)
+      if (entry.isDirectory() && review) {
+        await CodeGroupDisk.recordReview(vault, held, entry.name, review[1]!)
+        continue
+      }
       const trash = /^trash-(group-[a-zA-Z0-9]+)-[a-f0-9-]{36}$/.exec(entry.name)
       if (entry.isDirectory() && trash) {
         const remove = async () => {
@@ -321,19 +338,62 @@ export class CodeGroupDisk {
         effectTracker: vault.fence?.track,
       })
       if ((await files.stat('journal.json')) !== null) {
-        disk.journal = parseJournal(
-          JSON.parse(new TextDecoder().decode(await files.read('journal.json'))),
-          vault.cfg.vaultId
-        )
-        disk.assertOwningLedger()
+        // Read failures remain I/O errors; malformed/foreign metadata is retained
+        // for review and must not poison all future starts.
+        const raw = await files.read('journal.json')
+        try {
+          disk.journal = parseJournal(JSON.parse(new TextDecoder().decode(raw)), vault.cfg.vaultId)
+          disk.assertOwningLedger()
+        } catch {
+          await disk.retainForReview()
+          continue
+        }
         if (vault.state.getMeta(disk.marker) !== 'committed') await disk.rollback()
       } else if (!(await initialSaveOnly(disk.work))) {
-        throw new ExternalStateError('recovery-required', {
-          cause: 'unjournaled installation material must be retained',
-        })
+        await disk.retainForReview()
+        continue
       }
       await disk.discard()
     }
+  }
+
+  static reviews(vault: Pick<OpenVault, 'state'>): CodeGroupReview[] {
+    return vault.state
+      .metadataKeys(REVIEW_KEY)
+      .map((key) => JSON.parse(vault.state.getMeta(key)!) as CodeGroupReview)
+  }
+
+  private async retainForReview(): Promise<void> {
+    const retain = async () => {
+      this.check()
+      const name = `review-${basename(this.work)}-${randomUUID()}`
+      await rename(this.work, join(dirname(this.work), name))
+      await CodeGroupDisk.recordReview(this.vault, this.held, name, basename(this.work))
+    }
+    await (this.vault.fence ? this.vault.fence.track(retain) : retain())
+  }
+
+  private static async recordReview(
+    vault: Vault,
+    held: () => boolean,
+    name: string,
+    group: string
+  ): Promise<void> {
+    vault.fence?.assertOwner()
+    if (!held()) throw new EngineError('lost', 'review recovery lost ownership')
+    // The rename is the durable classification. Reconstruct the same single record
+    // after a crash before its metadata write; never reparse or remove the backup.
+    await syncPath(join(resolve(vault.dir), '.abele-sync', FOLDER))
+    vault.fence?.assertOwner()
+    if (!held()) throw new EngineError('lost', 'review recovery lost ownership')
+    const record: CodeGroupReview = {
+      version: 1,
+      group,
+      path: `.abele-sync/${FOLDER}/${name}`,
+      reason: 'journal-requires-review',
+    }
+    const key = REVIEW_KEY + name
+    if (vault.state.getMeta(key) === null) vault.state.setMeta(key, JSON.stringify(record))
   }
 }
 

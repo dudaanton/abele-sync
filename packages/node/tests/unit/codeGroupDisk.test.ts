@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { link, mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -44,6 +44,53 @@ async function prepared() {
 }
 
 describe('grouped code placement recovery', () => {
+  it('D-087 records the requested folded spelling rather than an earlier unrelated hard-link alias', async () => {
+    const alias = '.obsidian/plugins/sample/aaa.js'
+    await link(join(dir, MAIN), join(dir, alias))
+    const children = disk.listChildren.bind(disk)
+    disk.listChildren = async (parent) =>
+      (await children(parent)).sort((a, b) => a.path.localeCompare(b.path))
+    const { group, draft } = await prepared()
+    await expect(
+      state.transaction(async () => {
+        await group.place(draft)
+        throw new Error('stop')
+      })
+    ).rejects.toThrow('stop')
+    const files = new NodeFileSystem(group.work)
+    const journal = JSON.parse(new TextDecoder().decode(await files.read('journal.json')))
+    expect(journal.steps[0].spelling[MAIN]).toBe(MAIN)
+    await CodeGroupDisk.recover(vault(), () => true)
+    expect(await text(MAIN)).toBe('original()')
+    expect(await text(alias)).toBe('original()')
+    expect(await readdir(join(dir, '.abele-sync/code-approvals'))).toEqual([])
+  })
+
+  it.each(['{invalid', '{"version":2}'])(
+    'retains an invalid journal (%s) and its backup under one durable review record without blocking restart',
+    async (invalid) => {
+      const { group, draft } = await prepared()
+      await expect(
+        state.transaction(async () => {
+          await group.place(draft)
+          throw new Error('stop')
+        })
+      ).rejects.toThrow('stop')
+      const files = new NodeFileSystem(group.work)
+      await files.writeAtomic('journal.json', encodeText(invalid), 0)
+      await CodeGroupDisk.recover(vault(), () => true)
+      const keys = state.metadataKeys('code-approval-review:')
+      expect(keys).toHaveLength(1)
+      const record = JSON.parse(state.getMeta(keys[0]!)!)
+      const retained = new NodeFileSystem(join(dir, record.path))
+      expect(new TextDecoder().decode(await retained.read('journal.json'))).toBe(invalid)
+      expect(await readdir(join(dir, record.path, 'blobs'))).not.toHaveLength(0)
+      expect(await text(MAIN)).toBe('approved()')
+      await CodeGroupDisk.recover(vault(), () => true)
+      expect(state.metadataKeys('code-approval-review:')).toEqual(keys)
+      expect(state.getMeta(keys[0]!)).toBe(JSON.stringify(record))
+    }
+  )
   it('does not undo an unrelated replacement inode even when its bytes equal the move result', async () => {
     const group = await CodeGroupDisk.create(vault(), () => true)
     const draft = await CodeDraft.create(disk, group.work)
@@ -106,42 +153,43 @@ describe('grouped code placement recovery', () => {
     const journal = JSON.parse(new TextDecoder().decode(await files.read('journal.json')))
     delete journal.ledger
     await files.writeAtomic('journal.json', encodeText(JSON.stringify(journal)), 0)
-    await expect(CodeGroupDisk.recover(vault(), () => true)).rejects.toMatchObject({
-      reason: 'recovery-required',
-      cause: expect.stringMatching(/owning ledger/),
-    })
+    await CodeGroupDisk.recover(vault(), () => true)
     expect(await text(MAIN)).toBe('approved()')
-    expect(await readdir(group.work)).toContain('journal.json')
+    const reviews = CodeGroupDisk.reviews(vault())
+    expect(reviews).toHaveLength(1)
+    expect(await readdir(join(dir, reviews[0]!.path))).toContain('journal.json')
   })
 
-  it.each([true, false])('requires the owning ledger (committed: %s)', async (committed) => {
-    const { group, draft } = await prepared()
-    if (committed) await state.transaction(() => group.place(draft))
-    else
-      await expect(
-        state.transaction(async () => {
-          await group.place(draft)
-          throw new Error('interrupted')
-        })
-      ).rejects.toThrow('interrupted')
-    const journal = await new NodeFileSystem(group.work).read('journal.json')
-    const other = SqliteStateStore.open(join(dir, 'other-state/state.db'))
-    try {
-      await expect(
-        CodeGroupDisk.recover({ ...vault(), state: other }, () => true)
-      ).rejects.toMatchObject({
-        reason: 'recovery-required',
-        cause: expect.stringMatching(/owning ledger/),
-      })
+  it.each([true, false])(
+    'requires ownership to apply a journal but preserves it for review without blocking (committed: %s)',
+    async (committed) => {
+      const { group, draft } = await prepared()
+      if (committed) await state.transaction(() => group.place(draft))
+      else
+        await expect(
+          state.transaction(async () => {
+            await group.place(draft)
+            throw new Error('interrupted')
+          })
+        ).rejects.toThrow('interrupted')
+      const journal = await new NodeFileSystem(group.work).read('journal.json')
+      const other = SqliteStateStore.open(join(dir, 'other-state/state.db'))
+      try {
+        await CodeGroupDisk.recover({ ...vault(), state: other }, () => true)
+        expect(await text(MAIN)).toBe('approved()')
+        const reviews = CodeGroupDisk.reviews({ state: other })
+        expect(reviews).toHaveLength(1)
+        const retained = join(dir, reviews[0]!.path)
+        expect(await new NodeFileSystem(retained).read('journal.json')).toEqual(journal)
+        expect(await readdir(retained)).toContain('blobs')
+      } finally {
+        other.close()
+      }
+      await CodeGroupDisk.recover(vault(), () => true)
       expect(await text(MAIN)).toBe('approved()')
-      expect(await new NodeFileSystem(group.work).read('journal.json')).toEqual(journal)
-      expect(await readdir(group.work)).toContain('blobs')
-    } finally {
-      other.close()
+      expect(CodeGroupDisk.reviews(vault())).toHaveLength(1)
     }
-    await CodeGroupDisk.recover(vault(), () => true)
-    expect(await text(MAIN)).toBe(committed ? 'approved()' : 'original()')
-  })
+  )
 
   it('clears an orphan commit marker before using a newly allocated workspace', async () => {
     // A cleanup can remove its directory before it manages to delete the old marker.
