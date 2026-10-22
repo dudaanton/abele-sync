@@ -31,7 +31,6 @@ interface ManifestProgress {
   seen: string[]
   firstHeld: number | null
   heldChanges?: ChangeItem[]
-  heldBases?: Record<string, string | null>
   coverageComplete?: boolean
 }
 type CachedManifestPage = ManifestResponse &
@@ -161,6 +160,7 @@ export class Puller {
   private bootstrapContext: ManifestProgress | null = null
   /** Set while the manifest is walked. */
   private walking = false
+  private followedCheckpoint = false
 
   constructor(
     private readonly client: EngineClient,
@@ -181,7 +181,7 @@ export class Puller {
   async run(): Promise<void> {
     this.reached = this.report.cursor
     if (this.reached === 0) await this.bootstrap()
-    await this.follow()
+    if (!this.followedCheckpoint) await this.follow()
     if (this.report.bootstrapped) await this.recheck()
   }
 
@@ -285,10 +285,20 @@ export class Puller {
               mtime: change.mtime ?? 0,
             })),
         ])
-        if (!progress.coverageComplete)
-          for (const held of progress.heldChanges ?? []) this.heldFiles.set(held.file_id, held)
+        for (const held of progress.heldChanges ?? []) this.heldFiles.set(held.file_id, held)
         this.syncHeld()
         for (const id of progress.seen) this.seen.add(id)
+        if (progress.coverageComplete) {
+          // Newer feed events can settle an old hold, but a changed ledger base
+          // alone cannot prove that the held remote version was applied.
+          this.reached = progress.head
+          await this.follow()
+          this.followedCheckpoint = true
+          await this.page([...this.heldFiles.values()])
+          this.walkAgain = this.firstHeld !== null
+          await this.save()
+          return
+        }
       }
       do {
         checkCancellation(this.opts.signal)
@@ -317,21 +327,7 @@ export class Puller {
           await saveProgress()
         })
         const completed = new Set(checkpoint.completed)
-        let pending = checkpoint.coverageComplete
-          ? [...(checkpoint.heldChanges ?? [])]
-          : page.items.map(asCreate)
-        if (checkpoint.coverageComplete && checkpoint.heldBases) {
-          const retained: ChangeItem[] = []
-          for (const change of pending) {
-            const base = checkpoint.heldBases[change.file_id]
-            const current = await this.state.byFileId(change.file_id)
-            if (base !== undefined && (current?.versionId ?? null) !== base)
-              this.heldFiles.delete(change.file_id)
-            else retained.push(change)
-          }
-          pending = retained
-          this.syncHeld()
-        }
+        const pending = page.items.map(asCreate)
         await this.page(
           pending.filter((item) => !completed.has(item.file_id)),
           async (change) => {
@@ -342,11 +338,6 @@ export class Puller {
           }
         )
         checkpoint.heldChanges = [...this.heldFiles.values()]
-        checkpoint.heldBases ??= {}
-        for (const change of checkpoint.heldChanges)
-          if (!(change.file_id in checkpoint.heldBases))
-            checkpoint.heldBases[change.file_id] =
-              (await this.state.byFileId(change.file_id))?.versionId ?? null
         checkpoint.seen = [...this.seen].filter((id) => this.opts.recheck?.has(id))
         await this.state.transaction(async () => {
           await this.state.setMeta?.(MANIFEST_PAGE_DATA, progressPage(checkpoint, page))
@@ -366,7 +357,6 @@ export class Puller {
             seen: checkpoint.seen,
             firstHeld: this.firstHeld,
             heldChanges: [...this.report.held],
-            heldBases: checkpoint.heldBases,
           }
           await this.state.transaction(async () => {
             await this.state.setMeta?.(MANIFEST_PAGE_DATA, progressPage(progress!, next))
@@ -447,6 +437,9 @@ export class Puller {
       const fetched = await this.prefetch(run, local)
       for (const change of run) {
         checkCancellation(this.opts.signal)
+        // Replaying the same checkpoint object must distinguish a fresh hold
+        // from the old hold that is being retried.
+        this.heldFiles.delete(change.file_id)
         await this.take(change, fetched, local)
         if (this.heldFiles.get(change.file_id) !== change) this.heldFiles.delete(change.file_id)
         await completed?.(change)
