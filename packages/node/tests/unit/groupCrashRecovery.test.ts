@@ -220,6 +220,9 @@ it('D-070 retires a receiptless write interrupted immediately after publication'
 it('D-074 recovers a crash during the very first journal save', async () => {
   await run(0, 'first-save')
 })
+it('D-075 recovers a second crash after the restoration marker before restoring the victim', async () => {
+  await run(0, 'capture', 'write', 'restoring')
+})
 
 it('group restart converges without hidden or leaked objects after every filesystem await', async () => {
   const count = await run()

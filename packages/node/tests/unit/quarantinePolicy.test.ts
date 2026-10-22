@@ -102,7 +102,7 @@ it('recovers a directory captured by an older primitive and retires that record'
   }
 })
 
-it('does not resurrect a deleted name after a crash in restoration retirement', async () => {
+it('retries the absent original name when only restoration intent is known', async () => {
   const root = await mkdtemp(join(tmpdir(), 'quarantine-'))
   try {
     const folder = join(root, '.abele-sync/conditional/restoring')
@@ -111,10 +111,11 @@ it('does not resurrect a deleted name after a crash in restoration retirement', 
     await writeFile(join(folder, 'intent.json'), JSON.stringify({ path: 'file' }))
     await writeFile(join(folder, 'restoring'), '1')
     await new NodeFileSystem(root).recoverConditionalFiles()
-    await expect(readFile(join(root, 'file'))).rejects.toMatchObject({ code: 'ENOENT' })
-    expect(new Uint8Array(await readFile(join(root, 'file.sync-conflict-restoring')))).toEqual(
-      new Uint8Array([3])
-    )
+    // D-075: intent alone cannot distinguish a deletion from a link never installed.
+    expect(new Uint8Array(await readFile(join(root, 'file')))).toEqual(new Uint8Array([3]))
+    await expect(readFile(join(root, 'file.sync-conflict-restoring'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
     expect(await readdir(join(root, '.abele-sync/conditional'))).toEqual([])
   } finally {
     await rm(root, { recursive: true, force: true })

@@ -362,25 +362,11 @@ async function recoverFolder(root: string, location: string, check: () => void):
           await unlink(victim)
           await syncParents(victim, root)
         } else {
-          let began = false
-          try {
-            await lstat(`${folder}/restoring`)
-            began = true
-          } catch (error) {
-            if (!isMissing(error)) throw error
-          }
-          let named
-          try {
-            named = await lstat(target)
-          } catch (error) {
-            if (!isMissing(error)) throw error
-          }
-          // Restoration may have succeeded before a crash and a later intentional
-          // deletion. Keep ambiguous bytes visible without recreating that name.
-          const same = named?.dev === info.dev && named.ino === info.ino
-          const path = began && !same ? `${intent.path}.sync-conflict-${id}` : intent.path
           await restoring(folder, root)
-          await restoreVictim(root, path, victim, id)
+          // A restore-intent marker does not prove a public link ever existed.
+          // Exclusive restoration retries the original name; occupied names are
+          // preserved by restoreVictim's inode/conflict-copy handling.
+          await restoreVictim(root, intent.path, victim, id)
         }
       }
       // Preserve only a receipt for a proven installed object, never a victim.
