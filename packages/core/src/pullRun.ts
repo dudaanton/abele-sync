@@ -428,18 +428,12 @@ export class Puller {
           ahead = tail.items
         }
         const laterFiles = new Set(ahead.map((change) => change.file_id))
-        const laterPaths = new Set(ahead.map((change) => change.path))
         const completed = new Set(checkpoint.completed)
         const pending = page.items.map(asCreate)
         for (const item of page.items) this.seen.add(item.file_id)
         this.latestSnapshot = true
         await this.page(
-          pending.filter(
-            (item) =>
-              !completed.has(item.file_id) &&
-              !laterFiles.has(item.file_id) &&
-              !laterPaths.has(item.path)
-          ),
+          pending.filter((item) => !completed.has(item.file_id) && !laterFiles.has(item.file_id)),
           async (change) => {
             if (this.heldFiles.get(change.file_id) !== change) {
               checkpoint.completed.push(change.file_id)
@@ -523,12 +517,6 @@ export class Puller {
         (page.items.length === 0 && page.next_since <= previous)
       ) {
         const items = newest([...latest.values()].sort((a, b) => a.seq - b.seq))
-        const paths = new Map(items.map((change) => [change.path, change.file_id]))
-        for (const change of latest.values()) {
-          const replacement = paths.get(change.path)
-          if (replacement !== undefined && replacement !== change.file_id)
-            firsts.set(replacement, Math.min(firsts.get(replacement)!, firsts.get(change.file_id)!))
-        }
         return { items, head: since, firsts }
       }
     }
