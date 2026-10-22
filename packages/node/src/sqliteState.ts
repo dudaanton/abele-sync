@@ -345,8 +345,9 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
         realpathSync(file) === realpathSync(this.openedFile) &&
         `${stat.dev}:${stat.ino}` === this.openedIdentity
       )
-    } catch {
-      return false
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+      throw error
     }
   }
 

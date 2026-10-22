@@ -121,9 +121,10 @@ export function assertLocalSafety(
       const file = join(folder, config)
       if (existsSync(file)) {
         // Reserved versioned evidence never authorizes a legacy empty bootstrap.
+        const text = readFileSync(file, 'utf8')
         let raw: unknown
         try {
-          raw = JSON.parse(readFileSync(file, 'utf8'))
+          raw = JSON.parse(text)
         } catch {
           continue
         } // Legacy force recovery without external evidence remains supported.

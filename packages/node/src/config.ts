@@ -201,9 +201,10 @@ export function personalBinding(cfg: DaemonConfig, generation = 1): ConnectionBi
 export function readConfigDescriptor(dir: string, stateDir?: string): LocalDescriptor | null {
   const file = join(stateFolder(dir, stateDir), CONFIG_FILE)
   if (!existsSync(file)) return null
+  const text = readFileSync(file, 'utf8')
   let value: unknown
   try {
-    value = JSON.parse(readFileSync(file, 'utf8'))
+    value = JSON.parse(text)
   } catch {
     return null
   } // Legacy force recovery remains available before activation.

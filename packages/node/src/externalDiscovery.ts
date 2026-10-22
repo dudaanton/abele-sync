@@ -33,8 +33,15 @@ function held(path: string): never {
   throw error
 }
 function entries(dir: string, stateDir?: string): Entry[] {
+  let text: string
   try {
-    const data = JSON.parse(readFileSync(join(stateFolder(dir, stateDir), INDEX_FILE), 'utf8')) as {
+    text = readFileSync(join(stateFolder(dir, stateDir), INDEX_FILE), 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
+  }
+  try {
+    const data = JSON.parse(text) as {
       schema?: unknown
       entries?: unknown
     }
@@ -111,10 +118,15 @@ function marker(bytes: Uint8Array): boolean {
   }
 }
 function configuredSelective(dir: string, stateDir?: string): SelectiveSettings {
+  let text: string
   try {
-    const raw = JSON.parse(
-      readFileSync(join(stateFolder(dir, stateDir), 'config.json'), 'utf8')
-    ) as {
+    text = readFileSync(join(stateFolder(dir, stateDir), 'config.json'), 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return selectiveDefaults()
+    throw error
+  }
+  try {
+    const raw = JSON.parse(text) as {
       selective?: SelectiveSettings
       connection?: { selective?: SelectiveSettings }
     }

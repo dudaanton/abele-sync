@@ -424,7 +424,8 @@ function readLockFile(file: string): LockRecord | 'missing' | 'unreadable' {
 export function currentBoot(): string {
   try {
     return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()
-  } catch {
+  } catch (error) {
+    if (!isCode(error, 'ENOENT') && !isCode(error, 'ENOTDIR')) throw error
     return `at:${Math.round(Date.now() / 1000 - uptime())}`
   }
 }
@@ -468,7 +469,9 @@ function isAlive(pid: number): boolean {
     process.kill(pid, 0)
     return true
   } catch (cause) {
-    return isCode(cause, 'EPERM')
+    if (isCode(cause, 'EPERM')) return true
+    if (isCode(cause, 'ESRCH')) return false
+    throw cause
   }
 }
 

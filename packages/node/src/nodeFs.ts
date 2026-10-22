@@ -741,8 +741,9 @@ const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 async function spelledExactly(absolute: string): Promise<boolean> {
   try {
     return (await readdir(dirname(absolute))).includes(basename(absolute))
-  } catch {
-    return false
+  } catch (error) {
+    if (isMissing(error)) return false
+    throw error
   }
 }
 
@@ -750,8 +751,9 @@ async function exists(absolute: string): Promise<boolean> {
   try {
     await lstat(absolute)
     return true
-  } catch {
-    return false
+  } catch (error) {
+    if (isMissing(error)) return false
+    throw error
   }
 }
 
@@ -760,8 +762,9 @@ async function sameFile(one: string, other: string): Promise<boolean> {
   try {
     const [a, b] = await Promise.all([lstat(one), lstat(other)])
     return a.dev === b.dev && a.ino === b.ino
-  } catch {
-    return false
+  } catch (error) {
+    if (isMissing(error)) return false
+    throw error
   }
 }
 
