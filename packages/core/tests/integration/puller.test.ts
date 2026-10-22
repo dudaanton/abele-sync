@@ -540,7 +540,7 @@ describe('the puller over the device facet', () => {
     expect(d.gets).toEqual([])
   })
 
-  it('leaves the cursor at 0 when the bootstrap itself held something', async () => {
+  it('bounds the bootstrap cursor before its first unresolved hold', async () => {
     const vault = await ownVault('held bootstrap')
     await commit(vault.client, [
       await createOp(vault.client, 'a.md', 'first a'),
@@ -555,16 +555,17 @@ describe('the puller over the device facet', () => {
     expect(held.bootstrapped).toBe(true)
     expect(held.applied).toBe(2)
     expect(held.held.map((change) => change.path)).toEqual(['c.md'])
-    // Not `seq - 1`: a manifest item's seq is where that file last changed, and winding the
-    // cursor back there would replay history. An unfinished walk says so by staying at 0.
-    expect(held.cursor).toBe(0)
-    expect(await d.state.getCursor()).toBe(0)
+    // Completed coverage permits progress, bounded by the first unresolved change.
+    const barrier = held.held[0]!.seq - 1
+    expect(held.cursor).toBe(barrier)
+    expect(await d.state.getCursor()).toBeLessThanOrEqual(barrier)
     d.forget()
 
     const after = await d.pull()
 
     expect(after.bootstrapped).toBe(true)
     expect(after.applied).toBe(1)
+    expect(after.held).toEqual([])
     // Completed coverage is retained: clean files are no longer revisited on this retry.
     expect(after.skipped).toBe(0)
     expect(after.cursor).toBe(await headOf(vault))
@@ -920,14 +921,17 @@ describe('the puller over the device facet', () => {
     expect(d.writes).toEqual(['honest.md'])
     expect(await d.state.get('lied.md')).toBeNull()
     expect(log.join('\n')).toContain(`bytes for ${lied} do not hash to it`)
-    // Held, not skipped: a bootstrap that held something is not finished, and says so.
-    expect(report.cursor).toBe(0)
+    // The unresolved corrupt blob bounds progress without replaying clean history.
+    const barrier = report.held[0]!.seq - 1
+    expect(report.cursor).toBe(barrier)
+    expect(await d.state.getCursor()).toBeLessThanOrEqual(barrier)
 
     // The server comes clean; the next pull writes it and moves on.
     lying = false
     d.forget()
     const again = await d.pull()
     expect(again.held).toEqual([])
+    expect(again.applied).toBe(1)
     expect(d.writes).toEqual(['lied.md'])
     expect(await d.text('lied.md')).toBe('as named too')
     expect(again.cursor).toBe(await headOf(vault))
