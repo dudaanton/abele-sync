@@ -10,10 +10,11 @@ const pause = async () => {
   await new Promise(() => {})
 }
 if (cut === 'after-main') {
-  const write = NodeFileSystem.prototype.writeAtomic
-  NodeFileSystem.prototype.writeAtomic = async function (...args) {
-    await write.apply(this, args)
-    if (this.root === dir && args[0] === `.obsidian/plugins/${id}/main.js`) await pause()
+  const write = NodeFileSystem.prototype.conditionalFile
+  NodeFileSystem.prototype.conditionalFile = async function (op) {
+    const applied = await write.call(this, op)
+    if (applied && this.root === dir && op.path === `.obsidian/plugins/${id}/main.js`) await pause()
+    return applied
   }
 } else {
   const transaction = SqliteStateStore.prototype.transaction

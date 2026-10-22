@@ -207,7 +207,8 @@ it('reports streamed pull only after AtomicStage commit and ledger commit', asyn
     at: '',
   }
   const order: string[] = []
-  fs.reopenStage = async () => {
+  fs.discardStage = async () => {}
+    fs.reopenStage = async () => {
     throw new Error('not a restart')
   }
   fs.beginAtomicWrite = async (path, mtime) => {

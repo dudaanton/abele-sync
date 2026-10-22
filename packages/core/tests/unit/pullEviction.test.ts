@@ -37,10 +37,11 @@ it('D-017 recovers an engine eviction before a missing occupant can become a loc
   const initial = new SyncEngine({ fs, state, client, selective: selectiveDefaults() })
   await initial.recordScope()
   await initial.stop()
-  const remove = fs.remove.bind(fs)
-  fs.remove = async (path) => {
-    await remove(path)
-    throw new Error('crash after eviction')
+  const remove = fs.conditionalFile.bind(fs)
+  fs.conditionalFile = async (op) => {
+    const applied = await remove(op)
+    if (applied && op.effect.kind === 'remove') throw new Error('crash after eviction')
+    return applied
   }
   const change: ChangeItem = {
     seq: 2,
@@ -63,7 +64,7 @@ it('D-017 recovers an engine eviction before a missing occupant can become a loc
       filter: { excluded: () => false },
     })
   ).rejects.toThrow('crash after eviction')
-  fs.remove = remove
+  fs.conditionalFile = remove
   const restarted = new SyncEngine({ fs, state, client, selective: selectiveDefaults() })
   await restarted.sync()
   expect(await state.get('file.bin')).toBeNull()

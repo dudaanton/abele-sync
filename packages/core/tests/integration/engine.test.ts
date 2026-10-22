@@ -615,10 +615,11 @@ describe('the engine over the device facet', () => {
     expect(d.engine.status).toMatchObject({ state: 'paused', pending: 1 })
 
     const writes: Array<[string, string]> = []
-    const write = d.fs.writeAtomic.bind(d.fs)
-    d.fs.writeAtomic = async (path, bytes, mtime) => {
-      writes.push([path, decoder.decode(bytes)])
-      await write(path, bytes, mtime)
+    const write = d.fs.conditionalFile.bind(d.fs)
+    d.fs.conditionalFile = async (op) => {
+      const applied = await write(op)
+      if (applied && op.effect.kind === 'write') writes.push([op.path, decoder.decode(op.effect.bytes)])
+      return applied
     }
 
     const second = await d.engine.sync()

@@ -103,14 +103,15 @@ function disk(): Disk {
   const writes: string[] = []
   const moves: string[] = []
   const write = fs.writeAtomic.bind(fs)
-  fs.writeAtomic = async (path, data, mtime) => {
-    writes.push(path)
-    await write(path, data, mtime)
-  }
+  fs.writeAtomic = async (path, bytes, mtime) => { writes.push(path); await write(path, bytes, mtime) }
   const move = fs.move.bind(fs)
-  fs.move = async (from, to) => {
-    moves.push(`${from} -> ${to}`)
-    await move(from, to)
+  fs.move = async (from, to) => { moves.push(`${from} -> ${to}`); await move(from, to) }
+  const mutate = fs.conditionalFile.bind(fs)
+  fs.conditionalFile = async (op) => {
+    const applied = await mutate(op)
+    if (applied && op.effect.kind === 'write') writes.push(op.path)
+    if (applied && op.effect.kind === 'move') moves.push(`${op.path} -> ${op.effect.to}`)
+    return applied
   }
   return { fs, state: new MemoryStateStore(), writes, moves, expected: new ExpectedWrites() }
 }
@@ -384,10 +385,10 @@ describe('paths off the wire', () => {
     // lands — and `b.md` here is a folder, which the adapter says as `conflict`.
     await d.fs.writeAtomic('a.md', encodeText('edited'), 2000)
     const edited = await sha256(encodeText('edited'))
-    const move = d.fs.move.bind(d.fs)
-    d.fs.move = async (from, to) => {
-      if (to === 'b.md') throw new EngineError('conflict', 'a folder is at b.md')
-      await move(from, to)
+    const move = d.fs.conditionalFile.bind(d.fs)
+    d.fs.conditionalFile = async (op) => {
+      if (op.effect.kind === 'move' && op.effect.to === 'b.md') throw new EngineError('conflict', 'a folder is at b.md')
+      return move(op)
     }
     const client = fakeClient({
       commitRaw: async () => ({

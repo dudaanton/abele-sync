@@ -36,6 +36,7 @@ it('normal concurrent hydration of multi-GiB virtual files never assembles file 
     }
     fs.stat = async (path) => (published ? { path, size, mtime: 1000 } : null)
     fs.fingerprint = async () => ({ ...identity, mtime: 1000, generation: 'virtual' })
+    fs.discardStage = async () => {}
     fs.reopenStage = async () => {
       throw new Error('not a restart')
     }

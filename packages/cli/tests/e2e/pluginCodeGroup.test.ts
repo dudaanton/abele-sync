@@ -198,20 +198,20 @@ describe('all-or-nothing plugin code approval', () => {
   it('rolls the files and ledger back if a later member cannot be placed, then retries the same group', async () => {
     const id = 'placement-failure'
     const { shown, before } = await prepare(id)
-    const original = NodeFileSystem.prototype.writeAtomic
+    const original = NodeFileSystem.prototype.conditionalFile
     let injected = false
     const fail = vi
-      .spyOn(NodeFileSystem.prototype, 'writeAtomic')
-      .mockImplementation(async function (this: NodeFileSystem, path, bytes, mtime) {
+      .spyOn(NodeFileSystem.prototype, 'conditionalFile')
+      .mockImplementation(async function (this: NodeFileSystem, op) {
         if (
           !injected &&
           (this as unknown as { root: string }).root === b &&
-          path === code(id, 'manifest.json')
+          op.path === code(id, 'manifest.json')
         ) {
           injected = true
           throw new EngineError('io', 'injected placement failure')
         }
-        await original.call(this, path, bytes, mtime)
+        return original.call(this, op)
       })
     try {
       const result = await approve(id, shown)
