@@ -350,12 +350,9 @@ async function recoverFolder(root: string, location: string, check: () => void):
           await unlink(victim)
         } else if (
           info.isFile() &&
-          (complete ||
-            (installed &&
-              intent.expected &&
-              info.size === intent.expected.size &&
-              Math.max(0, Math.round(info.mtimeMs)) === intent.expected.mtime &&
-              (await fingerprint(victim)) === intent.expected.sha))
+          (complete || installed) &&
+          intent.expected &&
+          (await matchesVictim(victim, intent.expected))
         ) {
           await unlink(victim)
           await syncParents(victim, root)
