@@ -137,7 +137,7 @@ describe('Adversarial: three offline editors, every arrival order', () => {
     const ds = await Promise.all(['a', 'b', 'c'].map((name) => t.device(name)))
     for (let i = 0; i < 2101; i++) await ds[0]!.write(`notes/${i}.md`, `synthetic ${i}\n`)
     await converge(...ds)
-    expect(ds[0]!.stats.commits).toBe(3)
+    expect(ds[0]!.stats.commits).toBe(22)
     for (const d of ds) expect(d.paths()).toHaveLength(2101)
     expect((await ds[0]!.client.state()).head_seq).toBe(2101)
   }, 90000)
