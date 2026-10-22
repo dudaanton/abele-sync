@@ -2,7 +2,7 @@ import { link, mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { encodeText, selectiveDefaults } from '@abele/sync-core'
+import { encodeText, selectiveDefaults, sha256 } from '@abele/sync-core'
 import { CodeDraft } from '@abele/sync-node'
 import { CodeGroupDisk } from '@abele/sync-node'
 import { NodeFileSystem } from '@abele/sync-node'
@@ -85,6 +85,9 @@ describe('grouped code placement recovery', () => {
       const retained = new NodeFileSystem(join(dir, record.path))
       expect(new TextDecoder().decode(await retained.read('journal.json'))).toBe(invalid)
       expect(await readdir(join(dir, record.path, 'blobs'))).not.toHaveLength(0)
+      expect(await retained.read(`blobs/${await sha256(encodeText('original()'))}`)).toEqual(
+        encodeText('original()')
+      )
       expect(await text(MAIN)).toBe('approved()')
       await CodeGroupDisk.recover(vault(), () => true)
       expect(state.metadataKeys('code-approval-review:')).toEqual(keys)
