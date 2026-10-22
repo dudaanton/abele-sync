@@ -85,8 +85,17 @@ export async function restoreVictim(root: string, path: string, victim: string, 
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
       const named = await lstat(destination)
       if (named.dev !== info.dev || named.ino !== info.ino) {
-        destination = await containedIn(root, `${path}.sync-conflict-${id}`)
-        await link(victim, destination)
+        for (let n = 0; ; n++) {
+          destination = await containedIn(root, `${path}.sync-conflict-${id}${n ? `-${n}` : ''}`)
+          try {
+            await link(victim, destination)
+            break
+          } catch (conflict) {
+            if ((conflict as NodeJS.ErrnoException).code !== 'EEXIST') throw conflict
+            const restored = await lstat(destination)
+            if (restored.dev === info.dev && restored.ino === info.ino) break
+          }
+        }
       }
     }
     // The public name must survive a crash before its only backup is retired.

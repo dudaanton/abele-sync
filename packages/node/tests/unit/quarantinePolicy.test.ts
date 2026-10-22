@@ -102,6 +102,30 @@ it('recovers a directory captured by an older primitive and retires that record'
   }
 })
 
+it('retries an already-linked conflict restoration without losing the occupant or victim', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'quarantine-'))
+  try {
+    const folder = join(root, '.abele-sync/conditional/conflicted')
+    await mkdir(folder, { recursive: true })
+    await writeFile(join(folder, 'victim'), new Uint8Array([3]))
+    await writeFile(join(folder, 'intent.json'), JSON.stringify({ path: 'file' }))
+    await writeFile(join(folder, 'restoring'), '1')
+    await writeFile(join(root, 'file'), new Uint8Array([4]))
+    // Exact durable image after conflict link succeeds, before its victim unlink.
+    await link(join(folder, 'victim'), join(root, 'file.sync-conflict-conflicted'))
+    const fs = new NodeFileSystem(root)
+    await fs.recoverConditionalFiles()
+    expect(new Uint8Array(await readFile(join(root, 'file')))).toEqual(new Uint8Array([4]))
+    expect(new Uint8Array(await readFile(join(root, 'file.sync-conflict-conflicted')))).toEqual(
+      new Uint8Array([3])
+    )
+    expect(await readdir(join(root, '.abele-sync/conditional'))).toEqual([])
+    await fs.recoverConditionalFiles()
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 it('retries the absent original name when only restoration intent is known', async () => {
   const root = await mkdtemp(join(tmpdir(), 'quarantine-'))
   try {
