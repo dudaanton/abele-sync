@@ -1,5 +1,11 @@
 import { expect, it } from 'vitest'
-import { MemoryFileSystem, MemoryStateStore, sha256, ExpectedWrites } from '../../src/index.js'
+import {
+  MemoryFileSystem,
+  MemoryStateStore,
+  sha256,
+  ExpectedWrites,
+  EngineError,
+} from '../../src/index.js'
 import { PushDisk } from '../../src/pushDisk.js'
 
 async function fixture() {
@@ -57,4 +63,15 @@ it('D-058 does not undo a refused rename of same-stat edited bytes', async () =>
   await f.disk.undoMove({ op: 'move', file_id: 'file', base_version_id: 'a', to_path: 'new.bin' })
   expect(await f.fs.stat('old.bin')).toBeNull()
   expect(await f.fs.read('new.bin')).toEqual(f.edit)
+})
+
+it('propagates an operational failure during push receipt respelling instead of classifying it as refused', async () => {
+  const f = await fixture()
+  await f.fs.writeAtomic('OLD.BIN', f.a, 1)
+  const failure = new EngineError('io', 'transient respell failure')
+  f.fs.conditionalFile = async () => {
+    throw failure
+  }
+  await expect(f.disk.place(f.base, 'OLD.BIN')).rejects.toBe(failure)
+  expect(await f.state.get('old.bin')).toEqual(f.base)
 })

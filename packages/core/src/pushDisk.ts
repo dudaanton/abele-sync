@@ -163,7 +163,7 @@ export class PushDisk {
     try {
       return await this.effect({ path: from, expected, effect: { kind: 'move', to } })
     } catch (error) {
-      if (!(error instanceof EngineError) || error.code === 'lost') throw error
+      if (!inTheWay(error)) throw error
       this.opts.log?.(`push: ${from} stays beside ${to}: ${error.message}`)
       return false
     }
