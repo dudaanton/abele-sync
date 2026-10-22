@@ -27,7 +27,7 @@ import { FINAL_REFUSALS, VerdictRecorder } from './pushRecord.js'
 import { sourcesFromOps, sourcesFromScan, type Sources } from './pushSources.js'
 import { TransferBudget } from './streaming.js'
 import { VerdictPlanner } from './pushVerdicts.js'
-import type { StateStore, Journal } from './state.js'
+import type { StateStore, StateEntry, Journal } from './state.js'
 import { checkCancellation } from './cancellation.js'
 import { isFinalForBatch } from './commitErrors.js'
 import { requestReconciliation } from './reconciliation.js'
@@ -295,6 +295,37 @@ const emptyReport = (): PushReport => ({
 
 /** Failed receipt placement is durable independently of the uncertain request
  * journal. It contains the server's answer, never a new commit to resend. */
+interface RetainedReceipt {
+  path: string
+  op: CommitOp
+  result: CommitOpResult
+  /** Exact identity/base before settlement; absent only in legacy records. */
+  base?: StateEntry | null
+}
+const receiptFields = ['path', 'wirePath', 'fileId', 'versionId', 'sha', 'size', 'mtime'] as const
+async function receiptStillCurrent(state: StateStore, row: RetainedReceipt): Promise<boolean> {
+  const id =
+    row.result.status !== 'rejected'
+      ? row.result.file_id
+      : 'file_id' in row.op
+        ? row.op.file_id
+        : null
+  const current = id === null ? await state.get(row.path) : await state.byFileId(id)
+  if (row.result.status !== 'rejected') {
+    if (current?.versionId === row.result.version_id) return false // already settled
+    if (current === null && (await state.getCursor()) > row.result.seq) return false // later deletion
+  }
+  if (row.base !== undefined)
+    return row.base === null || current === null
+      ? row.base === current
+      : receiptFields.every((field) => row.base![field] === current[field])
+  // Old receipts had no snapshot. Their submitted version is the only authority
+  // they can retain; a create cannot overwrite an identity now tracked elsewhere.
+  return row.op.op === 'create'
+    ? current === null
+    : 'base_version_id' in row.op && current?.versionId === row.op.base_version_id
+}
+
 export async function resumeReceipts(
   client: EngineClient,
   fs: FileSystem,
@@ -306,15 +337,26 @@ export async function resumeReceipts(
     checkCancellation(opts.signal)
     const raw = await state.getMeta?.(key)
     if (!raw) continue
-    let row: { path: string; op: CommitOp; result: CommitOpResult }
+    let row: RetainedReceipt
     try {
       const value = JSON.parse(raw)
       row = {
         path: value.path,
         op: CommitOpSchema.parse(value.op),
         result: CommitOpResultSchema.parse(value.result),
+        ...(value.base === undefined ? {} : { base: value.base }),
       }
       if (typeof row.path !== 'string') throw new Error('invalid receipt path')
+      if (
+        row.base !== undefined &&
+        row.base !== null &&
+        !receiptFields.every(
+          (field) =>
+            typeof row.base![field] ===
+            (field === 'size' || field === 'mtime' ? 'number' : 'string')
+        )
+      )
+        throw new Error('invalid receipt base')
     } catch (error) {
       await opts.retries.failed(key, 'recovery', error, true)
       continue
@@ -361,24 +403,32 @@ class Pusher {
     this.recorder = new VerdictRecorder(fs, state, opts, report, this.hash, this.refused, disk)
   }
 
-  async receipt(
-    key: string,
-    row: { path: string; op: CommitOp; result: CommitOpResult }
-  ): Promise<void> {
+  async receipt(key: string, row: RetainedReceipt): Promise<void> {
+    if (!(await receiptStillCurrent(this.state, row))) {
+      await transact(this.state, async (tx) => {
+        await tx.setMeta?.(key, null)
+      })
+      await this.opts.retries?.succeeded(row.path, 'recovery')
+      await this.opts.retries?.succeeded(key, 'recovery')
+      return
+    }
     const verdicts = await this.planner.plan([row.op], [row.result])
     try {
       const previous = row.op.op === 'create' ? null : await this.state.byFileId(row.op.file_id)
       const keptBefore = this.report.kept.length
       if (verdicts.failures?.has(0)) throw verdicts.failures.get(0)
       if (verdicts.staged.size) await this.opts.onDefer?.([...verdicts.staged.values()])
+      let current = false
       await transact(this.state, async (tx) => {
-        await this.recorder.withState(tx).take(row.op, row.result, 0, verdicts)
+        current = await receiptStillCurrent(tx, row)
+        if (current) await this.recorder.withState(tx).take(row.op, row.result, 0, verdicts)
         await tx.setMeta?.(key, null)
       })
       await this.opts.retries?.succeeded(row.path, 'recovery')
       await this.opts.retries?.succeeded(key, 'recovery')
       const result = row.result
       if (
+        current &&
         result.status !== 'rejected' &&
         !verdicts.bad.has(0) &&
         !verdicts.staged.has(0) &&
@@ -430,9 +480,10 @@ class Pusher {
     if (path === undefined) throw error
     const identity =
       result.status !== 'rejected' ? result.file_id : 'file_id' in op ? op.file_id : path
+    const base = await tx.byFileId(identity)
     await tx.setMeta!(
       `push-receipt:${encodeURIComponent(identity)}`,
-      JSON.stringify({ path, op, result })
+      JSON.stringify({ path, op, result, base })
     )
     await this.opts.retries.failed(path, 'recovery', error, false, tx)
     this.report.kept.push(path)
