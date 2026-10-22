@@ -137,6 +137,15 @@ export class CodeGroupDisk {
       // Reversing that move is safe even if it never landed, and restores the original spelling.
       if (before && (step.op.kind !== 'move' || !after)) continue
       if (!after) {
+        // An edited destination of a completed move belongs to the user. Keep its
+        // new name rather than undoing the edit or blocking every future startup.
+        // Conditional recovery has already retired the private source alias.
+        if (
+          step.op.kind === 'move' &&
+          (await this.vault.disk.stat(step.op.from)) === null &&
+          (await this.vault.disk.stat(step.op.to)) !== null
+        )
+          continue
         // Preserve the user's edit, but still undo our other members instead of leaving
         // companion files installed merely because the first rollback target changed.
         conflicted = true

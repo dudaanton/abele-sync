@@ -369,6 +369,11 @@ async function recoverFolder(root: string, location: string, check: () => void):
         hasVictim = intent.sentinel?.dev !== info.dev || intent.sentinel?.ino !== info.ino
         if (!hasVictim) {
           await unlink(victim)
+        } else if (intent.effect === 'move' && installed) {
+          // The destination owns this inode now, including any in-place local edit.
+          // Drop only the private alias after the destination durability barrier.
+          await unlink(victim)
+          await syncParents(victim, root)
         } else if (
           info.isFile() &&
           (complete || installed) &&

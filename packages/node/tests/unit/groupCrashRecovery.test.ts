@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { expect, it, vi } from 'vitest'
@@ -193,7 +193,8 @@ async function run(
   exact: 'capture' | 'publication' | 'first-save' | '' = '',
   mode: 'write' | 'remove' | 'move' = 'write',
   recoveryCut: number | 'restoring' | 'discard' = 0,
-  nested = false
+  nested = false,
+  editMove = false
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'group-cut-'))
   const disk = new NodeFileSystem(dir)
@@ -260,6 +261,14 @@ async function run(
     crash.handles.clear()
     expect(failed).toBe(cut > 0 || !!exact)
     if (exact === 'capture') expect(await disk.stat('file.bin')).toBeNull()
+    if (editMove) {
+      await writeFile(join(dir, 'moved.bin'), encodeText('local edit'))
+      await disk.recoverConditionalFiles()
+      expect(
+        await disk.stat('file.bin'),
+        'a published move must not recreate its source alias'
+      ).toBeNull()
+    }
     if (recoveryCut) {
       crash.points = []
       crash.cut = typeof recoveryCut === 'number' ? recoveryCut : 0
@@ -304,7 +313,7 @@ async function run(
             : mode === 'remove'
               ? [null, null]
               : [null, 'original']
-      expect(image).toEqual(failed ? before : after)
+      expect(image).toEqual(editMove ? [null, 'local edit'] : failed ? before : after)
     }
     const check = async () => {
       await checkImage()
@@ -448,6 +457,9 @@ it('D-076 recognises a move published immediately before a crash', async () => {
 })
 it('D-079 recovers after recursive discard removes journal.json before the draft', async () => {
   await run(0, '', 'write', 'discard')
+})
+it('D-080 preserves a published move edited in place before recovery with one visible inode name', async () => {
+  await run(0, 'publication', 'move', 0, false, true)
 })
 
 for (const mode of ['write', 'remove', 'move'] as const)
