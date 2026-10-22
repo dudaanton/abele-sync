@@ -11,7 +11,7 @@ import {
 } from '@abele/sync-core'
 import { containedIn, isMissing, ownTempFolder } from './nodeFsGuard.js'
 import { syncParents, syncPath } from './nodeFsDurability.js'
-import { restoreVictim } from './nodeConditional.js'
+import { restoreVictim, matchesVictim } from './nodeConditional.js'
 
 interface Metadata {
   id: string
@@ -43,7 +43,10 @@ export class NodeStages {
     if (
       info.isFile() &&
       meta.base &&
-      same(await this.host.fingerprint(`.abele-sync/stages/${meta.id}/base`), meta.base)
+      (await matchesVictim(backup, {
+        ...meta.base,
+        mtime: meta.base.mtime ?? Math.max(0, Math.round(info.mtimeMs)),
+      }))
     ) {
       await unlink(backup)
       await syncParents(backup, this.root)

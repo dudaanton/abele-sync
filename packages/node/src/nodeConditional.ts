@@ -13,24 +13,50 @@ import {
   rm,
 } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import type { ConditionalFileOperation } from '@abele/sync-core'
+import type { ConditionalFileOperation, FileVersion } from '@abele/sync-core'
 import { containedIn, isMissing } from './nodeFsGuard.js'
 import { syncParents, syncPath } from './nodeFsDurability.js'
 
-async function fingerprint(path: string) {
+async function fingerprint(path: string, limit = Infinity) {
   const file = await open(path, 'r'),
     hash = createHash('sha256')
   try {
     const buffer = Buffer.alloc(1024 * 1024)
+    let size = 0
     for (;;) {
       const { bytesRead } = await file.read(buffer)
       if (!bytesRead) break
+      size += bytesRead
+      if (size > limit) return 'changed'
       hash.update(buffer.subarray(0, bytesRead))
     }
     return hash.digest('hex')
   } finally {
     await file.close()
   }
+}
+
+/** Final bounded content proof, including writes which preserve rounded stat fields.
+ * POSIX has no compare-and-unlink: the caller must unlink immediately after this
+ * resolves and preserve the capture on any mismatch or I/O uncertainty. */
+export async function matchesVictim(path: string, expected: FileVersion): Promise<boolean> {
+  const before = await lstat(path, { bigint: true })
+  if (
+    !before.isFile() ||
+    before.size !== BigInt(expected.size) ||
+    Math.max(0, Math.round(Number(before.mtimeNs) / 1e6)) !== expected.mtime
+  )
+    return false
+  const sha = await fingerprint(path, expected.size)
+  const after = await lstat(path, { bigint: true })
+  return (
+    sha === expected.sha &&
+    before.dev === after.dev &&
+    before.ino === after.ino &&
+    before.size === after.size &&
+    before.mtimeNs === after.mtimeNs &&
+    before.ctimeNs === after.ctimeNs
+  )
 }
 function valid(id: string) {
   if (!/^[a-zA-Z0-9-]{1,128}$/.test(id)) throw new Error('invalid installation receipt')
@@ -129,7 +155,7 @@ export async function conditionalFile(
       return
     }
     check()
-    if (verified) {
+    if (verified && op.expected !== null && (await matchesVictim(victim, op.expected))) {
       try {
         await lstat(target)
         await unlink(victim)
@@ -148,13 +174,18 @@ export async function conditionalFile(
   }
   const completed = async () => {
     if (captured) {
+      if (op.expected === null || !(await matchesVictim(victim, op.expected))) {
+        verified = false
+        await restore()
+        return false
+      }
       await unlink(victim)
       captured = false
       await syncParents(victim, root)
     }
     if (op.effect.kind !== 'write' || !op.effect.receipt) {
       await retire()
-      return
+      return true
     }
     await writeFile(`${directory}/complete`, '1', { flag: 'wx' })
     await syncPath(`${directory}/complete`)
@@ -163,6 +194,7 @@ export async function conditionalFile(
     await mkdir(dirname(done), { recursive: true })
     await rename(directory, done)
     await syncParents([done, directory], root)
+    return true
   }
   try {
     check()
@@ -188,8 +220,7 @@ export async function conditionalFile(
             await retire()
             return false
           }
-          await completed()
-          return true
+          return await completed()
         }
         throw error
       }
@@ -217,8 +248,7 @@ export async function conditionalFile(
     }
     check()
     if (op.effect.kind === 'remove') {
-      await completed()
-      return true
+      return await completed()
     }
     const destination = await containedIn(root, op.effect.kind === 'move' ? op.effect.to : op.path)
     await mkdir(dirname(destination), { recursive: true })
@@ -245,8 +275,7 @@ export async function conditionalFile(
       throw error
     }
     await syncParents(destination, root)
-    await completed()
-    return true
+    return await completed()
   } catch (error) {
     await restore()
     throw error
