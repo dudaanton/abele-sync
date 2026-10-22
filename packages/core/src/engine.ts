@@ -264,10 +264,14 @@ export class SyncEngine implements ExclusiveOperationPort {
     } catch (error) {
       return Promise.reject(error)
     }
-    await this.exclusive(() => this.cycle.retries.retryNow())
-    this.cycle.rewind = true
-    this.cycle.retryRefusedDirectories = true
-    return this.sync()
+    // Reserve preparation AND its run as one queue item. start() must not slip
+    // a normal sync between retryNow's await and the requested rescan.
+    return this.exclusive(async () => {
+      await this.cycle.retries.retryNow()
+      this.cycle.rewind = true
+      this.cycle.retryRefusedDirectories = true
+      return this.beginRun()
+    })
   }
 
   /** Retry file-local failures immediately, including records held for review. */
@@ -409,10 +413,14 @@ export class SyncEngine implements ExclusiveOperationPort {
   }
 
   private launch(): Promise<SyncReport> {
+    return this.occupy(this.beginRun())
+  }
+
+  private beginRun(): Promise<SyncReport> {
     this.stopping = false
     if (this.cancellation.signal.aborted) this.cancellation = new AbortController()
     if (this.started && !this.paused) this.wake.connect()
-    return this.occupy(this.run())
+    return this.run()
   }
 
   /**
