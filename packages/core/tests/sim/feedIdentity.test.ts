@@ -130,6 +130,9 @@ it('identity heads match raw feed application across random pages and every cras
       const image = []
       for await (const entry of state.all())
         image.push([entry.fileId, entry.path, [...(await fs.read(entry.path))]])
+      const files = []
+      for await (const file of fs.list()) files.push([file.path, [...(await fs.read(file.path))]])
+      expect(files.sort()).toEqual(image.map(([, path, bytes]) => [path, bytes]).sort())
       expect(await state.getCursor()).toBe(events.at(-1)!.seq)
       return { image: image.sort(), points }
     }

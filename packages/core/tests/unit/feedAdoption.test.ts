@@ -8,6 +8,23 @@ import { pull } from '../../src/puller.js'
 import type { EngineClient } from '../../src/engineClient.js'
 import { PullHolds } from '../../src/pullHolds.js'
 
+it('a tombstone for another identity cannot resolve a held deletion at the same path', async () => {
+  const f = await fixture(2)
+  f.changes[0] = { ...f.changes[0]!, op: 'delete', sha: null, size: null, mtime: null }
+  f.changes[1] = {
+    ...f.changes[1]!,
+    file_id: 'other',
+    op: 'delete',
+    sha: null,
+    size: null,
+    mtime: null,
+  }
+  const report = await f.run()
+  expect(report.held.map((c) => c.file_id)).toContain('f')
+  expect(await f.state.getCursor()).toBe(1)
+  expect(await f.fs.read('a.bin')).toEqual(f.bytes[2])
+})
+
 it('retains tombstones for distinct identities sharing a destination', async () => {
   const f = await fixture(0)
   const base = f.changes[0]!

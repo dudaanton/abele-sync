@@ -186,9 +186,11 @@ export class PullHolds {
 
   /** A newer successfully settled identity at a path supersedes its historical occupants. */
   resolvePath(change: ChangeItem): void {
+    // A tombstone says nothing about other identities which reused this path.
+    if (change.op === 'delete') return
     for (const id of this.paths.get(change.path) ?? []) {
       const held = this.records.get(id)!
-      if (held.change.seq <= change.seq) this.resolve(held.change)
+      if (held.change.op !== 'delete' && held.change.seq <= change.seq) this.resolve(held.change)
     }
   }
 
