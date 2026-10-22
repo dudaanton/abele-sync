@@ -22,7 +22,8 @@ export interface ChunkSource {
 }
 
 export interface AtomicStage {
-  /** True only when this stage installed the named inode/object, not equal user bytes. */
+  /** True only with durable proof that this stage installed the named object/content,
+   * not equal user bytes. Checked hosts always return false; a sealed stage is not proof. */
   installed?(): Promise<boolean>
   readonly id: string
   readonly offset: number

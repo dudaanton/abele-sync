@@ -32,11 +32,25 @@ export interface FileInfo {
  * the daemon over Node's `fs`; the engine and its tests use `MemoryFileSystem`.
  */
 export interface FileSystem extends Partial<StreamingFileSystem> {
-  /** Atomic compare-and-effect. Compare stat AND bytes of the actual displaced file.
-   * Quarantine before verification; never overwrite a concurrent save when restoring
-   * or installing. False preserves all user bytes. Absence means pull fails closed. */
+  /** Apply an effect only after accepting its expected base (see docs/migration-0.3.md).
+   * Exclusive hosts compare the displaced regular file at the mutation boundary and
+   * publish into an exclusive destination. Checked hosts compare fresh SHA-256/size,
+   * record size/mtime, drain pending host saves, and stat again immediately before
+   * mutation. Changed stamps, non-files, content mismatches and occupied create/move
+   * destinations return false (local-change refusal); operational errors still throw.
+   * Expected absence requires absence checks and create-if-absent publication; an
+   * already absent removal may succeed after the write barrier and a second check.
+   * Checked hosts cannot exclude an edit in the final check-to-mutation interval and
+   * must document that limit: success is not object identity or atomic exclusion.
+   * Preserve displaced bytes in durable quarantine, restore mismatches without
+   * overwriting occupants, retain uncertain evidence, and retire verified victims.
+   * Only exclusive hosts with durable object/content proof can adopt an installation
+   * after a crash. Checked installedFile/AtomicStage.installed return false; matching
+   * bytes, intent or a sealed stage never authorize blind recovery publication.
+   * Absence of this port fails closed; lack of object identity alone does not. */
   conditionalFile?(operation: ConditionalFileOperation): Promise<boolean>
-  /** Publication evidence, not equality: the named file is the installation's inode/object. */
+  /** Exclusive publication evidence, not equality: the named file is this installation's
+   * object with proven content. Checked hosts always return false, conservatively. */
   installedFile?(receipt: string, path: string, sha: string): Promise<boolean>
   discardInstallation?(receipt: string): Promise<void>
   recoverConditionalFiles?(): Promise<void>

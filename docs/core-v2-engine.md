@@ -59,6 +59,11 @@ path coordinator or claim simultaneous live-host verification.
 
 ## Filesystem and state ports
 
+File mutation ports follow the [exclusive/checked host contract](migration-0.3.md).
+A checked host may implement conditional effects without object identity, but
+must document the final-check-to-mutation gap and return false from installation
+proof ports.
+
 The existing `FileSystem` file methods remain unchanged. Token connections also
 need directory ports:
 
