@@ -216,10 +216,19 @@ describe('Adversarial: expired journal', () => {
     vi.setSystemTime(now)
     const revived = t.revive(a, { joinPrefer: 'mine' })
     const replay = vi.spyOn(revived.client, 'commitRaw')
-    await expect(revived.sync()).rejects.toMatchObject({ code: 'conflict' })
-    expect(replay).not.toHaveBeenCalled()
-    expect(await revived.state.getJournal()).toEqual(journal)
-    const head = (await b.client.manifest(null)).items[0]!
+    await revived.sync()
+    expect(await revived.state.getJournal()).toBeNull()
+    expect(
+      replay.mock.calls.every(([ops]) =>
+        ops.every((op) => op.op === 'create' && op.prefer === undefined)
+      )
+    ).toBe(true)
+    await converge(b, revived)
+    const copies = revived.paths().filter((path) => path.startsWith('note (Conflicted copy'))
+    expect(copies).toHaveLength(1)
+    expect(await revived.text(copies[0]!)).toBe('old join content\n')
+    expect(await revived.text('note.md')).toBe('newer remote content\n')
+    const head = (await b.client.manifest(null)).items.find((item) => item.path === 'note.md')!
     expect(head.sha).toBe(await shaOf('newer remote content\n'))
   })
 })
