@@ -181,6 +181,8 @@ describe('restored vault recovery', () => {
       await utimes(join(a, 'Note.bin'), 1, 1)
       await rm(join(a, 'Absent.bin'))
       let failed = false
+      let receivedReply = false
+      let failedLedgerWrite = false
       const transport: typeof fetch = async (input, init) => {
         if (!failed && String(input).endsWith('/v2/commit') && init?.method === 'POST') {
           failed = true
@@ -189,14 +191,29 @@ describe('restored vault recovery', () => {
             await fetch(input, init)
             throw new Error('lost reply')
           }
+          if (boundary === 'after reply before ledger') {
+            const reply = await fetch(input, init)
+            receivedReply = true
+            return reply
+          }
         }
         return fetch(input, init)
       }
-      if (boundary === 'after reply before ledger')
-        vi.spyOn(StateTransaction.prototype, 'put').mockImplementationOnce(async () => {
-          throw new Error('interrupted ledger write')
+      if (boundary === 'after reply before ledger') {
+        const put = StateTransaction.prototype.put
+        vi.spyOn(StateTransaction.prototype, 'put').mockImplementation(async function (
+          this: StateTransaction,
+          entry
+        ) {
+          if (receivedReply && !failedLedgerWrite) {
+            failedLedgerWrite = true
+            throw new Error('interrupted ledger write')
+          }
+          await put.call(this, entry)
         })
+      }
       expect((await invoke(['run', '--dir', a, '--once'], {}, transport)).code).not.toBe(0)
+      if (boundary === 'after reply before ledger') expect(failedLedgerWrite).toBe(true)
       vi.restoreAllMocks()
       const retry = await invoke(['run', '--dir', a, '--once'])
       expect(retry.code, retry.err).toBe(0)
