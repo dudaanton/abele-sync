@@ -380,7 +380,7 @@ export class PullPlacer {
       return this.streamPlace(change, sha, entry, target, from, beforeTarget, beforeFrom, local)
     }
     let bytes: Uint8Array | null = null
-    if (entry === null || entry.sha !== sha) {
+    if (entry === null || entry.sha !== sha || (firstTarget === null && beforeFrom === null)) {
       bytes = await this.bytesOf(sha, fetched, local)
       if (bytes === null) return false
     }

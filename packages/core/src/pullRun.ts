@@ -553,7 +553,10 @@ export class Puller {
       return
     }
     // Already here: a change re-read on the way back to the head, or one this device made.
-    if (entry?.versionId === change.version_id) {
+    if (
+      entry?.versionId === change.version_id &&
+      !(this.opts.recheck?.has(entry.fileId) && (await this.fs.stat(entry.path)) === null)
+    ) {
       await this.placer.settled(change)
       this.report.skipped++
       return
