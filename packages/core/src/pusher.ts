@@ -1,5 +1,5 @@
 import { transact, savepoint } from './stateTransaction.js'
-import { isFileFailure } from './fileRetry.js'
+import { isFileFailure, retryAttempt } from './fileRetry.js'
 import {
   AbeleError,
   CommitOpSchema,
@@ -524,7 +524,7 @@ class Pusher {
           checkPaths &&
           path !== undefined &&
           this.opts.retries &&
-          !this.opts.retries.ready(path)
+          !this.opts.retries.ready(path, 'push', retryAttempt(op))
         ) {
           this.report.kept.push(path)
           continue

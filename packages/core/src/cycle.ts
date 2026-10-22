@@ -32,7 +32,7 @@ import { scanSnapshot } from './scanSnapshot.js'
 import { readReconciliation } from './reconciliation.js'
 import { recoverPendingPullWrites } from './pullRecovery.js'
 import { recoverPullEvictions } from './pullEvictions.js'
-import { FileRetries } from './fileRetry.js'
+import { FileRetries, retryAttempt } from './fileRetry.js'
 import { GENERATION_KEY, MEMBERS_KEY, RECONCILING_KEY } from './restoreGeneration.js'
 import {
   reconciliationScan,
@@ -555,7 +555,15 @@ export class SyncCycle {
               ? (await state.byFileId(op.file_id))?.wirePath
               : undefined
       if (path !== undefined)
-        await this.retries.failed(path, 'push', new Error(`${code}: ${message}`))
+        await this.retries.failed(
+          path,
+          'push',
+          new Error(`${code}: ${message}`),
+          false,
+          state,
+          undefined,
+          retryAttempt(op)
+        )
     }
     for (const op of judged) {
       const path =

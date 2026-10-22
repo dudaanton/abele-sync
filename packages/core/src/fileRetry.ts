@@ -14,7 +14,10 @@ export interface WaitingFile {
   local?: boolean
   /** Durable recovery obligation; scheduling alone is never an owner. */
   owner?: string
+  attempt?: string
 }
+/** Bind backoff to an immutable outgoing intent, not future files at its pathname. */
+export const retryAttempt = (op: object): string => JSON.stringify(op, Object.keys(op).sort())
 const PREFIX = 'file-retry:'
 const key = (path: string) => PREFIX + encodeURIComponent(path)
 
@@ -127,11 +130,19 @@ export class FileRetries {
     const row = this.rows.get(path)
     return row !== undefined && (!phase || row.phase === phase)
   }
-  ready(path: string, phase?: RetryPhase): boolean {
+  ready(path: string, phase?: RetryPhase, attempt?: string): boolean {
+    const target = path
     for (;;) {
       const row = this.rows.get(path)
       const otherDirection =
-        row?.phase === 'push' && !row.local && (phase === 'pull' || phase === 'scan')
+        row?.phase === 'push' &&
+        !row.local &&
+        (phase === 'pull' ||
+          phase === 'scan' ||
+          (path === target &&
+            attempt !== undefined &&
+            row.attempt !== undefined &&
+            attempt !== row.attempt))
       if (row && !otherDirection && (row.quarantined || row.nextAt > this.now())) return false
       const at = path.lastIndexOf('/')
       if (at < 0) return true
@@ -158,13 +169,16 @@ export class FileRetries {
     error: unknown,
     quarantine = false,
     state = this.state,
-    owner?: string
+    owner?: string,
+    attempt?: string
   ): Promise<void> {
     // Multiple phases can see the same failed path in one cycle; count one attempt.
     const prior = this.rows.get(path)
     if (prior?.phase === 'recovery' && phase !== 'recovery') return
-    if (prior && prior.phase === phase && !this.ready(path)) return
-    const attempts = (prior?.attempts ?? 0) + 1
+    const changedAttempt =
+      attempt !== undefined && prior?.attempt !== undefined && attempt !== prior.attempt
+    if (prior && prior.phase === phase && !changedAttempt && !this.ready(path)) return
+    const attempts = (changedAttempt ? 0 : (prior?.attempts ?? 0)) + 1
     const row: WaitingFile = {
       path,
       phase,
@@ -174,6 +188,7 @@ export class FileRetries {
       quarantined: quarantine || (phase === 'recovery' && attempts >= 3),
       local: error instanceof FileOperationError,
       ...((owner ?? prior?.owner) ? { owner: owner ?? prior?.owner } : {}),
+      ...(attempt === undefined ? {} : { attempt }),
     }
     if (!state.setMeta || !state.metadataKeys) throw error
     await state.setMeta(key(path), JSON.stringify(row))
