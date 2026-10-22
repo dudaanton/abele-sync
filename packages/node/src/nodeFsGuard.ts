@@ -127,8 +127,9 @@ export function realTempFolder(base: string, stateDir: string, tmp: string): str
     current = join(current, name)
     try {
       if (!lstatSync(current).isDirectory()) return null
-    } catch {
-      return null
+    } catch (error) {
+      if (isMissing(error) || (error as NodeJS.ErrnoException).code === 'ENOTDIR') return null
+      throw error
     }
   }
   return current

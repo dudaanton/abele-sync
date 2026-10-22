@@ -489,8 +489,9 @@ const statedVault = (state: SqliteStateStore): string | null => state.getMeta('v
 export function readIgnoreText(dir: string): string | null {
   try {
     return readFileSync(ignoreFile(dir), 'utf8')
-  } catch {
-    return null
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
   }
 }
 
