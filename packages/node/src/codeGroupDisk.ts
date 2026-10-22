@@ -1,4 +1,5 @@
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, rename, rm } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { basename, dirname, join, resolve } from 'node:path'
 import { EngineError, ExternalStateError, isEngineOwn } from '@abele/sync-core'
 import { normalisePath, validatePath } from '@abele/sync-protocol'
@@ -185,7 +186,15 @@ export class CodeGroupDisk {
   async discard(): Promise<void> {
     this.check()
     this.assertOwningLedger()
-    const remove = () => rm(this.work, { recursive: true, force: true })
+    const remove = async () => {
+      const trash = join(dirname(this.work), `trash-${basename(this.work)}-${randomUUID()}`)
+      // Never expose a partly removed group as an active recovery journal.
+      await rename(this.work, trash)
+      await syncPath(dirname(this.work))
+      this.check()
+      this.vault.state.setMeta(this.marker, null)
+      await rm(trash, { recursive: true, force: true })
+    }
     await (this.vault.fence ? this.vault.fence.track(remove) : remove())
     // Never durably forget the commit marker while the journal's directory could reappear.
     await syncPath(dirname(this.work))
@@ -209,6 +218,19 @@ export class CodeGroupDisk {
     const folder = realTempFolder(resolve(vault.dir), '.abele-sync', FOLDER)
     if (folder === null) return
     for (const entry of await readdir(folder, { withFileTypes: true })) {
+      const trash = /^trash-(group-[a-zA-Z0-9]+)-[a-f0-9-]{36}$/.exec(entry.name)
+      if (entry.isDirectory() && trash) {
+        const remove = async () => {
+          vault.fence?.assertOwner()
+          if (!held()) throw new EngineError('lost', 'code cleanup lost ownership')
+          await syncPath(folder)
+          vault.state.setMeta(`code-approval:${trash[1]}`, null)
+          await rm(join(folder, entry.name), { recursive: true, force: true })
+          await syncPath(folder)
+        }
+        await (vault.fence ? vault.fence.track(remove) : remove())
+        continue
+      }
       if (!entry.isDirectory() || !/^group-[a-zA-Z0-9]+$/.test(entry.name)) continue
       const disk = new CodeGroupDisk(join(folder, entry.name), vault, held)
       disk.check()

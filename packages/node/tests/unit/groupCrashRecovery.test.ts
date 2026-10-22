@@ -42,6 +42,29 @@ vi.mock('node:fs/promises', async (original) => {
             const value = await boundary(
               `${name}:${String(args[0])}${name === 'rename' || name === 'link' ? `->${String(args[1])}` : ''}`,
               async () => {
+                if (
+                  name === 'rm' &&
+                  (args[1] as { recursive?: boolean })?.recursive &&
+                  String(args[0]).includes('/code-approvals/')
+                ) {
+                  const removeEntry = async (path: string): Promise<void> => {
+                    const info = await actual.lstat(path).catch((error: NodeJS.ErrnoException) => {
+                      if (error.code === 'ENOENT') return null
+                      throw error
+                    })
+                    if (!info) return
+                    if (info.isDirectory()) {
+                      // Exercise the destructive ordering identified in D-079.
+                      const children = (await actual.readdir(path)).sort(
+                        (a, b) => Number(b === 'journal.json') - Number(a === 'journal.json')
+                      )
+                      for (const child of children) await removeEntry(join(path, child))
+                      await boundary(`rm.entry:${path}`, () => actual.rmdir(path))
+                    } else await boundary(`rm.entry:${path}`, () => actual.unlink(path))
+                  }
+                  await removeEntry(String(args[0]))
+                  return
+                }
                 const result = await Reflect.apply(fn, actual, args)
                 if (name === 'open' || name === 'opendir') crash.handles.add(result)
                 return result
@@ -169,7 +192,7 @@ async function run(
   cut = 0,
   exact: 'capture' | 'publication' | 'first-save' | '' = '',
   mode: 'write' | 'remove' | 'move' = 'write',
-  recoveryCut: number | 'restoring' = 0,
+  recoveryCut: number | 'restoring' | 'discard' = 0,
   nested = false
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'group-cut-'))
@@ -240,12 +263,16 @@ async function run(
     if (recoveryCut) {
       crash.points = []
       crash.cut = typeof recoveryCut === 'number' ? recoveryCut : 0
-      if (recoveryCut === 'restoring') {
+      if (typeof recoveryCut === 'string') {
         const points = crash.points
         points.push = (...labels: string[]) => {
           const length = Array.prototype.push.apply(points, labels)
           if (
-            labels.some((label) => label.startsWith('writeFile:') && label.endsWith('/restoring'))
+            labels.some((label) =>
+              recoveryCut === 'restoring'
+                ? label.startsWith('writeFile:') && label.endsWith('/restoring')
+                : label.startsWith('rm.entry:') && label.endsWith('/journal.json')
+            )
           )
             crash.cut = length
           return length
@@ -281,6 +308,22 @@ async function run(
     }
     const check = async () => {
       await checkImage()
+      const inodes = new Set<string>()
+      const visible = async (folder = ''): Promise<void> => {
+        const raw = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
+        for (const entry of await raw.readdir(join(dir, folder), { withFileTypes: true })) {
+          if (!folder && entry.name === '.abele-sync') continue
+          const path = folder ? `${folder}/${entry.name}` : entry.name
+          if (entry.isDirectory()) await visible(path)
+          else if (entry.isFile()) {
+            const info = await raw.lstat(join(dir, path)),
+              id = `${info.dev}:${info.ino}`
+            expect(inodes.has(id), `visible inode alias at ${path}`).toBe(false)
+            inodes.add(id)
+          }
+        }
+      }
+      await visible()
       const expectedNames = ['.abele-sync']
       for (const path of ['file.bin', 'moved.bin'])
         if (await disk.stat(path)) expectedNames.push(path)
@@ -402,6 +445,9 @@ it('D-075 recovers a second crash after the restoration marker before restoring 
 })
 it('D-076 recognises a move published immediately before a crash', async () => {
   await run(0, 'publication', 'move')
+})
+it('D-079 recovers after recursive discard removes journal.json before the draft', async () => {
+  await run(0, '', 'write', 'discard')
 })
 
 for (const mode of ['write', 'remove', 'move'] as const)
