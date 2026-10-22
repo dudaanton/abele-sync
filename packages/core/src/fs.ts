@@ -37,7 +37,7 @@ export interface FileSystem extends Partial<StreamingFileSystem> {
    * rules, never content hashes or inode numbers (hard links remain distinct names).
    * Omission conservatively folds case and Unicode; it must not imply exact names. */
   pathKey?(path: string): string
-  /** Apply an effect only after accepting its expected base (see docs/migration-0.3.md).
+  /** Apply an effect only after accepting its expected base (see docs/core-v2-engine.md#filesystem-host-contract).
    * Exclusive hosts compare the displaced regular file at the mutation boundary and
    * publish into an exclusive destination. Checked hosts compare fresh SHA-256/size,
    * record size/mtime, drain pending host saves, and stat again immediately before
