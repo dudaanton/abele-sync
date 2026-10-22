@@ -7,6 +7,7 @@ import { ownDownloads, haltedEffects, stages, idle, ledger, exactlyOnce } from '
 import { SyncCancelled } from '../../src/engine.js'
 import { DurableStateStore } from './durableState.js'
 import { rollbackIsolation } from '../helpers/stateTransactionContract.js'
+import { MemoryStateStore } from '../../src/state.js'
 
 // These traces crash the simulated CLIENT, never the server or machine. Keep the
 // production routes, SQL constraints, encryption and real blob files, but avoid
@@ -36,6 +37,93 @@ it('simulated ledger publishes nothing when the process crashes at commit', asyn
   scheduler.cut = undefined
   expect(await state.reopen().getCursor()).toBe(0)
 })
+
+it('revokes publication when the process crashes after the commit checkpoint', async () => {
+  const scheduler = new SimScheduler(1)
+  const state = new DurableStateStore(scheduler)
+  let atCrash: Promise<number> | undefined
+  scheduler.hook = async (point) => {
+    if (point !== 'state.commit#1') return
+    const later = (remaining: number) =>
+      queueMicrotask(() => {
+        if (remaining > 1) later(remaining - 1)
+        else {
+          scheduler.crash()
+          atCrash = state.reopen().getCursor()
+        }
+      })
+    later(5)
+  }
+  await expect(state.transaction((tx) => tx.setCursor(10))).rejects.toThrow('abandoned epoch')
+  expect(await atCrash).toBe(0)
+  expect(await state.reopen().getCursor()).toBe(0)
+})
+
+for (const mode of ['root', 'nested', 'direct'] as const)
+  it.each(Array.from({ length: 12 }, (_, i) => i + 1))(
+    `${mode} publication stays frozen after a crash delayed by %i microtasks`,
+    async (delay) => {
+      const scheduler = new SimScheduler(1)
+      const state = new DurableStateStore(scheduler)
+      let backing!: MemoryStateStore
+      const getCursor = MemoryStateStore.prototype.getCursor
+      const spy = vi.spyOn(MemoryStateStore.prototype, 'getCursor').mockImplementation(function (
+        this: MemoryStateStore
+      ) {
+        backing = this
+        return getCursor.call(this)
+      })
+      let atCrash!: Promise<number>
+      let crashed!: () => void
+      const crashDone = new Promise<void>((resolve) => {
+        crashed = resolve
+      })
+      try {
+        await state.getCursor()
+        scheduler.hook = async (point) => {
+          if (
+            point !==
+            (mode === 'direct' ? 'state.setCursor#1' : `state.commit#${mode === 'nested' ? 2 : 1}`)
+          )
+            return
+          const later = (remaining: number) =>
+            queueMicrotask(() => {
+              if (remaining > 1) later(remaining - 1)
+              else {
+                scheduler.crash()
+                // Memory's method reads synchronously before returning its Promise:
+                // this observes the publication at the instant of the crash.
+                atCrash = backing.getCursor()
+                crashed()
+              }
+            })
+          later(delay)
+        }
+        const work =
+          mode === 'direct'
+            ? state.setCursor(10)
+            : state.transaction((tx) =>
+                mode === 'nested'
+                  ? tx.transaction((child) => child.setCursor(10))
+                  : tx.setCursor(10)
+              )
+        const result = work.then(
+          () => null,
+          (error: unknown) => error
+        )
+        await crashDone
+        const error = await result
+        const before = await atCrash
+        expect([0, 10]).toContain(before)
+        expect(await state.reopen().getCursor(), 'no abandoned publication after crash').toBe(
+          before
+        )
+        if (before === 0) expect(error).toMatchObject({ message: 'abandoned epoch' })
+      } finally {
+        spy.mockRestore()
+      }
+    }
+  )
 
 it('simulated cursor transactions do not copy the entire file inventory', async () => {
   const state = new DurableStateStore(new SimScheduler(1))

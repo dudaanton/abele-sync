@@ -143,11 +143,19 @@ export class MemoryStateStore implements StateStore {
     this.change(this.meta, key, value ?? undefined)
   }
 
+  /** Capture a host fence before awaiting work; check it at synchronous publication.
+   * Simulated process stores revoke pending patches when their epoch is abandoned. */
+  protected publicationFence(): () => void {
+    return () => {}
+  }
+
   async transaction<T>(fn: (tx: StateStore) => Promise<T>): Promise<T> {
+    const fence = this.publicationFence()
     const revision = this.revision
     const tx = new StateTransaction(this)
     try {
       const result = await fn(tx)
+      fence()
       if (revision !== this.revision) throw changedState()
       // Publication is synchronous: no unrelated task can interleave patch mutations.
       for (const op of tx.mutations) this.apply(op)

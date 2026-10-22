@@ -6,6 +6,16 @@ import {
 } from '../../src/state.js'
 import { SimScheduler } from './scheduler.js'
 
+class EpochMemoryStateStore extends MemoryStateStore {
+  constructor(private readonly scheduler: SimScheduler) {
+    super()
+  }
+  protected publicationFence(): () => void {
+    const epoch = this.scheduler.epoch
+    return () => this.scheduler.fence(epoch)
+  }
+}
+
 /** Durable process image plus revocable private patches. A cursor commit must not
  * clone the whole inventory: that makes the simulator itself quadratic. */
 export class DurableStateStore implements StateStore {
@@ -14,7 +24,7 @@ export class DurableStateStore implements StateStore {
   private readonly epoch: number
   constructor(
     private readonly scheduler: SimScheduler,
-    private readonly disk = { state: new MemoryStateStore() },
+    private readonly disk = { state: new EpochMemoryStateStore(scheduler) },
     private readonly view: StateStore = disk.state
   ) {
     this.epoch = scheduler.epoch
@@ -25,6 +35,7 @@ export class DurableStateStore implements StateStore {
   private async access<T>(label: string, fn: (state: StateStore) => T | Promise<T>): Promise<T> {
     if (!this.active) throw new Error('expired transaction epoch')
     await this.scheduler.point(`state.${label}`, this.epoch)
+    this.scheduler.fence(this.epoch)
     const result = await fn(this.view)
     this.scheduler.fence(this.epoch)
     return result
@@ -73,6 +84,7 @@ export class DurableStateStore implements StateStore {
   async transaction<T>(fn: (tx: StateStore) => Promise<T>): Promise<T> {
     await this.scheduler.point('state.begin', this.epoch)
     if (!this.active) throw new Error('expired transaction epoch')
+    this.scheduler.fence(this.epoch)
     return this.view.transaction(async (view) => {
       const tx = new DurableStateStore(this.scheduler, this.disk, view)
       try {
