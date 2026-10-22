@@ -767,7 +767,14 @@ export class Puller {
   ): Promise<void> {
     const entry = await this.state.byFileId(change.file_id)
     if (this.stagedReplay && change.op !== 'delete') {
-      const target = await this.placer.targetOf(change, entry)
+      let target: string
+      try {
+        target = await this.placer.targetOf(change, entry)
+      } catch (error) {
+        if (!(error instanceof AbeleError && error.code === 'path_taken')) throw error
+        this.hold(change)
+        return
+      }
       if (!replayAuthority(change.file_id, entry, entry, await this.state.get(target))) {
         this.hold(change)
         return

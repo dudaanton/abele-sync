@@ -1,9 +1,10 @@
 import { expect, it, vi } from 'vitest'
+import fc from 'fast-check'
 import type { ChangeItem } from '@abele/sync-protocol'
 import { MemoryFileSystem } from '../../src/fs.js'
 import { MemoryStateStore } from '../../src/state.js'
 import { PendingPullWrites } from '../../src/pullWrite.js'
-import { pull } from '../../src/puller.js'
+import { pull, applyStaged } from '../../src/puller.js'
 import { ExpectedWrites } from '../../src/echo.js'
 import { sha256 } from '../../src/hash.js'
 import type { EngineClient } from '../../src/engineClient.js'
@@ -87,4 +88,82 @@ it('D-150 adoption rechecks a replacement identity introduced during hashing', a
   expect(await f.state.get('new.bin')).toEqual(f.occupant)
   expect(await f.state.byFileId('A')).toEqual(f.source)
   expect(await f.state.getMeta('pull-write:A')).not.toBeNull()
+})
+
+it('D-151 operational failure in staged target resolution remains retryable', async () => {
+  const f = await fixture('Café.bin')
+  const failure = new Error('temporary inventory read failure')
+  const original = PullPlacer.prototype.targetOf
+  PullPlacer.prototype.targetOf = async () => {
+    throw failure
+  }
+  try {
+    await expect(applyStaged(f.client, f.fs, f.state, [f.change], f.options)).rejects.toBe(failure)
+    expect(await f.state.getMeta('pull-write:A')).not.toBeNull()
+  } finally {
+    PullPlacer.prototype.targetOf = original
+  }
+})
+
+it('D-151 a staged normalization collision holds one item and still applies the next', async () => {
+  const f = await fixture('Café.bin')
+  await f.fs.writeAtomic('Cafe\u0301.bin', new Uint8Array([2]), 1)
+  const good = {
+    ...f.change,
+    file_id: 'C',
+    version_id: 'c1',
+    path: 'good.bin',
+    prev_path: null,
+    op: 'create' as const,
+    seq: 3,
+  }
+  const report = await applyStaged(f.client, f.fs, f.state, [f.change, good], f.options)
+  expect(report.held).toEqual([f.change])
+  expect(report.applied).toBe(1)
+  expect(await f.fs.read('good.bin')).toEqual(f.bytes)
+  expect(await f.state.get('Café.bin')).toEqual(f.occupant)
+  expect(await f.fs.read('Cafe\u0301.bin')).toEqual(new Uint8Array([2]))
+})
+
+it('pull/adoption/staged retries preserve contending identities across alias path pools', async () => {
+  await fc.assert(
+    fc.asyncProperty(
+      fc.constantFrom('new.bin', 'Café.bin', 'Cafe\u0301.bin', 'NOTE.bin', 'note.bin'),
+      fc.boolean(),
+      fc.boolean(),
+      fc.array(fc.boolean(), { minLength: 2, maxLength: 8 }),
+      async (path, insensitive, collision, stagedOrder) => {
+        const f = await fixture(path, insensitive)
+        if (collision && !insensitive && path.normalize('NFC') === 'Café.bin')
+          await f.fs.writeAtomic(
+            path === 'Café.bin' ? 'Cafe\u0301.bin' : 'Café.bin',
+            new Uint8Array([2]),
+            1
+          )
+        if (collision && /^(NOTE|note)\.bin$/.test(path))
+          await f.fs.writeAtomic(path === 'NOTE.bin' ? 'note.bin' : 'NOTE.bin', f.bytes, 1)
+        for (const staged of stagedOrder) {
+          const good = {
+            ...f.change,
+            file_id: 'C',
+            version_id: 'c1',
+            path: 'good.bin',
+            prev_path: null,
+            op: 'create' as const,
+            seq: 3,
+          }
+          f.client.changes = async () => ({ items: [f.change, good], head_seq: 3, next_since: 3 })
+          const report = staged
+            ? await applyStaged(f.client, f.fs, f.state, [f.change, good], f.options)
+            : await pull(f.client, f.fs, f.state, f.options)
+          expect(report.held).toContainEqual(f.change)
+          expect(await f.state.byFileId('A')).toEqual(f.source)
+          expect(await f.state.get(path)).toEqual(f.occupant)
+          expect(await f.fs.read(path)).toEqual(f.bytes)
+          expect(await f.fs.read('good.bin')).toEqual(f.bytes)
+        }
+      }
+    ),
+    { seed: 150151, numRuns: 40 }
+  )
 })
