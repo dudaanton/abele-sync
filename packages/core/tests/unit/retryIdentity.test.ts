@@ -3,7 +3,7 @@ import { MemoryFileSystem, type FileSystem } from '../../src/fs.js'
 import { MemoryStateStore } from '../../src/state.js'
 import { StateTransaction } from '../../src/stateTransaction.js'
 import { FileRetries } from '../../src/fileRetry.js'
-import { resumeReceipts } from '../../src/pusher.js'
+import { resumeReceipts, resumeJournal } from '../../src/pusher.js'
 import { ExpectedWrites } from '../../src/echo.js'
 import { sha256 } from '../../src/hash.js'
 import { stoppableFileEffects } from '../../src/guard.js'
@@ -73,4 +73,40 @@ it('D-146 does not resurrect a create receipt after a later deletion', async () 
   expect(await f.fs.stat('old.bin')).toBeNull()
   expect(await f.state.byFileId('file')).toBeNull()
   expect(await f.state.getMeta(f.key)).toBeNull()
+})
+
+it('D-146 journal answer replay also preserves an identity advanced by a later rename', async () => {
+  const f = await fixture()
+  await f.state.setMeta(f.key, null)
+  await f.fs.move('old.bin', 'new.bin')
+  const advanced = {
+    path: 'new.bin',
+    wirePath: 'new.bin',
+    fileId: 'file',
+    versionId: 'v2',
+    sha: f.sha,
+    size: 1,
+    mtime: 1,
+  }
+  await f.state.put(advanced)
+  await f.state.setCursor(2)
+  await f.state.setJournal({
+    ops: [f.op],
+    idempotencyKey: 'original',
+    batchId: 'batch',
+    startedAt: new Date().toISOString(),
+  })
+  f.client.hasBlob = async () => true
+  f.client.commitRaw = vi.fn(async () => ({
+    replayed: true,
+    body: { head_seq: 2, results: [f.result] },
+  }))
+  await resumeJournal(f.client, f.fs, f.state, {
+    expected: new ExpectedWrites(),
+    retries: f.retries,
+  })
+  expect(await f.fs.stat('old.bin')).toBeNull()
+  expect(await f.state.byFileId('file')).toEqual(advanced)
+  expect(await f.state.getJournal()).toBeNull()
+  expect(f.client.commitRaw).toHaveBeenCalledWith([f.op], 'original')
 })

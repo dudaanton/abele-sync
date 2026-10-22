@@ -110,7 +110,11 @@ export class VerdictPlanner {
    * transaction — holding that open on a download is the price of never holding the whole
    * batch's bytes at once, and a batch of notes never pays it.
    */
-  async plan(ops: CommitOp[], results: CommitOpResult[]): Promise<Verdicts> {
+  async plan(
+    ops: CommitOp[],
+    results: CommitOpResult[],
+    superseded: ReadonlySet<number> = new Set()
+  ): Promise<Verdicts> {
     this.results = results
     const failures = new Map<number, unknown>()
     const stale = new Set<number>()
@@ -128,6 +132,7 @@ export class VerdictPlanner {
       local: { path: string; sha: string | null }
     }> = []
     for (const [at, result] of results.entries()) {
+      if (superseded.has(at)) continue
       if (at > 0) checkCancellation(this.opts.signal)
       try {
         if (result.status === 'rejected') continue
@@ -234,7 +239,11 @@ export class VerdictPlanner {
       if (sha === undefined || !wanted.has(sha) || result === undefined) return 0
       return result.status === 'rejected' ? 0 : result.size
     }
-    const runs = runsWithin([...results.keys()], downloads, budget)
+    const runs = runsWithin(
+      [...results.keys()].filter((at) => !superseded.has(at)),
+      downloads,
+      budget
+    )
     const verdicts: Verdicts = {
       failures,
       stages: new Map(),

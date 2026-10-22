@@ -648,7 +648,27 @@ class Pusher {
         `the commit answered ${results.length} results for ${sending.length} ops`
       )
     }
-    const verdicts = await this.planner.plan(sending, results)
+    const superseded = new Set<number>()
+    const countSuperseded = (at: number) => {
+      const result = results[at]!
+      // Reports count acknowledged answers, including already-settled replay,
+      // without granting the old answer authority to mutate the current file.
+      if (result.status === 'rejected')
+        this.report.rejected.push({ op: sending[at]!, code: result.code, message: result.message })
+      else if (result.status === 'applied') this.report.applied++
+      else if (result.status === 'merged') this.report.merged++
+      else this.report.conflicts++
+    }
+    if (outcome.replayed)
+      for (const [at, op] of sending.entries()) {
+        const result = results[at]!
+        const path = result.status !== 'rejected' ? result.path : op.op === 'create' ? op.path : ''
+        if (!(await receiptStillCurrent(this.state, { op, result, path }))) {
+          superseded.add(at)
+          countSuperseded(at)
+        }
+      }
+    const verdicts = await this.planner.plan(sending, results, superseded)
     try {
       if (verdicts.staged.size > 0) {
         const heads = [...verdicts.staged.values()]
@@ -690,6 +710,16 @@ class Pusher {
             }
             const op = sending[at]
             if (op !== undefined) {
+              if (outcome.replayed) {
+                const result = results[at]!
+                const path =
+                  result.status !== 'rejected' ? result.path : op.op === 'create' ? op.path : ''
+                if (!(await receiptStillCurrent(tx, { op, result, path }))) {
+                  countSuperseded(at)
+                  recorded++
+                  continue
+                }
+              }
               const previous =
                 this.opts.onApplied === undefined || op.op === 'create'
                   ? null
