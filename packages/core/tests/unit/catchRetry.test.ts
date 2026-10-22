@@ -14,6 +14,35 @@ import { V2EngineClient } from '../../src/v2Client.js'
 import { encodeAccessToken } from '@abele/sync-protocol'
 import { judgeDeletes } from '../../src/deletes.js'
 
+it('D-095 an unreadable tracked file does not block an unrelated delete', async () => {
+  const fs = new MemoryFileSystem(),
+    state = new MemoryStateStore()
+  const bytes = new Uint8Array([1]),
+    sha = await sha256(bytes)
+  const base = {
+    path: 'unread.bin',
+    wirePath: 'unread.bin',
+    fileId: 'unread',
+    versionId: 'base',
+    sha,
+    size: 1,
+    mtime: 1,
+  }
+  await state.put(base)
+  await state.put({ ...base, path: 'gone.bin', wirePath: 'gone.bin', fileId: 'gone' })
+  await fs.writeAtomic('unread.bin', bytes, 2)
+  const failure = new EngineError('io', 'EIO reading tracked file')
+  fs.read = async () => {
+    throw failure
+  }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const found = await scan(fs, state, { excluded: () => false })
+    expect(found.skipped).toEqual([expect.objectContaining({ path: 'unread.bin' })])
+    expect(found.ops).toEqual([{ op: 'delete', file_id: 'gone', base_version_id: 'base' }])
+    expect(await state.get('unread.bin')).toEqual(base)
+  }
+})
+
 it.each(['new.md', 'other/new.md'])(
   'D-093 retries unread rename candidate %s without a delete or approval',
   async (target) => {

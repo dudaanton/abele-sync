@@ -432,9 +432,9 @@ export async function scan(
       }
     } catch (error) {
       // Read after list is a race: the file may be gone or locked. Leave it for the next scan.
-      // Its bytes could identify any missing tracked file, including a move across
-      // directories. Absence cannot authorize a delete until this candidate is read.
-      unreadCandidate = true
+      // Only a fresh path can be paired with a missing tracked file, including
+      // across directories. An unread tracked path already has its own identity.
+      if (entry === undefined) unreadCandidate = true
       skip(info.path, reasonOf(error))
       continue
     }
