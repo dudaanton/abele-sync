@@ -10,7 +10,7 @@ import {
   type EngineStatus,
   type SyncReport,
 } from './engineTypes.js'
-import { guarded, stoppableClient } from './guard.js'
+import { guarded, stoppableClient, stoppableFileEffects } from './guard.js'
 import {
   exclusiveOperationPort,
   type ExclusiveOperationOptions,
@@ -117,6 +117,7 @@ export class SyncEngine implements ExclusiveOperationPort {
   private cancellation = new AbortController()
   private stopping = false
   private scanning = false
+  private activeCycle = false
   private readonly activeWrites = { count: 0 }
   private readonly hostOperations = exclusiveOperationPort((job) => this.exclusive(job))
 
@@ -132,7 +133,11 @@ export class SyncEngine implements ExclusiveOperationPort {
           })
     this.opts = {
       ...hands,
-      fs: fileErrors(hands.fs),
+      fs: fileErrors(
+        stoppableFileEffects(hands.fs, () =>
+          this.activeCycle ? this.cancellation.signal : undefined
+        )
+      ),
       transferBudget: this.transferBudget,
       client: stoppableClient(hands.client, () => this.cancellation.signal, this.activeWrites),
     }
@@ -441,6 +446,7 @@ export class SyncEngine implements ExclusiveOperationPort {
   }
 
   private async run(): Promise<SyncReport> {
+    this.activeCycle = true
     this.heard = null
     this.set({ state: 'syncing' })
     let completed = false
@@ -470,6 +476,7 @@ export class SyncEngine implements ExclusiveOperationPort {
       this.fail(error)
       throw error
     } finally {
+      this.activeCycle = false
       const waitingFiles = this.cycle.retries.list()
       this.set({ waiting: waitingFiles.length, waitingFiles })
       if (waitingFiles.length) this.log(`sync: ${waitingFiles.length} waiting`)

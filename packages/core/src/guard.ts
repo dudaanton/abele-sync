@@ -5,6 +5,50 @@ import type { StateStore } from './state.js'
 import type { ChunkSource } from './streaming.js'
 import { checkCancellation } from './cancellation.js'
 
+/** Check at the port boundary, after any awaited inspection or intent save.
+ * An operation already entered may finish; its ledger writes must still settle.
+ * Private-stage cleanup and reads needed to record that result remain available. */
+export function stoppableFileEffects(
+  fs: FileSystem,
+  signalFor: () => AbortSignal | undefined
+): FileSystem {
+  const effects = new Set([
+    'conditionalFile',
+    'writeAtomic',
+    'move',
+    'remove',
+    'mkdir',
+    'moveDirectory',
+    'removeDirectory',
+    'beginAtomicWrite',
+  ])
+  const stage = (value: object): object =>
+    new Proxy(value, {
+      get(target, key) {
+        const method = Reflect.get(target, key)
+        if (typeof method !== 'function') return method
+        return async (...args: unknown[]) => {
+          if (key === 'commit' || key === 'append') checkCancellation(signalFor())
+          return method.apply(target, args)
+        }
+      },
+    })
+  return new Proxy(fs, {
+    get(target, key) {
+      const method = Reflect.get(target, key)
+      if (typeof method !== 'function') return method
+      if (!effects.has(String(key)) && key !== 'reopenStage') return method.bind(target)
+      return async (...args: unknown[]) => {
+        checkCancellation(signalFor())
+        const result = await method.apply(target, args)
+        return result && (key === 'beginAtomicWrite' || key === 'reopenStage')
+          ? stage(result)
+          : result
+      }
+    },
+  })
+}
+
 /** Inventory walks can be large, but have no file operation whose ledger must settle. */
 export function stoppableListings(
   fs: FileSystem,

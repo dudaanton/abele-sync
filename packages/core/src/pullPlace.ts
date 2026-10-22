@@ -263,6 +263,7 @@ export class PullPlacer {
     // A new save at a formerly absent name must not become a clean pull base
     // on retry before scanning classifies it.
     await this.state.setMeta?.(`pull-base:${op.path}`, JSON.stringify({ base: op.expected }))
+    checkCancellation(this.opts.signal)
     return (await this.fs.conditionalFile?.(op)) ?? false
   }
 
