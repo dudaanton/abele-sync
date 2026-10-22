@@ -85,6 +85,11 @@ afterEach(async () => {
 
 describe('the give-up clock', () => {
   it('does not restart after a hung heartbeat through a symlinked vault path', async () => {
+    // Schedule the target beat explicitly: a loaded worker can miss the give-up
+    // deadline before its first beat, correctly losing the lock without renaming.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    vi.mocked(performance.now).mockImplementation(() => skew.mono)
+    vi.mocked(Date.now).mockImplementation(() => skew.wall)
     const alias = join(dir, 'alias')
     symlinkSync(dir, alias, 'dir')
     const lost: string[] = []
@@ -96,14 +101,15 @@ describe('the give-up clock', () => {
         skew.mono += LATER
         skew.wall += LATER
       }
-      // A bounded wait also makes a missed filesystem hook an explicit failure.
-      await vi.waitFor(() => expect(hooks.afterRename).toBeNull(), { timeout: 1000, interval: 2 })
+      await vi.advanceTimersByTimeAsync(FAST.heartbeatMs)
+      expect(hooks.afterRename).toBeNull()
       expect(lock.held()).toBe(false)
-      await sleep(FAST.heartbeatMs * 3)
+      await vi.advanceTimersByTimeAsync(FAST.heartbeatMs * 3)
       expect(lost).toHaveLength(1)
       expect(lost[0]).toMatch(/could not be refreshed/)
     } finally {
       lock()
+      vi.useRealTimers()
     }
   })
 
