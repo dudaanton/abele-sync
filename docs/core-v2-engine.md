@@ -205,8 +205,6 @@ These are automated core/server observations, not live Obsidian or phone evidenc
 
 ## Filesystem host contract
 
-# Filesystem host contract
-
 Core supports two implementations of `FileSystem.conditionalFile`. The host
 chooses the implementation behind the existing port; no additional core API or
 runtime capability flag is required.
