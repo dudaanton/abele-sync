@@ -31,7 +31,10 @@ async function fixture() {
   add(0)
   let cut = -1
   const client = {
-    manifest: async () => ({ items: [feed[0]!], head_seq: 1, next: null }),
+    manifest: async () => {
+      if (cut-- === 0) throw new Error('page crash')
+      return { items: [feed[0]!], head_seq: 1, next: null }
+    },
     changes: async (since: number) => {
       if (cut-- === 0) throw new Error('page crash')
       const next = feed.find((change) => change.seq > since)
@@ -113,13 +116,16 @@ async function settlingFixture() {
   add('a', 'modify')
   let cut = -1
   const client = {
-    manifest: async () => ({
-      items: [...new Map(feed.map((c) => [c.file_id, c])).values()].filter(
-        (c) => c.op !== 'delete'
-      ),
-      head_seq: feed.length,
-      next: null,
-    }),
+    manifest: async () => {
+      if (cut-- === 0) throw new Error('page crash')
+      return {
+        items: [...new Map(feed.map((c) => [c.file_id, c])).values()].filter(
+          (c) => c.op !== 'delete'
+        ),
+        head_seq: feed.length,
+        next: null,
+      }
+    },
     changes: async (since: number) => {
       if (cut-- === 0) throw new Error('page crash')
       const next = feed.find((change) => change.seq > since)
@@ -200,7 +206,8 @@ it('I7: randomized page crashes retain holds across walking and following restar
   for (let seed = 0; seed < 64; seed++) {
     const f = await settlingFixture()
     random = (Math.imul(random, 1664525) + 1013904223) >>> 0
-    f.crashAfterPages(random % 2)
+    // Obtain the initial manifest before cutting at its continuation/feed boundary.
+    f.crashAfterPages(1 + (random % 2))
     try {
       await f.run()
     } catch (error) {

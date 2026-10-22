@@ -211,6 +211,7 @@ export class Puller {
   private firstHeld: number | null = null
   private inventoryComplete = false
   private heldHead: number | null = null
+  private manifestHead: number | null = null
   private readonly heldBases = new Map<string, string | null>()
   private readonly heldSequences = new Map<string, number>()
   private attemptHeld = false
@@ -417,6 +418,7 @@ export class Puller {
         const page: ManifestResponse =
           progress?.page ?? (await this.client.manifest(cursor, MANIFEST_PAGE))
         head ??= progress?.head ?? page.head_seq
+        this.manifestHead = head
         progress ??= {
           page,
           head,
@@ -626,7 +628,9 @@ export class Puller {
     )
     const progress: HeldProgress = {
       generation: (await this.state.getMeta?.(GENERATION_KEY)) ?? null,
-      head: this.reached,
+      head: this.walking
+        ? Math.min(this.manifestHead ?? this.reached, this.heldHead ?? Infinity)
+        : this.reached,
       inventoryComplete: this.inventoryComplete,
       holds: this.report.held.map((change) => ({
         change,
