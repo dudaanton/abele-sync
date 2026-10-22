@@ -150,6 +150,21 @@ function lastPerFile(changes: ChangeItem[]): ChangeItem[] {
   return changes.filter((change) => last.get(change.file_id) === change)
 }
 
+/** Only final identities and destinations are candidates for placement. */
+function newest(changes: ChangeItem[]): ChangeItem[] {
+  const files = new Set<string>(),
+    paths = new Set<string>(),
+    result: ChangeItem[] = []
+  for (let at = changes.length - 1; at >= 0; at--) {
+    const change = changes[at]!
+    if (files.has(change.file_id) || paths.has(change.path)) continue
+    files.add(change.file_id)
+    paths.add(change.path)
+    result.push(change)
+  }
+  return result.reverse()
+}
+
 /** One run of the puller: the adapters, the options and the report it is filling in. */
 export class Puller {
   private readonly hash: (bytes: Uint8Array) => Promise<string>
@@ -176,6 +191,14 @@ export class Puller {
   /** Set while the manifest is walked. */
   private walking = false
   private followedCheckpoint = false
+  private latestSnapshot = false
+  private feedCache: {
+    since: number
+    items: ChangeItem[]
+    head: number
+    firsts: Map<string, number>
+  } | null = null
+  private coverage = new Map<string, number>()
 
   constructor(
     private readonly client: EngineClient,
@@ -196,7 +219,11 @@ export class Puller {
 
   /** Staged changes, one page's worth of work with no cursor to move. */
   async apply(changes: ChangeItem[]): Promise<void> {
-    await this.page(changes)
+    await this.refused.load()
+    const cursor = await this.state.getCursor()
+    await this.page(changes, async () => {
+      await transact(this.state, (tx) => this.refused.persist(cursor, cursor > 0, tx))
+    })
     this.syncHeld()
   }
 
@@ -231,21 +258,27 @@ export class Puller {
     if (checkpoint || this.report.cursor === 0) await this.bootstrap()
     if (!this.followedCheckpoint) {
       await this.follow()
-      await this.page([...this.heldFiles.values()])
+      await this.retryObligations()
       await this.save()
     }
-    // Live inventory cannot recover deletions. Replay their retained metadata after
-    // the feed, so a newer applied event gets to supersede an older refusal first.
-    const retry = [...this.refused.files.values()].filter(
-      (change) =>
-        !this.client.pathRefusal?.(change.path) &&
-        (this.heldFiles.get(change.file_id)?.seq ?? change.seq) <= change.seq
-    )
-    await this.page(retry, async () => {
-      await this.save()
-    })
     if (this.report.bootstrapped) await this.recheck()
     this.syncHeld()
+  }
+
+  private async retryObligations(): Promise<void> {
+    // An older refusal/hold must never become a clean base beneath a newer hold
+    // for the same path. Coalesce the two durable collections as one snapshot.
+    const changes = [...this.heldFiles.values(), ...this.refused.files.values()].sort(
+      (a, b) => a.seq - b.seq
+    )
+    await this.page(
+      newest(lastPerFile(changes)).filter(
+        (change) => !this.client.pathRefusal?.(change.path) || this.heldFiles.has(change.file_id)
+      ),
+      async () => {
+        await this.save()
+      }
+    )
   }
 
   /**
@@ -312,6 +345,7 @@ export class Puller {
     this.reached = 0
     let cursor: string | null = null
     let head: number | null = null
+    let ahead: ChangeItem[] | null = null
     this.walking = true
     try {
       const generation = (await this.state.getMeta?.(GENERATION_KEY)) ?? null
@@ -363,7 +397,7 @@ export class Puller {
           this.reached = progress.head
           await this.follow()
           this.followedCheckpoint = true
-          await this.page([...this.heldFiles.values()])
+          await this.retryObligations()
           await this.save()
           return
         }
@@ -373,6 +407,15 @@ export class Puller {
         const page: ManifestResponse =
           progress?.page ?? (await this.client.manifest(cursor, MANIFEST_PAGE))
         head ??= progress?.head ?? page.head_seq
+        // Inventory is a snapshot, not necessarily the current remote version.
+        // Read the tail before adopting any inventory bytes that it supersedes.
+        if (ahead === null) {
+          const tail = await this.readFeed(head)
+          this.feedCache = { since: head, ...tail }
+          ahead = tail.items
+        }
+        const laterFiles = new Set(ahead.map((change) => change.file_id))
+        const laterPaths = new Set(ahead.map((change) => change.path))
         this.manifestHead = head
         progress ??= {
           page,
@@ -398,8 +441,15 @@ export class Puller {
         })
         const completed = new Set(checkpoint.completed)
         const pending = page.items.map(asCreate)
+        for (const item of page.items) this.seen.add(item.file_id)
+        this.latestSnapshot = true
         await this.page(
-          pending.filter((item) => !completed.has(item.file_id)),
+          pending.filter(
+            (item) =>
+              !completed.has(item.file_id) &&
+              !laterFiles.has(item.file_id) &&
+              !laterPaths.has(item.path)
+          ),
           async (change) => {
             if (this.heldFiles.get(change.file_id) !== change) {
               checkpoint.completed.push(change.file_id)
@@ -453,21 +503,47 @@ export class Puller {
 
   /** The feed, page after page, until the last one handed out reaches the head. */
   private async follow(): Promise<void> {
+    const page =
+      this.feedCache?.since === this.reached ? this.feedCache : await this.readFeed(this.reached)
+    this.feedCache = null
+    this.latestSnapshot = true
+    this.coverage = page.firsts
+    await this.page(page.items, async (change) => {
+      this.reached = Math.max(this.reached, change.seq)
+      await this.save()
+    })
+    this.coverage.clear()
+    this.reached = page.head
+    await this.save()
+  }
+
+  private async readFeed(
+    since: number
+  ): Promise<{ items: ChangeItem[]; head: number; firsts: Map<string, number> }> {
+    const latest = new Map<string, ChangeItem>()
+    const firsts = new Map<string, number>()
     for (;;) {
       checkCancellation(this.opts.signal)
-      const previous = this.reached
-      const page = await this.client.changes(this.reached, CHANGES_PAGE)
-      await this.page(page.items, async (change) => {
-        this.reached = change.seq
-        await this.save()
-      })
-      this.reached = page.next_since
-      await this.save()
+      const previous = since
+      const page = await this.client.changes(since, CHANGES_PAGE)
+      for (const change of page.items) {
+        latest.set(change.file_id, change)
+        firsts.set(change.file_id, Math.min(firsts.get(change.file_id) ?? change.seq, change.seq))
+      }
+      since = page.next_since
       if (
         page.next_since >= page.head_seq ||
         (page.items.length === 0 && page.next_since <= previous)
-      )
-        return
+      ) {
+        const items = newest([...latest.values()].sort((a, b) => a.seq - b.seq))
+        const paths = new Map(items.map((change) => [change.path, change.file_id]))
+        for (const change of latest.values()) {
+          const replacement = paths.get(change.path)
+          if (replacement !== undefined && replacement !== change.file_id)
+            firsts.set(replacement, Math.min(firsts.get(replacement)!, firsts.get(change.file_id)!))
+        }
+        return { items, head: since, firsts }
+      }
     }
   }
 
@@ -492,12 +568,19 @@ export class Puller {
     // Every completion path shares this barrier, including staging and refusal.
     // Out-of-order preparation may persist work, but cannot publish past earlier work.
     const pending = new Set(wanted)
+    const ordered = [...wanted].sort(
+      (a, b) => (this.coverage.get(a.file_id) ?? a.seq) - (this.coverage.get(b.file_id) ?? b.seq)
+    )
     let next = 0
-    this.pendingSeq = wanted[0]!.seq
+    const firstSequence = () =>
+      ordered[next] === undefined
+        ? null
+        : (this.coverage.get(ordered[next]!.file_id) ?? ordered[next]!.seq)
+    this.pendingSeq = firstSequence()
     const finish = async (change: ChangeItem) => {
       pending.delete(change)
-      while (next < wanted.length && !pending.has(wanted[next]!)) next++
-      this.pendingSeq = wanted[next]?.seq ?? null
+      while (next < ordered.length && !pending.has(ordered[next]!)) next++
+      this.pendingSeq = firstSequence()
       await completed?.(change)
     }
     // Staged before anything is fetched: a staged change wants no bytes yet.
@@ -517,7 +600,7 @@ export class Puller {
           this.refused.put({
             change,
             base: (await this.state.byFileId(change.file_id))?.versionId ?? null,
-            firstSeq: change.seq,
+            firstSeq: this.coverage.get(change.file_id) ?? change.seq,
           })
           this.holds.resolve(change)
         } else {
@@ -658,6 +741,8 @@ export class Puller {
   private resolve(change: ChangeItem): void {
     this.holds.resolve(change)
     this.refused.resolve(change)
+    this.holds.resolvePath(change)
+    this.refused.resolvePath(change)
   }
 
   /* ── One change ──────────────────────────────────────────────────────── */
@@ -681,13 +766,13 @@ export class Puller {
       this.report.skipped++
       return
     }
-    if (await this.placer.adoptExisting(change, entry)) {
+    if (await this.placer.adoptExisting(change, entry, this.latestSnapshot)) {
       this.report.applied++
       return
     }
     if (touchesDeferred(this.opts.defer, change.path, change.prev_path, entry?.wirePath)) {
       // An earlier equality probe permits metadata adoption only, never a later disk write.
-      if (await this.placer.adoptExisting(change, entry)) this.report.applied++
+      if (await this.placer.adoptExisting(change, entry, this.latestSnapshot)) this.report.applied++
       else await this.stageAll([stageFrom(change, entry)])
       return
     }
@@ -813,7 +898,7 @@ export class Puller {
     this.holds.put({
       change,
       base: this.holds.records.get(change.file_id)?.base ?? null,
-      firstSeq: change.seq,
+      firstSeq: this.coverage.get(change.file_id) ?? change.seq,
     })
     this.firstHeld = this.holds.earliest()
     this.opts.log?.(`pull: holding ${change.op} of ${change.path} at ${change.seq}`)

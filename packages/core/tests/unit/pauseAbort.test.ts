@@ -103,20 +103,11 @@ it('D-022 retains completed manifest coverage when one local edit stays held', a
     head_seq: 14,
   })
   await f.engine.sync()
-  // An equal intermediate version cannot acknowledge unsent typing. Only a
-  // successful publication may establish its clean base before held feed resumes.
-  // Completed inventory no longer forces zero: the oldest unresolved change is seq 2.
-  expect(await f.state.getCursor()).toBe(1)
-  expect(await f.state.get('0.md')).toMatchObject({ versionId: 'old' })
-  await f.state.put({
-    path: item.path,
-    wirePath: item.path,
-    fileId: item.file_id,
-    versionId: 'acknowledged',
-    sha,
-    size: typing.length,
-    mtime: 2,
-  })
+  // The complete feed now proves this is the newest version, equal to local
+  // typing. It settles by content without a redundant local publication.
+  expect(await f.state.getCursor()).toBe(14)
+  expect(await f.state.get('0.md')).toMatchObject({ versionId: 'latest', sha })
+  expect(await f.state.getMeta('pull-held-progress')).toBeNull()
   await f.engine.sync()
   expect(await f.state.getCursor()).toBe(14)
   expect(await f.state.getMeta('pull-manifest-progress')).toBeNull()

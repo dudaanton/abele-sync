@@ -42,6 +42,19 @@ export class PullHolds {
   private readonly changed = new Set<string>()
   private heap: { id: string; seq: number }[] = []
   private generation: string | null = null
+  private readonly paths = new Map<string, Set<string>>()
+
+  private indexPath(change: ChangeItem): void {
+    let ids = this.paths.get(change.path)
+    if (!ids) this.paths.set(change.path, (ids = new Set()))
+    ids.add(change.file_id)
+  }
+
+  private forgetPath(change: ChangeItem): void {
+    const ids = this.paths.get(change.path)
+    ids?.delete(change.file_id)
+    if (ids?.size === 0) this.paths.delete(change.path)
+  }
 
   constructor(
     private readonly state: StateStore,
@@ -82,6 +95,7 @@ export class PullHolds {
       const node = JSON.parse(value) as Node
       this.records.set(id, node)
       this.files.set(id, node.change)
+      this.indexPath(node.change)
       this.previous.set(id, previous)
       this.push({ id, seq: node.firstSeq })
       previous = id
@@ -99,6 +113,7 @@ export class PullHolds {
       if (held.change.seq < old.change.seq) return
       const firstSeq = Math.min(old.firstSeq, held.firstSeq)
       if (old.change === held.change && old.base === held.base && old.firstSeq === firstSeq) return
+      this.forgetPath(old.change)
       this.records.set(id, { ...held, firstSeq, next: old.next })
       if (firstSeq !== old.firstSeq) this.push({ id, seq: firstSeq })
     } else {
@@ -112,6 +127,7 @@ export class PullHolds {
       this.push({ id, seq: held.firstSeq })
     }
     this.files.set(id, held.change)
+    this.indexPath(held.change)
     this.changed.add(id)
   }
 
@@ -135,6 +151,7 @@ export class PullHolds {
     if (held.next !== null) this.previous.set(held.next, previous)
     else this.last = previous
     this.previous.delete(id)
+    this.forgetPath(held.change)
     this.records.delete(id)
     this.files.delete(id)
     this.changed.add(id)
@@ -165,6 +182,14 @@ export class PullHolds {
       }
     }
     return null
+  }
+
+  /** A newer successfully settled identity at a path supersedes its historical occupants. */
+  resolvePath(change: ChangeItem): void {
+    for (const id of this.paths.get(change.path) ?? []) {
+      const held = this.records.get(id)!
+      if (held.change.seq <= change.seq) this.resolve(held.change)
+    }
   }
 
   private push(value: { id: string; seq: number }): void {

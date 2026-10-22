@@ -154,10 +154,14 @@ export class PullPlacer {
   }
 
   /** A deferred path may adopt bytes already present, but never mutate the filesystem. */
-  async adoptExisting(change: ChangeItem, entry: StateEntry | null): Promise<boolean> {
+  async adoptExisting(
+    change: ChangeItem,
+    entry: StateEntry | null,
+    newest = false
+  ): Promise<boolean> {
     if (change.op === 'delete' || change.sha === null) return false
-    // Equal remote bytes can be an offline edit matching an intermediate version.
-    // Only proven installation of an exact pending write can adopt over an edited base.
+    // Arbitrary/staged changes may be historical and still require the old base.
+    // A fully collected remote snapshot can acknowledge fresh equal bytes directly.
     let target: string
     try {
       target = await resolveLocalFile(
@@ -173,20 +177,25 @@ export class PullPlacer {
     }
     const pending = await this.pending.matching(change, entry)
     if (pending !== null && pending.target !== target) return false
-    if (entry !== null && (await this.edited(entry, target))) return false
+    if (!newest && entry !== null && (await this.edited(entry, target))) return false
     const from = entry === null || entry.path === target ? null : entry.path
     if (from !== null && (await this.fs.stat(from)) !== null) return false
     const before = await this.fs.stat(target)
     if (before === null) return false
     const occupant = await this.state.get(target)
-    if (occupant !== null && occupant.fileId !== entry?.fileId && (await this.edited(occupant)))
+    if (
+      !newest &&
+      occupant !== null &&
+      occupant.fileId !== entry?.fileId &&
+      (await this.edited(occupant))
+    )
       return false
     const sha = (await fingerprintFile(this.fs, target, this.hash)).sha
     if (
       sha !== change.sha ||
-      (entry !== null && sha !== entry.sha) ||
-      (occupant !== null && sha !== occupant.sha) ||
-      (await this.unclassified(target, sha))
+      (!newest && entry !== null && sha !== entry.sha) ||
+      (!newest && occupant !== null && occupant.fileId !== entry?.fileId && sha !== occupant.sha) ||
+      (!newest && (await this.unclassified(target, sha)))
     )
       return false
     if (!sameStat(before, await this.fs.stat(target))) return false
@@ -678,6 +687,8 @@ export class PullPlacer {
     const receiptId = await this.pending.receiptId(change)
     await transact(this.state, async (tx) => {
       if (from !== null) await tx.delete(from)
+      const occupant = await tx.get(target)
+      if (occupant !== null && occupant.fileId !== change.file_id) await tx.delete(target)
       await tx.put({
         path: target,
         wirePath: change.path,

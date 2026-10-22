@@ -14,7 +14,7 @@ import { selectiveDefaults } from '../../src/selective.js'
 import { V2EngineClient } from '../../src/v2Client.js'
 import { encodeAccessToken } from '@abele/sync-protocol'
 import { sha256 } from '../../src/hash.js'
-import { pull } from '../../src/puller.js'
+import { applyStaged, pull } from '../../src/puller.js'
 import { ExpectedWrites } from '../../src/echo.js'
 import { resumeJournal } from '../../src/pusher.js'
 import type { EngineClient } from '../../src/engineClient.js'
@@ -71,59 +71,63 @@ it('D-136 never publishes a refused event past queued accepted work', async () =
   expect(await state.getCursor()).toBeLessThan(2)
 })
 
-it('D-137 replays a refused deletion after rewind even though it is absent from manifest', async () => {
-  const fs = new MemoryFileSystem(),
-    state = new MemoryStateStore(),
-    bytes = new Uint8Array([1])
-  const sha = await sha256(bytes)
-  await fs.writeAtomic('blocked/a', bytes, 1)
-  await state.put({
-    fileId: 'a',
-    versionId: 'v1',
-    path: 'blocked/a',
-    wirePath: 'blocked/a',
-    sha,
-    size: 1,
-    mtime: 1,
-  })
-  await state.setCursor(1)
-  let refusing = true
-  const deleted: ChangeItem = {
-    kind: 'attachment',
-    seq: 2,
-    file_id: 'a',
-    version_id: 'v2',
-    path: 'blocked/a',
-    prev_path: null,
-    op: 'delete',
-    sha: null,
-    size: null,
-    mtime: null,
-    actor: { kind: 'system', id: 'test', name: 'test' },
-    at: '',
+it.each([false, true])(
+  'D-137 replays a refused deletion after rewind even though it is absent from manifest (staged=%s)',
+  async (staged) => {
+    const fs = new MemoryFileSystem(),
+      state = new MemoryStateStore(),
+      bytes = new Uint8Array([1])
+    const sha = await sha256(bytes)
+    await fs.writeAtomic('blocked/a', bytes, 1)
+    await state.put({
+      fileId: 'a',
+      versionId: 'v1',
+      path: 'blocked/a',
+      wirePath: 'blocked/a',
+      sha,
+      size: 1,
+      mtime: 1,
+    })
+    await state.setCursor(1)
+    let refusing = true
+    const deleted: ChangeItem = {
+      kind: 'attachment',
+      seq: 2,
+      file_id: 'a',
+      version_id: 'v2',
+      path: 'blocked/a',
+      prev_path: null,
+      op: 'delete',
+      sha: null,
+      size: null,
+      mtime: null,
+      actor: { kind: 'system', id: 'test', name: 'test' },
+      at: '',
+    }
+    const client = {
+      manifest: async () => ({ items: [], next: null, head_seq: 2 }),
+      changes: async (since: number) => ({
+        items: since < 2 ? [deleted] : [],
+        next_since: 2,
+        head_seq: 2,
+      }),
+      pathRefusal: () => (refusing ? { code: 'leaves_scope', message: 'policy' } : undefined),
+    } as unknown as EngineClient
+    const options = {
+      expected: new ExpectedWrites(),
+      dirty: new Set<string>(),
+      filter: { excluded: () => false },
+    }
+    if (staged) await applyStaged(client, fs, state, [deleted], options)
+    else await pull(client, fs, state, options)
+    expect(await fs.stat('blocked/a')).not.toBeNull()
+    refusing = false
+    await state.setCursor(0)
+    await pull(client, fs, state, options)
+    expect(await fs.stat('blocked/a')).toBeNull()
+    expect(await state.byFileId('a')).toBeNull()
   }
-  const client = {
-    manifest: async () => ({ items: [], next: null, head_seq: 2 }),
-    changes: async (since: number) => ({
-      items: since < 2 ? [deleted] : [],
-      next_since: 2,
-      head_seq: 2,
-    }),
-    pathRefusal: () => (refusing ? { code: 'leaves_scope', message: 'policy' } : undefined),
-  } as unknown as EngineClient
-  const options = {
-    expected: new ExpectedWrites(),
-    dirty: new Set<string>(),
-    filter: { excluded: () => false },
-  }
-  await pull(client, fs, state, options)
-  expect(await fs.stat('blocked/a')).not.toBeNull()
-  refusing = false
-  await state.setCursor(0)
-  await pull(client, fs, state, options)
-  expect(await fs.stat('blocked/a')).toBeNull()
-  expect(await state.byFileId('a')).toBeNull()
-})
+)
 
 it('D-138 retires the old refusal when its directory moves to an allowed path', async () => {
   const fs = new DirectoryFs(),
