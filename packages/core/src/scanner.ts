@@ -378,6 +378,7 @@ export async function scan(
   const infos = new Map<string, FileInfo>()
   const modifies: Array<{ path: string; op: CommitOp }> = []
   const fresh: string[] = []
+  let unreadCandidate = false
   for (const [wirePath, info] of files) {
     checkCancellation(opts.signal)
     const entry = entries.get(wirePath)
@@ -431,6 +432,9 @@ export async function scan(
       }
     } catch (error) {
       // Read after list is a race: the file may be gone or locked. Leave it for the next scan.
+      // Its bytes could identify any missing tracked file, including a move across
+      // directories. Absence cannot authorize a delete until this candidate is read.
+      unreadCandidate = true
       skip(info.path, reasonOf(error))
       continue
     }
@@ -485,6 +489,10 @@ export async function scan(
   const dirty = new Set<string>()
   for (const entry of missing) {
     if (moves.has(entry.wirePath)) continue
+    if (unreadCandidate) {
+      dirty.add(entry.wirePath)
+      continue
+    }
     ops.push({ op: 'delete', file_id: entry.fileId, base_version_id: entry.versionId })
     dirty.add(entry.wirePath)
   }

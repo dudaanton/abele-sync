@@ -12,6 +12,46 @@ import { PullPlacer } from '../../src/pullPlace.js'
 import { SyncEngine, selectiveDefaults, EngineError } from '../../src/index.js'
 import { V2EngineClient } from '../../src/v2Client.js'
 import { encodeAccessToken } from '@abele/sync-protocol'
+import { judgeDeletes } from '../../src/deletes.js'
+
+it.each(['new.md', 'other/new.md'])(
+  'D-093 retries unread rename candidate %s without a delete or approval',
+  async (target) => {
+    const fs = new MemoryFileSystem(),
+      state = new MemoryStateStore()
+    const bytes = new TextEncoder().encode('local bytes'),
+      sha = await sha256(bytes)
+    const base = {
+      path: 'old.md',
+      wirePath: 'old.md',
+      fileId: 'file',
+      versionId: 'base',
+      sha,
+      size: bytes.length,
+      mtime: 1,
+    }
+    await fs.writeAtomic('old.md', bytes, 1)
+    await state.put(base)
+    await fs.move('old.md', target)
+    const read = fs.read.bind(fs)
+    fs.read = async (path) => {
+      if (path === target) throw new EngineError('io', 'EIO reading rename destination')
+      return read(path)
+    }
+    const filter = { excluded: () => false }
+    const found = await scan(fs, state, filter)
+    expect(found.skipped).toEqual([expect.objectContaining({ path: target })])
+    expect(found.ops).toEqual([])
+    expect(
+      judgeDeletes(found.ops, [base], filter, new Set(), { count: 1, floor: 1, share: 0 }).held
+    ).toEqual([])
+    expect(await state.get('old.md')).toEqual(base)
+    fs.read = read
+    expect((await scan(fs, state, filter)).ops).toEqual([
+      { op: 'move', file_id: 'file', base_version_id: 'base', to_path: target },
+    ])
+  }
+)
 
 it('does not run past failed scope marking', async () => {
   const fs = new MemoryFileSystem(),
