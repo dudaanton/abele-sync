@@ -11,6 +11,7 @@ import {
 } from '@abele/sync-core'
 import { containedIn, isMissing, ownTempFolder } from './nodeFsGuard.js'
 import { syncParents, syncPath } from './nodeFsDurability.js'
+import { restoreVictim } from './nodeConditional.js'
 
 interface Metadata {
   id: string
@@ -29,6 +30,27 @@ const same = (a: ContentIdentity, b: ContentIdentity) => a.size === b.size && a.
 
 /** Durable journal-owned data, separate from the disposable temporary directory. */
 export class NodeStages {
+  private async retireBase(meta: Metadata): Promise<void> {
+    const backup = await this.path(meta.id, 'base')
+    let info
+    try {
+      info = await lstat(backup)
+    } catch (error) {
+      if (isMissing(error)) return
+      throw error
+    }
+    this.check()
+    if (
+      info.isFile() &&
+      meta.base &&
+      same(await this.host.fingerprint(`.abele-sync/stages/${meta.id}/base`), meta.base)
+    ) {
+      await unlink(backup)
+      await syncParents(backup, this.root)
+    } else {
+      await restoreVictim(this.root, `${meta.target}.sync-conflict-${meta.id}`, backup, meta.id)
+    }
+  }
   private readonly queues = new Map<string, Promise<unknown>>()
   constructor(
     private readonly root: string,
@@ -256,6 +278,7 @@ export class NodeStages {
             // Publication may have crashed before flushing its new name. The committed
             // checkpoint must never become durable ahead of the recovered target.
             await syncParents(target, this.root)
+            await this.retireBase(current)
             current.phase = 'committed'
             await this.persist(current)
             return
@@ -285,6 +308,7 @@ export class NodeStages {
           )
             throw new EngineError('conflict', 'stage target changed; displaced bytes preserved')
           await syncParents(target, this.root)
+          await this.retireBase(current)
           current.phase = 'committed'
           await this.persist(current)
         }),
@@ -294,10 +318,10 @@ export class NodeStages {
   discard(id: string): Promise<void> {
     return this.serial(id, async () => {
       this.check()
-      // A displaced inode may still be held by an independent editor. Retain that copy.
+      // Apply the same policy to a legacy adapter's displaced base.
       try {
         await lstat(await this.path(id, 'base'))
-        return
+        await this.retireBase(await this.load(id))
       } catch (error) {
         if (!isMissing(error)) throw error
       }

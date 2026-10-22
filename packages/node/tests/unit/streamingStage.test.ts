@@ -58,10 +58,7 @@ it('preserves a replacement save made after base validation but before publicati
     await expect(stage.commit()).rejects.toThrow('displaced bytes preserved')
     expect(saved).toBe(true)
     expect(await readFile(join(root, 'file'))).toEqual(Buffer.from([3]))
-    const [quarantine] = await readdir(join(root, '.abele-sync/conditional'))
-    expect(await readFile(join(root, '.abele-sync/conditional', quarantine!, 'victim'))).toEqual(
-      Buffer.from([3])
-    )
+    expect(await readdir(join(root, '.abele-sync/conditional'))).toEqual([])
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -146,11 +143,9 @@ for (const phase of ['installing', 'displaced', 'published'] as const) {
       await reopened.commit()
       expect(await readFile(join(root, 'file'))).toEqual(Buffer.from(next))
       if (phase === 'installing') {
-        const [quarantine] = await readdir(join(root, '.abele-sync/conditional-complete'))
-        expect(
-          await readFile(join(root, '.abele-sync/conditional-complete', quarantine!, 'victim'))
-        ).toEqual(Buffer.from(base))
-      } else expect(await readFile(join(dir, 'base'))).toEqual(Buffer.from(base))
+        expect(await readdir(join(root, '.abele-sync/conditional'))).toEqual([])
+      }
+      await expect(readFile(join(dir, 'base'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally {
       await rm(root, { recursive: true, force: true })
     }

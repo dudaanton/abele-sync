@@ -28,7 +28,12 @@ import {
 import { caseKey } from '@abele/sync-protocol'
 import { syncParents, syncPath } from './nodeFsDurability.js'
 import { NodeStages } from './nodeStages.js'
-import { conditionalFile, installedFile, recoverConditionalFiles } from './nodeConditional.js'
+import {
+  conditionalFile,
+  installedFile,
+  recoverConditionalFiles,
+  discardInstallation,
+} from './nodeConditional.js'
 import type { ConditionalFileOperation } from '@abele/sync-core'
 import type { AtomicStage } from '@abele/sync-core'
 import {
@@ -91,6 +96,9 @@ export class NodeFileSystem implements FileSystem {
   installedFile(receipt: string, path: string, sha: string): Promise<boolean> {
     return installedFile(this.base, receipt, path, sha)
   }
+  discardInstallation(receipt: string): Promise<void> {
+    return discardInstallation(this.base, receipt, () => this.checkEffect())
+  }
   recoverConditionalFiles(): Promise<void> {
     return recoverConditionalFiles(this.base, () => this.checkEffect())
   }
@@ -127,8 +135,10 @@ export class NodeFileSystem implements FileSystem {
       const track = options.effectTracker
       const mutate = this.conditionalFile.bind(this),
         recover = this.recoverConditionalFiles.bind(this)
+      const discard = this.discardInstallation.bind(this)
       this.conditionalFile = (...args) => track(() => mutate(...args))
       this.recoverConditionalFiles = () => track(() => recover())
+      this.discardInstallation = (receipt) => track(() => discard(receipt))
       const write = this.writeAtomic.bind(this),
         move = this.move.bind(this),
         remove = this.remove.bind(this),

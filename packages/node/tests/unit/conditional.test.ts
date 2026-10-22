@@ -26,7 +26,7 @@ it.each(['remove', 'move', 'write'] as const)(
       expect(await fs.conditionalFile({ path: 'file.bin', expected, effect })).toBe(false)
       expect(new Uint8Array(await readFile(join(root, 'file.bin')))).toEqual(edited)
       expect(await fs.stat('other.bin')).toBeNull()
-      expect(await readdir(join(root, '.abele-sync/conditional'))).toHaveLength(1)
+      expect(await readdir(join(root, '.abele-sync/conditional'))).toEqual([])
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -49,6 +49,11 @@ it('installation receipts distinguish a publication from a later equal user save
     expect(await fs.installedFile('receipt', 'file.bin', sha)).toBe(true)
     await fs.writeAtomic('file.bin', bytes, 1000)
     expect(await fs.installedFile('receipt', 'file.bin', sha)).toBe(false)
+    await fs.discardInstallation('receipt')
+    await expect(
+      readFile(join(root, '.abele-sync/installations/receipt/data'))
+    ).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await fs.read('file.bin')).toEqual(bytes)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -98,10 +103,7 @@ it('exclusive publication preserves a save made while the victim is quarantined'
     ).toBe(false)
     expect(injected).toBe(true)
     expect(await fs.read('file.bin')).toEqual(new Uint8Array([3]))
-    const [id] = await readdir(join(root, '.abele-sync/conditional'))
-    expect(
-      new Uint8Array(await readFile(join(root, '.abele-sync/conditional', id!, 'victim')))
-    ).toEqual(original)
+    expect(await readdir(join(root, '.abele-sync/conditional'))).toEqual([])
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -121,7 +123,10 @@ it.each([false, true])(
       if (saved) await fs.writeAtomic('file.bin', new Uint8Array([3]), 1000)
       await new NodeFileSystem(root).recoverConditionalFiles()
       expect(await fs.read('file.bin')).toEqual(new Uint8Array([saved ? 3 : 1]))
-      expect(new Uint8Array(await readFile(join(directory, 'victim')))).toEqual(new Uint8Array([1]))
+      await expect(readFile(join(directory, 'victim'))).rejects.toMatchObject({ code: 'ENOENT' })
+      if (saved)
+        expect(await fs.read('file.bin.sync-conflict-interrupted')).toEqual(new Uint8Array([1]))
+      expect(await readdir(join(root, '.abele-sync/conditional'))).toEqual([])
     } finally {
       await rm(root, { recursive: true, force: true })
     }

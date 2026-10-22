@@ -9,6 +9,8 @@ import {
   writeFile,
   readdir,
   readFile,
+  unlink,
+  rm,
 } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { ConditionalFileOperation } from '@abele/sync-core'
@@ -35,8 +37,46 @@ function valid(id: string) {
   return id
 }
 
+export async function restoreVictim(root: string, path: string, victim: string, id: string) {
+  const target = await containedIn(root, path),
+    info = await lstat(victim)
+  let destination = target
+  if (info.isDirectory()) {
+    // Recovery of old adapters which could capture a directory. Reserve an empty
+    // destination exclusively; rename cannot replace a directory containing a save.
+    try {
+      await mkdir(destination)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      destination = await containedIn(root, `${path}.sync-conflict-${id}`)
+      await mkdir(destination)
+    }
+    await rename(victim, destination)
+  } else {
+    try {
+      await link(victim, destination)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      const named = await lstat(destination)
+      if (named.dev !== info.dev || named.ino !== info.ino) {
+        destination = await containedIn(root, `${path}.sync-conflict-${id}`)
+        await link(victim, destination)
+      }
+    }
+    await unlink(victim)
+  }
+  await syncParents([victim, destination], root)
+}
+
+async function restoring(folder: string, root: string) {
+  await writeFile(`${folder}/restoring`, '1')
+  await syncPath(`${folder}/restoring`)
+  await syncParents(`${folder}/restoring`, root)
+}
+
 /** Never rename over a public name. Capture first, validate the displaced inode,
- * publish/restore exclusively. Quarantines are durable review records, never temp-swept. */
+ * publish/restore exclusively. Victims are dropped on success or restored and retired
+ * on refusal; publication receipts own only the newly installed data. */
 export async function conditionalFile(
   root: string,
   op: ConditionalFileOperation,
@@ -51,27 +91,72 @@ export async function conditionalFile(
   await mkdir(directory, { recursive: true })
   const victim = await containedIn(root, `.abele-sync/conditional/${id}/victim`)
   const target = await containedIn(root, op.path)
+  // rename(directory, existingRegularFile) is rejected by the filesystem itself.
+  // Its inode also distinguishes allocation-only crashes from a captured empty file.
+  let sentinel: { dev: number; ino: number } | undefined
+  if (op.expected !== null) {
+    await writeFile(victim, new Uint8Array(), { flag: 'wx' })
+    const info = await lstat(victim)
+    sentinel = { dev: info.dev, ino: info.ino }
+  }
   await writeFile(
     `${directory}/intent.json`,
-    JSON.stringify({ path: op.path, expected: op.expected, effect: op.effect.kind }),
+    JSON.stringify({
+      sentinel,
+      path: op.path,
+      expected: op.expected,
+      effect: op.effect.kind,
+      receipt: op.effect.kind === 'write' ? op.effect.receipt : undefined,
+      stageId: op.effect.kind === 'install' ? op.effect.stageId : undefined,
+    }),
     { flag: 'wx' }
   )
   await syncPath(`${directory}/intent.json`)
   await syncParents(`${directory}/intent.json`, root)
   let captured = false
+  let verified = false
+  let published = false
+  const retire = async () => {
+    await rm(directory, { recursive: true, force: true })
+    await syncPath(dirname(directory))
+  }
   const restore = async () => {
-    if (!captured) return
+    if (!captured) {
+      if (!published) await retire()
+      return
+    }
     check()
-    await link(victim, await containedIn(root, op.path)).catch((error) => {
-      if (error.code !== 'EEXIST') throw error
-    })
-    await syncParents([victim, target], root)
+    if (verified) {
+      try {
+        await lstat(target)
+        await unlink(victim)
+        captured = false
+        await syncParents(victim, root)
+        await retire()
+        return
+      } catch (error) {
+        if (!isMissing(error)) throw error
+      }
+    }
+    await restoring(directory, root)
+    await restoreVictim(root, op.path, victim, id)
+    captured = false
+    await retire()
   }
   const completed = async () => {
+    if (captured) {
+      await unlink(victim)
+      captured = false
+      await syncParents(victim, root)
+    }
+    if (op.effect.kind !== 'write' || !op.effect.receipt) {
+      await retire()
+      return
+    }
     await writeFile(`${directory}/complete`, '1', { flag: 'wx' })
     await syncPath(`${directory}/complete`)
     await syncParents(`${directory}/complete`, root)
-    const done = await containedIn(root, `.abele-sync/conditional-complete/${id}`)
+    const done = await containedIn(root, `.abele-sync/installations/${id}`)
     await mkdir(dirname(done), { recursive: true })
     await rename(directory, done)
     await syncParents([done, directory], root)
@@ -80,11 +165,26 @@ export async function conditionalFile(
     check()
     if (op.expected !== null) {
       try {
-        await rename(await containedIn(root, op.path), victim)
+        const source = await containedIn(root, op.path)
+        check()
+        const sourceInfo = await lstat(source)
+        if (!sourceInfo.isFile() || sourceInfo.isSymbolicLink()) {
+          await retire()
+          return false
+        }
+        check()
+        await rename(source, victim)
         captured = true
       } catch (error) {
+        if (['ENOTDIR', 'EISDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+          await retire()
+          return false
+        }
         if (isMissing(error)) {
-          if (op.effect.kind !== 'remove') return false
+          if (op.effect.kind !== 'remove') {
+            await retire()
+            return false
+          }
           await completed()
           return true
         }
@@ -102,9 +202,11 @@ export async function conditionalFile(
         await restore()
         return false
       }
+      verified = true
     } else {
       try {
         await lstat(target)
+        await retire()
         return false
       } catch (error) {
         if (!isMissing(error)) throw error
@@ -126,10 +228,14 @@ export async function conditionalFile(
       await syncParents(data, root)
     } else if (op.effect.kind === 'install') {
       data = await containedIn(root, `.abele-sync/stages/${valid(op.effect.stageId)}/data`)
-    } else if (!captured) return false
+    } else if (!captured) {
+      await retire()
+      return false
+    }
     check()
     try {
       await link(data, destination)
+      published = true
     } catch (error) {
       await restore()
       if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
@@ -145,7 +251,12 @@ export async function conditionalFile(
 }
 
 export async function recoverConditionalFiles(root: string, check: () => void): Promise<void> {
-  const directory = await containedIn(root, '.abele-sync/conditional')
+  for (const location of ['conditional', 'conditional-complete'])
+    await recoverFolder(root, location, check)
+}
+
+async function recoverFolder(root: string, location: string, check: () => void): Promise<void> {
+  const directory = await containedIn(root, `.abele-sync/${location}`)
   let ids: string[]
   try {
     ids = await readdir(directory)
@@ -154,31 +265,100 @@ export async function recoverConditionalFiles(root: string, check: () => void): 
     throw error
   }
   for (const id of ids) {
-    const folder = await containedIn(root, `.abele-sync/conditional/${valid(id)}`)
+    const folder = await containedIn(root, `.abele-sync/${location}/${valid(id)}`)
+    let complete = false
     try {
       await lstat(`${folder}/complete`)
-      const done = await containedIn(root, `.abele-sync/conditional-complete/${id}`)
-      await mkdir(dirname(done), { recursive: true })
-      check()
-      await rename(folder, done)
-      await syncParents([folder, done], root)
-      continue
+      complete = true
     } catch (error) {
       if (!isMissing(error)) throw error
     }
+    let raw: string
     try {
-      const intent = JSON.parse(await readFile(`${folder}/intent.json`, 'utf8')) as { path: string }
-      const target = await containedIn(root, intent.path),
-        victim = await containedIn(root, `.abele-sync/conditional/${id}/victim`)
-      const info = await lstat(victim)
-      if (!info.isFile() || info.isSymbolicLink()) continue
-      check()
-      await link(victim, target).catch((error) => {
-        if (error.code !== 'EEXIST') throw error
-      })
-      await syncParents(target, root)
+      raw = await readFile(`${folder}/intent.json`, 'utf8')
     } catch (error) {
       if (!isMissing(error)) throw error
+      // Capture starts only after this intent is durable; this is allocation debris.
+      await rm(folder, { recursive: true, force: true })
+      await syncPath(directory)
+      continue
+    }
+    {
+      const intent = JSON.parse(raw) as {
+        path: string
+        effect?: string
+        receipt?: string
+        sentinel?: { dev: number; ino: number }
+        expected?: { size: number; mtime: number; sha: string } | null
+        stageId?: string
+      }
+      const target = await containedIn(root, intent.path),
+        victim = await containedIn(root, `.abele-sync/${location}/${id}/victim`)
+      check()
+      let installed = false
+      try {
+        const dataPath = intent.stageId
+          ? await containedIn(root, `.abele-sync/stages/${valid(intent.stageId)}/data`)
+          : `${folder}/data`
+        const [data, named] = await Promise.all([lstat(dataPath), lstat(target)])
+        installed = data.isFile() && data.dev === named.dev && data.ino === named.ino
+      } catch (error) {
+        if (!isMissing(error)) throw error
+      }
+      let hasVictim = false
+      let info
+      try {
+        info = await lstat(victim)
+      } catch (error) {
+        if (!isMissing(error)) throw error
+      }
+      if (info !== undefined) {
+        hasVictim = intent.sentinel?.dev !== info.dev || intent.sentinel?.ino !== info.ino
+        if (!hasVictim) {
+          await unlink(victim)
+        } else if (
+          info.isFile() &&
+          (complete ||
+            (installed &&
+              intent.expected &&
+              info.size === intent.expected.size &&
+              Math.max(0, Math.round(info.mtimeMs)) === intent.expected.mtime &&
+              (await fingerprint(victim)) === intent.expected.sha))
+        ) {
+          await unlink(victim)
+          await syncParents(victim, root)
+        } else {
+          let began = false
+          try {
+            await lstat(`${folder}/restoring`)
+            began = true
+          } catch (error) {
+            if (!isMissing(error)) throw error
+          }
+          let named
+          try {
+            named = await lstat(target)
+          } catch (error) {
+            if (!isMissing(error)) throw error
+          }
+          // Restoration may have succeeded before a crash and a later intentional
+          // deletion. Keep ambiguous bytes visible without recreating that name.
+          const same = named?.dev === info.dev && named.ino === info.ino
+          const path = began && !same ? `${intent.path}.sync-conflict-${id}` : intent.path
+          await restoring(folder, root)
+          await restoreVictim(root, path, victim, id)
+        }
+      }
+      // Preserve only a receipt for a proven installed object, never a victim.
+      if (installed && intent.effect === 'write') {
+        const receipt = await containedIn(root, `.abele-sync/installations/${id}`)
+        await mkdir(dirname(receipt), { recursive: true })
+        await rename(folder, receipt)
+        await syncParents([folder, receipt], root)
+      } else {
+        await rm(folder, { recursive: true, force: true })
+        await syncPath(directory)
+      }
     }
   }
 }
@@ -190,7 +370,7 @@ export async function installedFile(
   sha: string
 ): Promise<boolean> {
   try {
-    let data = await containedIn(root, `.abele-sync/conditional-complete/${valid(receipt)}/data`)
+    let data = await containedIn(root, `.abele-sync/installations/${valid(receipt)}/data`)
     try {
       await lstat(data)
     } catch (error) {
@@ -209,5 +389,20 @@ export async function installedFile(
   } catch (error) {
     if (isMissing(error)) return false
     throw error
+  }
+}
+
+export async function discardInstallation(
+  root: string,
+  receipt: string,
+  check: () => void
+): Promise<void> {
+  const path = await containedIn(root, `.abele-sync/installations/${valid(receipt)}`)
+  check()
+  await rm(path, { recursive: true, force: true })
+  try {
+    await syncPath(dirname(path))
+  } catch (error) {
+    if (!isMissing(error)) throw error
   }
 }
