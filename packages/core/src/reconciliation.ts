@@ -331,8 +331,10 @@ export async function reconciliationScan(
   retiredEntries?: readonly StateEntry[],
   startup = true,
   client?: EngineClient,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  observedCursor?: number
 ): Promise<{ found: ScanResult; reconciliation: ReconciliationState | null; basis: StateStore }> {
+  const comparisonCursor = observedCursor ?? (await state.getCursor())
   const basis = retiredEntries ? await comparisonState(state, retiredEntries) : state
   let reconciliation = await readReconciliation(state)
   const missingBefore = new Set<string>(
@@ -386,7 +388,7 @@ export async function reconciliationScan(
     !reason &&
     !retiredEntries &&
     (older.length === 1 || changedOlder.length === 1) &&
-    head > (await state.getCursor())
+    head > comparisonCursor
   ) {
     const { entry, info } = (changedOlder[0] ?? older[0])!
     if (!entry.wirePath.toLowerCase().endsWith('.md')) {
@@ -417,13 +419,7 @@ export async function reconciliationScan(
     journal !== null &&
     (journal.idempotencyKey === liveJournalKey || (await authoredJournal(state, journal, fs)))
   let unexplainedAbsence = missing.length > 0
-  if (
-    client &&
-    missing.length > 0 &&
-    missing.length <= 16 &&
-    startup &&
-    head > (await state.getCursor())
-  ) {
+  if (client && missing.length > 0 && missing.length <= 16 && startup && head > comparisonCursor) {
     unexplainedAbsence = false
     for (const path of missing) {
       const entry = entries.get(path)!
@@ -442,7 +438,7 @@ export async function reconciliationScan(
   if (
     !retiredEntries &&
     !liveJournal &&
-    head > (await state.getCursor()) &&
+    head > comparisonCursor &&
     ((startup && unexplainedAbsence) || destructive)
   )
     reason = 'server advanced while local destructive intent remained; possible restored profile'
@@ -450,7 +446,7 @@ export async function reconciliationScan(
     reason &&
     (!reconciliation ||
       reconciliation.phase === 'complete' ||
-      (head > (await state.getCursor()) && (await state.getMeta?.('delete-decision'))))
+      (head > comparisonCursor && (await state.getMeta?.('delete-decision'))))
   ) {
     await requestReconciliation(state, reason)
     reconciliation = await readReconciliation(state)
@@ -465,7 +461,7 @@ export async function reconciliationScan(
   if (
     pendingDirectory &&
     ['delete_directory', 'move_directory'].includes(pendingDirectory.op?.op ?? '') &&
-    (active || head > (await state.getCursor()))
+    (active || head > comparisonCursor)
   ) {
     if (!active)
       await requestReconciliation(state, 'possible restored destructive directory journal')

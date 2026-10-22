@@ -302,6 +302,7 @@ export class SyncCycle {
     const vault = await client.state()
     this.ctx.set({ headSeq: vault.head_seq, cursor: await state.getCursor() })
     this.learnLimits(vault.settings.max_file_bytes, vault.settings.quota_bytes)
+    const comparisonCursor = await state.getCursor()
     let earlyPull: PullReport | null = null
     const priorReconciliation = await readReconciliation(state)
     if (
@@ -345,7 +346,8 @@ export class SyncCycle {
           : undefined,
         this.unscanned,
         client,
-        this.ctx.signal?.()
+        this.ctx.signal?.(),
+        comparisonCursor
       )
     )
     const reconciliation = inspection.reconciliation
