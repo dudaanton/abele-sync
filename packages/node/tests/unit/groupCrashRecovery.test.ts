@@ -653,3 +653,21 @@ for (const [caseOnly, fold] of [
         )
       })
     })
+
+it('publication recovery bounds scratch buffers for an eight-byte victim', async ({ signal }) => {
+  recoveryImages.clear() // Exercise the nested trace even when the matrix ran first.
+  let allocated = 0
+  const alloc = Buffer.alloc
+  const spy = vi
+    .spyOn(Buffer, 'alloc')
+    .mockImplementation((...args: Parameters<typeof Buffer.alloc>) => {
+      allocated += args[0]
+      return alloc(...args)
+    })
+  try {
+    await run(0, 'publication', 'write', 0, true, false, false, false, false, signal)
+    expect(allocated).toBeLessThan(16 * 1024 * 1024)
+  } finally {
+    spy.mockRestore()
+  }
+}, 60000)

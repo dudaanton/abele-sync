@@ -17,11 +17,13 @@ import type { ConditionalFileOperation, FileVersion } from '@abele/sync-core'
 import { containedIn, isMissing } from './nodeFsGuard.js'
 import { syncParents, syncPath } from './nodeFsDurability.js'
 
-async function fingerprint(path: string, limit = Infinity) {
+async function fingerprint(path: string, limit: number) {
   const file = await open(path, 'r'),
     hash = createHash('sha256')
   try {
-    const buffer = Buffer.alloc(1024 * 1024)
+    // Tiny victims dominate recovery. Read one byte beyond the expected size to
+    // detect growth without allocating a megabyte for every small-file check.
+    const buffer = Buffer.alloc(Math.max(1, Math.min(1024 * 1024, limit + 1)))
     let size = 0
     for (;;) {
       const { bytesRead } = await file.read(buffer)
@@ -243,7 +245,7 @@ export async function conditionalFile(
         info.isSymbolicLink() ||
         info.size !== op.expected.size ||
         Math.max(0, Math.round(info.mtimeMs)) !== op.expected.mtime ||
-        (await fingerprint(victim)) !== op.expected.sha
+        (await fingerprint(victim, op.expected.size)) !== op.expected.sha
       ) {
         await restore()
         return false
@@ -425,7 +427,7 @@ export async function installedFile(
       b.isFile() &&
       a.ino === b.ino &&
       a.dev === b.dev &&
-      (await fingerprint(target)) === sha
+      (await fingerprint(target, b.size)) === sha
     if (installed) await syncParents(target, root)
     return installed
   } catch (error) {
