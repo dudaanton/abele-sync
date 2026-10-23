@@ -21,6 +21,7 @@ import {
   write,
 } from './helpers/folders.js'
 import { spawnServer, type SpawnedServer } from './helpers/spawnServer.js'
+import { childBarrier } from './helpers/childBarrier.js'
 
 let server: SpawnedServer
 let a: string, b: string
@@ -150,40 +151,43 @@ describe('all-or-nothing plugin code approval', () => {
   }
 
   for (const cut of ['after-main', 'before-state-commit']) {
-    it(`recovers the complete group after SIGKILL ${cut} before another sync`, async () => {
+    it(`recovers the complete group after SIGKILL ${cut} before another sync`, async ({
+      signal,
+    }) => {
       const id = `killed-${cut}`
       const { shown, before } = await prepare(id)
+      signal.throwIfAborted()
       const child = fork(
         fileURLToPath(new URL('./helpers/codeApprovalChild.mjs', import.meta.url)),
         [b, id, shown, cut],
         { silent: true, execArgv: [] }
       )
       const exited = once(child, 'exit')
-      let timer: ReturnType<typeof setTimeout> | undefined
+      const kill = () => {
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+      }
+      signal.addEventListener('abort', kill, { once: true })
       let stderr = ''
       child.stderr?.on('data', (data) => {
         stderr += String(data)
       })
       try {
-        const message = await Promise.race([
-          once(child, 'message').then(([value]) => value),
-          exited.then(() => {
-            throw new Error(`approval exited before ${cut}: ${stderr}`)
-          }),
-          new Promise((_, reject) => {
-            timer = setTimeout(() => reject(new Error(`missing barrier ${cut}: ${stderr}`)), 5000)
-          }),
-        ])
+        // The cut is an IPC event, not a five-second throughput requirement for
+        // process startup, downloads and durable writes. Keep the test's existing
+        // deadline; cancellation kills and reaps a child that never reaches it.
+        const message = await childBarrier(child, cut, exited, signal, () => stderr)
         expect(message).toEqual({ barrier: cut })
         // WAL readers must still see the complete pending queue, not the speculative ledger.
         expect(await fingerprint(id)).toBe(shown)
+        signal.throwIfAborted()
         child.kill('SIGKILL')
         expect(await exited).toEqual([null, 'SIGKILL'])
       } finally {
-        clearTimeout(timer)
-        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+        signal.removeEventListener('abort', kill)
+        kill()
         await exited
       }
+      signal.throwIfAborted()
       await syncOnce(b)
       expect(await read(b, code(id))).toBe(`${id}Before()`)
       expect(existsSync(join(b, code(id, 'manifest.json')))).toBe(false)
