@@ -107,10 +107,13 @@ does not exempt a move from this check. This preserves bytes and intent rather t
 
 Verified refused stages belong to their exact pending decision. Replacing or
 dropping a deferred decision (including exclusion, explicit discard and host
-connection teardown) must use filesystem-aware `StagedChanges`: it writes a
-durable retirement marker and removes or replaces the exact deferred decision
-in one metadata transaction, then discards owned bytes. A newer remote head
-uses the same atomic revocation of its old deferred version. Byte-limit eviction
+connection teardown) must use the shared filesystem-aware retirement transition.
+It writes retirement markers and removes or replaces exact deferred decisions
+in one metadata transaction, then discards owned bytes. StagedChanges publishes
+its final replacement document through this transition; a version still owned
+by that final document keeps its stage. Pull-side exclusion and newer remote heads
+use the same transition, even if the next staging tidy never runs. Cleanup alone can only finish
+an already-published retirement; it cannot discard an unresolved held stage. Byte-limit eviction
 only retires the cached stage; its unresolved decision remains retryable. Metadata-only callers cannot abandon held bytes. An interrupted decision
 retirement retries idempotent cleanup; it never reinstalls the retired version.
 On restart, a ledger entry already recording the exact installation takes

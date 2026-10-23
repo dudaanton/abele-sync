@@ -5,7 +5,7 @@ import { replayAuthority } from './replayAuthority.js'
 import { pathOccupant } from './pathOccupant.js'
 import type { FileSystem } from './fs.js'
 import { discardPullStage } from './pullStages.js'
-import { DEFERRED_KEY, parse } from './deferredFile.js'
+import { DEFERRED_KEY, parse, type Filed } from './deferredFile.js'
 import { transact } from './stateTransaction.js'
 
 /** Intent saved before a pull touches the disk, retired atomically with its ledger update. */
@@ -126,23 +126,13 @@ export class PendingPullWrites {
     await this.state.setMeta?.(keyFor(fileId), null)
   }
 
-  /** Retire bytes before their ownership record. An interrupted retirement is
+  /** Private byte cleanup (also used by cache eviction, which keeps its decision).
+   * Retire bytes before their ownership record. An interrupted retirement is
    * resumed, never interpreted as permission to install or fetch the old stage. */
-  private async retire(pending: PendingPullWrite, superseded = false): Promise<void> {
+  private async retire(pending: PendingPullWrite): Promise<void> {
     if (!this.fs)
       throw new EngineError('io', 'host cannot retire a held pull stage without its filesystem')
-    if (superseded) {
-      await transact(this.state, async (tx) => {
-        const filed = parse(await tx.getMeta!(DEFERRED_KEY))
-        const staged = filed.staged.filter(
-          (one) =>
-            one.change.file_id !== pending.fileId || one.change.version_id !== pending.versionId
-        )
-        if (staged.length !== filed.staged.length)
-          await tx.setMeta!(DEFERRED_KEY, staged.length ? JSON.stringify({ staged }) : null)
-        await tx.setMeta!(keyFor(pending.fileId), JSON.stringify({ ...pending, retiring: true }))
-      })
-    } else if (!pending.retiring)
+    if (!pending.retiring)
       await this.state.setMeta?.(
         keyFor(pending.fileId),
         JSON.stringify({ ...pending, retiring: true })
@@ -159,34 +149,73 @@ export class PendingPullWrites {
       pending.versionId !== change.version_id &&
       pending.seq !== undefined &&
       change.seq > pending.seq
-    if (pending.retiring || newer) await this.retire(pending, newer)
+    if (pending.retiring) await this.retire(pending)
+    else if (newer)
+      await this.retireDecision({ file_id: pending.fileId, version_id: pending.versionId })
   }
 
-  /** Called inside the same transaction that removes/replaces the exact
-   * deferred owner. Publishing the marker must revoke the old decision too. */
-  async prepareDiscardHeld(change: ChangeItem): Promise<void> {
+  /** Only the atomic owner transition may publish a retirement marker. */
+  private async prepareRetirement(
+    change: Pick<ChangeItem, 'file_id' | 'version_id'>
+  ): Promise<void> {
     const pending = await this.read(change.file_id)
-    if (
-      pending?.versionId !== change.version_id ||
-      (pending.heldOrder === undefined && !pending.retiring)
-    )
-      return
+    if (pending?.versionId !== change.version_id) return
     if (!this.fs)
       throw new EngineError('io', 'host cannot retire a held pull stage without its filesystem')
-    await this.state.setMeta!(
-      keyFor(pending.fileId),
-      JSON.stringify({ ...pending, retiring: true })
-    )
+    if (!pending.retiring)
+      await this.state.setMeta!(
+        keyFor(pending.fileId),
+        JSON.stringify({ ...pending, retiring: true })
+      )
   }
 
-  /** An explicit staging decision resolves only the version the user was shown. */
-  async discardHeld(change: ChangeItem): Promise<void> {
+  /** One publication path for exclusion, deferred drop/replacement and newer
+   * heads. Revoke exact versions (or publish their replacement document) with
+   * every retirement marker, then finish byte cleanup outside the transaction. */
+  async retireDecisions(
+    changes: readonly Pick<ChangeItem, 'file_id' | 'version_id'>[],
+    replacement?: Filed
+  ): Promise<void> {
+    if (!this.state.getMeta || !this.state.setMeta) return
+    const identity = (change: Pick<ChangeItem, 'file_id' | 'version_id'>) =>
+      JSON.stringify([change.file_id, change.version_id])
+    const kept = new Set(replacement?.staged.map((one) => identity(one.change)))
+    const ended = changes.filter((change) => !kept.has(identity(change)))
+    await transact(this.state, async (tx) => {
+      const pending = new PendingPullWrites(tx, this.fs)
+      for (const change of ended) await pending.prepareRetirement(change)
+      const filed = replacement ?? parse(await tx.getMeta!(DEFERRED_KEY))
+      const gone = new Set(ended.map(identity))
+      const staged =
+        replacement?.staged ?? filed.staged.filter((one) => !gone.has(identity(one.change)))
+      if (replacement || staged.length !== filed.staged.length)
+        await tx.setMeta!(DEFERRED_KEY, staged.length ? JSON.stringify({ staged }) : null)
+    })
+    for (const change of ended) await this.finishRetirement(change)
+  }
+
+  /** Pull can end a decision before staging.tidy; skip absent owners without
+   * creating an empty transaction for every ordinary excluded feed item. */
+  async retireDecision(change: Pick<ChangeItem, 'file_id' | 'version_id'>): Promise<void> {
+    if (!this.state.getMeta || !this.state.setMeta) return
     const pending = await this.read(change.file_id)
-    if (
-      pending?.versionId === change.version_id &&
-      (pending.heldOrder !== undefined || pending.retiring)
-    )
-      await this.retire(pending)
+    if (pending?.versionId !== change.version_id) {
+      const filed = parse(await this.state.getMeta(DEFERRED_KEY))
+      if (
+        !filed.staged.some(
+          (one) =>
+            one.change.file_id === change.file_id && one.change.version_id === change.version_id
+        )
+      )
+        return
+    }
+    await this.retireDecisions([change])
+  }
+
+  /** Cleanup may only finish a retirement whose atomic publication already landed. */
+  async finishRetirement(change: Pick<ChangeItem, 'file_id' | 'version_id'>): Promise<void> {
+    const pending = await this.read(change.file_id)
+    if (pending?.versionId === change.version_id && pending.retiring) await this.retire(pending)
   }
 
   async retain(

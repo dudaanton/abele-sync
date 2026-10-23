@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { ChangeItem } from '@abele/sync-protocol'
 import {
   applyStaged,
+  pull,
   EngineError,
   ExpectedWrites,
   recoverPendingPullWrites,
@@ -90,6 +91,30 @@ async function fixture(seed: number) {
       filter: { excluded: (path) => respectScope && excluded(path) },
       prefetchBytes: 0,
     })
+  const replayExcluded = (item: ChangeItem) =>
+    pull(
+      {
+        ...client,
+        manifest: async () => ({
+          items: [{ ...item, sha: item.sha!, size: item.size!, mtime: item.mtime! }],
+          next: null,
+          head_seq: item.seq,
+        }),
+        changes: async (since: number) => ({
+          items: item.seq > since ? [item] : [],
+          head_seq: item.seq,
+          next_since: item.seq,
+        }),
+      } as EngineClient,
+      fs,
+      state,
+      {
+        dirty: new Set(),
+        expected: new ExpectedWrites(),
+        filter: { excluded: (path) => excluded(path) },
+        prefetchBytes: 0,
+      }
+    )
   const retain = async (id: string, tracked = false, deferred = true) => {
     const item = change(id)
     if (tracked) {
@@ -133,10 +158,14 @@ async function fixture(seed: number) {
     change,
     staging,
     run,
+    replayExcluded,
     retain,
     recover,
     allow: () => {
       refusing = false
+    },
+    include: () => {
+      excluded = () => false
     },
     exclude: (path?: string) => {
       excluded = (candidate) => path === undefined || path === candidate
@@ -231,7 +260,7 @@ it.each(['fs.stage.discard#1', 'stage.discarded#1'])(
   }
 )
 
-it.each(['drop', 'replace', 'exclude', 'new-head'] as const)(
+it.each(['drop', 'replace', 'exclude', 'pull-exclude', 'new-head'] as const)(
   'a retired decision cannot return after a disk-only restart (%s)',
   async (mode) => {
     async function execute(recoveryCut?: string) {
@@ -243,9 +272,11 @@ it.each(['drop', 'replace', 'exclude', 'new-head'] as const)(
           ? f.staging().stage([{ change: f.change('a', 2), base: null }])
           : mode === 'exclude'
             ? (f.exclude(), f.staging().tidy(new Set()))
-            : mode === 'new-head'
-              ? f.run(f.change('a', 2))
-              : f.staging().records.drop(['a'])
+            : mode === 'pull-exclude'
+              ? (f.exclude(), f.replayExcluded(f.change('a')))
+              : mode === 'new-head'
+                ? f.run(f.change('a', 2))
+                : f.staging().records.drop(['a'])
       await expect(operation).rejects.toBeInstanceOf(EpochError)
       f.reopen()
       f.allow()
@@ -265,6 +296,7 @@ it.each(['drop', 'replace', 'exclude', 'new-head'] as const)(
       expect(f.fs.stages.has(id)).toBe(false)
       expect(await f.state.getMeta('pull-write:a')).toBeNull()
       expect(await f.staging().list()).toEqual(mode === 'replace' ? [f.change('a', 2)] : [])
+      f.include()
       const before = f.fs.snapshot(),
         downloads = f.downloads.length
       expect((await f.staging().apply(new Set(), new Set(['a-1']))).applied).toEqual([])
@@ -288,6 +320,58 @@ it('a live staged reader observes revocation by a newer remote head', async () =
   expect(await staging.list()).toEqual([])
   await staging.stage([{ change: f.change('a', 2), base: null }])
   await staging.records.drop(['a'])
+})
+
+it('cleanup without a committed retirement leaves the held decision and bytes owned', async () => {
+  const f = await fixture(196),
+    id = await f.retain('a')
+  const pending = new PendingPullWrites(f.state, f.fs)
+  await pending.finishRetirement(f.change('a'))
+  expect(f.fs.stages.has(id)).toBe(true)
+  expect(await f.staging().list()).toEqual([f.change('a')])
+  expect(f.removals.get(id)).toBeUndefined()
+  await pending.retireDecision(f.change('a'))
+  expect(f.fs.stages.has(id)).toBe(false)
+  expect(await f.staging().list()).toEqual([])
+  expect(await f.state.getMeta('pull-write:a')).toBeNull()
+  expect(f.removals.get(id)).toBe(1)
+})
+
+it('a replacement batch keeps the held bytes of its final decision', async () => {
+  const f = await fixture(196),
+    id = await f.retain('a')
+  await f.staging().stage([
+    { change: f.change('a', 2), base: null },
+    { change: f.change('a'), base: null },
+  ])
+  expect(await f.staging().list()).toEqual([f.change('a')])
+  expect(f.fs.stages.has(id)).toBe(true)
+  expect(f.removals.get(id)).toBeUndefined()
+  f.allow()
+  const downloads = f.downloads.length
+  expect((await f.staging().apply(new Set())).applied).toEqual(['a.bin'])
+  expect(f.downloads.length).toBe(downloads)
+  expect(f.removals.get(id)).toBe(1)
+})
+
+it('an excluded old replay cannot retire a newer held decision', async () => {
+  const f = await fixture(196)
+  await f.retain('a')
+  await f.run(f.change('a', 2))
+  await f.staging().stage([{ change: f.change('a', 2), base: null }])
+  const pending = await f.state.getMeta('pull-write:a')
+  const id = JSON.parse(pending!).stageId
+  f.exclude()
+  const downloads = f.downloads.length,
+    before = f.fs.snapshot()
+  await f.run(f.change('a'), true)
+  expect(await f.state.getMeta('pull-write:a')).toBe(pending)
+  expect(await f.staging().list()).toEqual([f.change('a', 2)])
+  expect(f.fs.stages.has(id)).toBe(true)
+  expect(f.fs.snapshot()).toEqual(before)
+  expect(f.downloads.slice(downloads)).toEqual([])
+  await f.staging().records.drop(['a'])
+  expect(f.removals.get(id)).toBe(1)
 })
 
 it('byte-limit eviction keeps the unresolved decision retryable', async () => {
@@ -326,6 +410,7 @@ describe.each([187, 188, 189, 190])(
       endings = [
         'apply',
         'exclude',
+        'pull-exclude',
         'keep',
         'discard',
         'supersede',
@@ -366,6 +451,9 @@ describe.each([187, 188, 189, 190])(
           // Exclude only this file; unaffected decisions keep their stages.
           f.exclude(`${id}.bin`)
           await f.staging().tidy(new Set())
+        } else if (mode === 'pull-exclude') {
+          f.exclude(`${id}.bin`)
+          await f.replayExcluded(f.change(id))
         } else if (mode === 'keep') {
           await f.fs.writeAtomic(`${id}.bin`, new Uint8Array([42]), 2)
           await f.staging().keep(new Set([`${id}.bin`]))

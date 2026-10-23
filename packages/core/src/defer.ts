@@ -2,7 +2,6 @@ import type { ChangeItem } from '@abele/sync-protocol'
 import type { StateEntry, StateStore } from './state.js'
 import type { FileSystem } from './fs.js'
 import { PendingPullWrites } from './pullWrite.js'
-import { transact } from './stateTransaction.js'
 import { DEFERRED_KEY, parse, type Filed } from './deferredFile.js'
 
 /**
@@ -124,18 +123,9 @@ export class StagedChanges {
    * transition. Physical cleanup may finish in recovery, without replaying the
    * host's discarded/replacement decision from memory. */
   private async transition(next: Filed, retired: ChangeItem[]): Promise<void> {
-    if (!this.state.setMeta || retired.length === 0) return this.save(next)
-    await transact(this.state, async (tx) => {
-      const pending = new PendingPullWrites(tx, this.fs)
-      for (const change of retired) await pending.prepareDiscardHeld(change)
-      await tx.setMeta!(
-        DEFERRED_KEY,
-        next.staged.length === 0 ? null : JSON.stringify({ staged: next.staged })
-      )
-    })
+    if (!this.state.getMeta || !this.state.setMeta || retired.length === 0) return this.save(next)
+    await new PendingPullWrites(this.state, this.fs).retireDecisions(retired, next)
     this.filed = next
-    const pending = new PendingPullWrites(this.state, this.fs)
-    for (const change of retired) await pending.discardHeld(change)
   }
 
   /** Every staged change with its base, oldest seq first. */
