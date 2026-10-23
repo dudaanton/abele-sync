@@ -8,6 +8,7 @@ import { bytesFor, settledStat } from './apply.js'
 import type { EngineClient } from './engineClient.js'
 import { EngineError } from './errors.js'
 import type { FileInfo, FileSystem, ConditionalFileOperation } from './fs.js'
+import { MAX_CHUNK_BYTES, type AtomicStage } from './streaming.js'
 import { fingerprintFile } from './fs.js'
 import { downloadToStage, TransferBudget, type ChunkSource } from './streaming.js'
 import type { PullOptions } from './puller.js'
@@ -573,7 +574,9 @@ export class PullPlacer {
         target,
         { size: identity.size, mtime: change.mtime ?? 0 },
         from,
-        entry
+        entry,
+        null,
+        stage
       )
     } catch (error) {
       this.opts.expected.clear(target)
@@ -597,6 +600,8 @@ export class PullPlacer {
           return null
         return await this.fs.openRead(entry.path)
       }
+      const have = await this.fs.stat(entry.path)
+      if (!have || have.size > MAX_CHUNK_BYTES) return null
       const bytes = await this.fs.read(entry.path)
       if ((await this.hash(bytes)) !== sha) return null
       return {
@@ -700,7 +705,8 @@ export class PullPlacer {
     wrote: { size: number; mtime: number },
     from: string | null,
     base: StateEntry | null,
-    freshReplacement: StateEntry | null = null
+    freshReplacement: StateEntry | null = null,
+    liveStage?: AtomicStage
   ): Promise<boolean> {
     const have = await settledStat(this.fs, target, sha, wrote, this.hash)
     const stageId = await this.pending.stageId(change)
@@ -745,7 +751,8 @@ export class PullPlacer {
     })
     if (!recorded) return false
     if (stageId !== undefined) {
-      await discardPullStage(this.fs, stageId)
+      if (liveStage?.id === stageId) await liveStage.discard()
+      else await discardPullStage(this.fs, stageId)
       await this.pending.clear(change.file_id)
     }
     if (receiptId !== undefined) await this.fs.discardInstallation?.(receiptId)
