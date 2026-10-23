@@ -752,7 +752,9 @@ export class Puller {
               serial
             ),
           }
-          const base = (await this.state.byFileId(change.file_id))?.versionId ?? null
+          const observedBase = (await this.state.byFileId(change.file_id))?.versionId ?? null
+          const held = this.holds.records.get(change.file_id)
+          const base = held?.change.version_id === change.version_id ? held.base : observedBase
           let succeeded = false
           if (this.opts.retries && !this.opts.retries.ready(change.path, 'pull'))
             attempt.held = true
@@ -1082,12 +1084,30 @@ export class Puller {
   private async goneBoth(change: ChangeItem, entry: StateEntry | null): Promise<boolean> {
     if (change.op !== 'delete' && change.sha !== null) return false
     if (entry === null || !this.isNoted(change, entry)) return false
+    const held = this.holds.records.get(change.file_id)
+    if (held?.change.version_id === change.version_id && held.base !== entry.versionId) return false
     if ((await this.fs.stat(entry.path)) !== null) return false
-    this.opts.expected.clear(entry.path)
-    await transact(this.state, async (tx) => {
+    let settled = false
+    await this.commit(async (tx) => {
+      const current = await tx.byFileId(entry.fileId)
+      if (
+        current?.path !== entry.path ||
+        !replayAuthority(
+          entry.fileId,
+          entry,
+          current,
+          await pathOccupant(this.fs, tx, entry.path, entry.fileId)
+        ) ||
+        (await this.fs.stat(entry.path)) !== null ||
+        (await this.changeRefusal(change))
+      )
+        return
       await tx.delete(entry.path)
       await recordPull(tx, change, true)
+      settled = true
     })
+    if (!settled) return false
+    this.opts.expected.clear(entry.path)
     this.report.settled = [...(this.report.settled ?? []), entry.fileId]
     this.opts.log?.(`pull: ${entry.path} was deleted elsewhere too; its held delete is settled`)
     return true
