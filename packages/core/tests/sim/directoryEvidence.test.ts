@@ -13,6 +13,7 @@ it.each([191, 192, 193, 194])(
     const names = Array.from({ length: 3 }, (_, n) =>
       random.random() < 0.5 ? `Renamed${n}` : `renamed${n}`
     )
+    const actions = new Map(names.map((name) => [name, Math.floor(random.random() * 4)]))
     async function execute(cut?: string) {
       const scheduler = new SimScheduler(seed)
       let fs = new MemoryStreamingFS(scheduler),
@@ -196,6 +197,24 @@ it.each([191, 192, 193, 194])(
           origins.delete(from)
           await observe(true)
         }
+        // Seeded operation choices alter the sequence, not just path spellings.
+        const action = actions.get(name)!
+        if (action < 2) {
+          if (action === 1) await fs.remove(local + '/child.md')
+          await fs.writeAtomic(local + '/child.md', new Uint8Array([4, action, 6]), 3)
+        } else {
+          const next = action === 2 ? local + '-random' : local.toUpperCase()
+          if (identities.has(local)) {
+            identities.set(next, identities.get(local)!)
+            identities.delete(local)
+          }
+          await fs.moveDirectory(local, next)
+          origins.delete(local)
+          origins.set(next, 'original')
+          local = next
+        }
+        await directories.loadRefusals(true)
+        await observe(true)
         // Delete/recreate a child during the hold, including repeated observations.
         await fs.remove(local + '/child.md')
         await fs.writeAtomic(local + '/child.md', new Uint8Array([7, 8, 9]), 3)
