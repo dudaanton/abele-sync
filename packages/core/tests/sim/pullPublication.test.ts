@@ -1,3 +1,4 @@
+import { legacyState } from '../helpers/legacyState.js'
 import { expect, it } from 'vitest'
 import { ExpectedWrites, pull, sha256, type EngineClient } from '../../src/index.js'
 import { DurableStateStore } from './durableState.js'
@@ -7,11 +8,17 @@ import { SyncCancelled } from '../../src/cancellation.js'
 
 it.each(
   (['buffered', 'bounded', 'stage'] as const).flatMap((mode) =>
-    [1, 3].map((placementConcurrency) => ({ mode, placementConcurrency }))
+    [1, 3].flatMap((placementConcurrency) =>
+      (placementConcurrency === 3 ? [false, true] : [false]).map((legacy) => ({
+        mode,
+        placementConcurrency,
+        legacy,
+      }))
+    )
   )
 )(
-  'first-pull publication and batched page progress survive every await (mode=$mode, placement=$placementConcurrency)',
-  async ({ mode, placementConcurrency }) => {
+  'first-pull publication and batched page progress survive every await (mode=$mode, placement=$placementConcurrency, legacy=$legacy)',
+  async ({ mode, placementConcurrency, legacy }) => {
     const bounded = mode !== 'buffered'
     const versions = await Promise.all(
       Array.from({ length: 3 }, async (_, n) => {
@@ -89,7 +96,7 @@ it.each(
         Object.assign(fs, { beginAtomicWrite: undefined, reopenStage: undefined })
       }
       const run = () =>
-        pull(client(), fs, state, {
+        pull(client(), fs, legacy ? legacyState(state) : state, {
           placementConcurrency,
           signal: stop.signal,
           onApplied: (event) => {
@@ -130,7 +137,7 @@ it.each(
         const installed = new Set(fs.snapshot().keys())
         const start = downloads.length
         const result = await run().catch((error) => {
-          console.error({ mode, placementConcurrency, cut, interruption })
+          console.error({ mode, placementConcurrency, legacy, cut, interruption })
           throw error
         })
         expect(result.held).toEqual([])
@@ -150,7 +157,7 @@ it.each(
     }
     const points = await execute()
     console.log(
-      `Placement ${mode}/${placementConcurrency}: ${points.length} crash cuts` +
+      `Placement ${mode}/${placementConcurrency}/legacy=${legacy}: ${points.length} crash cuts` +
         (placementConcurrency > 1 ? `, ${points.length} cancellation and failure cuts each` : '')
     )
     for (const cut of points) await execute(cut)

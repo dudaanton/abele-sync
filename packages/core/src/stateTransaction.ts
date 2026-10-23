@@ -239,7 +239,7 @@ export function transact<T>(state: StateStore, work: (tx: StateStore) => Promise
           'protocol',
           'scoped state store did not provide a transaction capability'
         )
-      return tx === undefined ? legacyWork(state, work) : work(tx)
+      return tx === undefined || tx === state ? legacyWork(state, work) : work(tx)
     })
   if (state.transactionScoped) return run()
   const previous = legacyQueue.get(state) ?? Promise.resolve()

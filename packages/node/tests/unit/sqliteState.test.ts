@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import SqliteDatabase from 'better-sqlite3'
+import { concurrentPlacement } from '../../../core/tests/helpers/concurrentPlacement.js'
 import type { Journal, StateEntry } from '@abele/sync-core'
 import { SqliteStateStore } from '../../src/sqliteState.js'
 import { MemoryFileSystem, refreshLocalPaths, reconcileGeneration } from '@abele/sync-core'
@@ -53,6 +54,9 @@ afterEach(async () => {
 })
 
 describe('SqliteStateStore', () => {
+  it('settles concurrent placements through its native scoped transactions', async () => {
+    await concurrentPlacement(store)
+  })
   it('keeps identity indexes consistent through path replacement and nested publication', async () => {
     await identityReplacement(store)
   })

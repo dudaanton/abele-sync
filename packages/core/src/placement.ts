@@ -1,6 +1,7 @@
 import { caseKey, type ChangeItem } from '@abele/sync-protocol'
 import { checkCancellation } from './cancellation.js'
 import type { StateStore } from './state.js'
+import { transact } from './stateTransaction.js'
 
 export function placementLimit(value = 1): number {
   if (!Number.isSafeInteger(value) || value < 1 || value > 32)
@@ -19,7 +20,11 @@ export function placementState(state: StateStore): StateStore {
       if (typeof value !== 'function') return value
       if (!writes.has(String(key))) return value.bind(target)
       return (...args: unknown[]) => {
-        const result = tail.then(() => Reflect.apply(value, target, args))
+        const result = tail.then(() =>
+          key === 'transaction'
+            ? transact(target, args[0] as (tx: StateStore) => Promise<unknown>)
+            : Reflect.apply(Reflect.get(target, key, target), target, args)
+        )
         tail = result.then(
           () => {},
           () => {}
