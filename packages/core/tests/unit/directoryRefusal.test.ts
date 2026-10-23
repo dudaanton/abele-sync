@@ -151,6 +151,82 @@ it('a fresh V2 engine loads durable directory holds before approving staged code
   }
 })
 
+it.each(['tracked', 'previous'] as const)(
+  'D-202 fresh approval protects a held move source (%s)',
+  async (source) => {
+    const fs = new MemoryFileSystem(),
+      state = new MemoryStateStore()
+    const bytes = new Uint8Array([1]),
+      sha = await sha256(bytes)
+    const change: ChangeItem = {
+      seq: 2,
+      file_id: 'code',
+      version_id: 'v2',
+      path: 'free/main.js',
+      prev_path: source === 'previous' ? 'blocked/main.js' : null,
+      kind: 'attachment',
+      op: 'move',
+      sha,
+      size: 1,
+      mtime: 1,
+      actor: { kind: 'system', id: 'test', name: 'test' },
+      at: '',
+    }
+    const from = source === 'tracked' ? 'blocked/main.js' : 'other/main.js'
+    await fs.writeAtomic(from, bytes, 1)
+    await state.put({
+      fileId: 'code',
+      versionId: 'v1',
+      path: from,
+      wirePath: from,
+      sha,
+      size: 1,
+      mtime: 1,
+    })
+    await new StagedChanges(state, fs).stage([{ change, base: 'v1' }])
+    await state.setMeta(
+      'v2-directories',
+      JSON.stringify({
+        directories: [],
+        removals: [],
+        refused: [
+          {
+            path: 'blocked',
+            source: 'old',
+            code: 'conflict',
+            message: 'ambiguous',
+            direction: 'push',
+            evidence: true,
+          },
+        ],
+      })
+    )
+    const fetch = vi.fn(async () => new Response(bytes))
+    const client = new V2EngineClient(
+      encodeAccessToken({
+        v: 1,
+        address: 'https://synthetic.example.test',
+        key: 'k'.repeat(43),
+        scope: { kind: 'folder', id: 'root', path: '/' },
+      }),
+      { fetch }
+    )
+    const engine = new SyncEngine({ fs, state, client, selective: selectiveDefaults() })
+    try {
+      const result = await engine.applyDeferred(['v2'])
+      expect(result).toEqual({ applied: [], skipped: ['free/main.js'], unshown: [] })
+      expect(await readStaged(state)).toEqual([change])
+      expect(await fs.stat(change.path)).toBeNull()
+      expect(await fs.read(from)).toEqual(bytes)
+      expect(await state.byFileId('code')).toMatchObject({ versionId: 'v1', path: from })
+      expect(JSON.parse((await state.getMeta('v2-directories'))!).refused).toHaveLength(1)
+      expect(fetch).not.toHaveBeenCalled()
+    } finally {
+      await engine.stop()
+    }
+  }
+)
+
 it('D-136 never publishes a refused event past queued accepted work', async () => {
   const fs = new MemoryFileSystem(),
     state = new MemoryStateStore()
@@ -767,3 +843,65 @@ it('replays an uncertain file journal unchanged despite a later refusal of its d
   expect(await state.get(op.path)).toMatchObject({ fileId: 'file', versionId: 'v1' })
   expect(await state.getJournal()).toBeNull()
 })
+
+it.each(['tracked', 'previous'] as const)(
+  'D-202 ordinary pull protects held sources (%s)',
+  async (source) => {
+    const fs = new MemoryFileSystem(),
+      state = new MemoryStateStore()
+    const bytes = new Uint8Array([1]),
+      sha = await sha256(bytes)
+    const from = source === 'tracked' ? 'blocked/main.js' : 'other/main.js'
+    const base = {
+      fileId: 'code',
+      versionId: 'v1',
+      path: from,
+      wirePath: from,
+      sha,
+      size: 1,
+      mtime: 1,
+    }
+    await fs.writeAtomic(from, bytes, 1)
+    await state.put(base)
+    await state.setCursor(1)
+    const change: ChangeItem = {
+      seq: 2,
+      file_id: 'code',
+      version_id: 'v2',
+      path: 'free/main.js',
+      prev_path: source === 'previous' ? 'blocked/main.js' : null,
+      kind: 'attachment',
+      op: 'move',
+      sha,
+      size: 1,
+      mtime: 1,
+      actor: { kind: 'system', id: 'test', name: 'test' },
+      at: '',
+    }
+    let refusing = true
+    const client = {
+      changes: async () => ({ items: [change], next_since: 2, head_seq: 2 }),
+      pathRefusal: (path: string) =>
+        refusing && path.startsWith('blocked/')
+          ? { code: 'conflict', message: 'held source' }
+          : undefined,
+      getBlob: vi.fn(async () => bytes),
+    } as unknown as EngineClient
+    const options = {
+      expected: new ExpectedWrites(),
+      dirty: new Set<string>(),
+      filter: { excluded: () => false },
+    }
+    const result = await pull(client, fs, state, options)
+    expect(result.applied).toBe(0)
+    expect(result.rejected?.map((row) => row.change)).toEqual([change])
+    expect(await fs.read(from)).toEqual(bytes)
+    expect(await fs.stat(change.path)).toBeNull()
+    expect(await state.byFileId('code')).toEqual(base)
+    expect(client.getBlob).not.toHaveBeenCalled()
+    refusing = false
+    const retried = await pull(client, fs, state, options)
+    expect(retried.applied).toBe(1)
+    expect(await fs.read(change.path)).toEqual(bytes)
+  }
+)

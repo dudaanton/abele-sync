@@ -278,6 +278,19 @@ export class Puller {
     this.syncHeld()
   }
 
+  private async changeRefusal(change: ChangeItem) {
+    if (!this.client.pathRefusal) return undefined
+    const entry = await this.state.byFileId(change.file_id)
+    // A move can remove a protected source even when its destination is free.
+    // Check both ledger names and feed history, including implicit moves.
+    for (const path of new Set([change.path, entry?.path, entry?.wirePath, change.prev_path])) {
+      if (path == null) continue
+      const refusal = this.client.pathRefusal(path)
+      if (refusal) return refusal
+    }
+    return undefined
+  }
+
   private async retryObligations(): Promise<void> {
     // An older refusal/hold must never become a clean base beneath a newer hold
     // for the same path. Coalesce the two durable collections as one snapshot.
@@ -287,7 +300,7 @@ export class Puller {
     const retry: ChangeItem[] = []
     for (const change of newest(lastPerFile(changes))) {
       if (
-        !this.client.pathRefusal?.(change.path) ||
+        !(await this.changeRefusal(change)) ||
         this.heldFiles.has(change.file_id) ||
         (this.opts.defer &&
           touchesDeferred(
@@ -646,7 +659,7 @@ export class Puller {
         await finish(change)
         continue
       }
-      const refusal = this.client.pathRefusal?.(change.path)
+      const refusal = await this.changeRefusal(change)
       if (refusal) {
         ;(this.report.rejected ??= []).push({
           change,
