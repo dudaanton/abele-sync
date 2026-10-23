@@ -5,9 +5,14 @@ import { pull } from '../../src/puller.js'
 import { ExpectedWrites } from '../../src/echo.js'
 import { StagedChanges } from '../../src/defer.js'
 
-it.each(['installed', 'incoming'] as const)(
-  'a known %s directory tombstone never enters plugin file staging',
-  async (known) => {
+it.each([
+  ['installed', false],
+  ['incoming', false],
+  ['installed', true],
+  ['incoming', true],
+] as const)(
+  'a known %s directory tombstone never enters plugin file staging (excluded=%s)',
+  async (known, excluded) => {
     const fs = new MemoryFileSystem(),
       state = new MemoryStateStore()
     const path = '.obsidian/plugins/example/assets'
@@ -58,7 +63,7 @@ it.each(['installed', 'incoming'] as const)(
               }),
       }
     )
-    await client.prepare(fs, state, () => false, undefined, true)
+    await client.prepare(fs, state, () => excluded, undefined, true)
     const staged = new StagedChanges(state)
     await pull(client, fs, state, {
       expected: new ExpectedWrites(),
@@ -70,6 +75,12 @@ it.each(['installed', 'incoming'] as const)(
     expect(await staged.list()).toEqual([])
     expect(await state.getCursor()).toBe(2)
     const doc = JSON.parse((await state.getMeta('v2-directories'))!)
+    if (excluded) {
+      expect(doc.directories).toHaveLength(known === 'installed' ? 1 : 0)
+      expect(doc.incoming).toHaveLength(known === 'incoming' ? 1 : 0)
+      expect(doc.removals).toEqual([])
+      return
+    }
     expect(doc.directories).toEqual([])
     expect(doc.incoming).toEqual([])
     expect(doc.removals).toHaveLength(known === 'installed' ? 1 : 0)

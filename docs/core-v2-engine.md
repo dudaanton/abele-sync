@@ -377,7 +377,13 @@ of a differently spelled foreign file.
 
 An unresolved directory hold remains durable until positive evidence resolves it.
 Directory departures and queued empty-directory cleanup respect the current
-exclusion predicate. An excluded directory stays on disk and is not reported as
+user exclusion predicate independently of connection membership or durable departure
+bookkeeping. A known directory tombstone remains a directory event even when an
+exclusion prevents its departure; it must never enter plugin file staging.
+Pull/directory gate selections must include `feedTombstones.test.ts` and
+`directoryDepartureCleanup.test.ts`, including their restart and exclusion cases.
+
+An excluded directory stays on disk and is not reported as
 departed; its existing ledger/removal evidence remains available if scope widens.
 Normalization collisions, scope filtering, or disappearance of the candidate's name,
 inode and child spelling never prove deletion. Such a hold cannot emit a recursive

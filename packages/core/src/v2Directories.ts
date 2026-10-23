@@ -177,7 +177,9 @@ export class V2Directories {
     private readonly state: StateStore,
     private readonly includes: (path: string) => boolean,
     private readonly commit: (ops: V2CommitOp[], key: string) => Promise<CommitOpResult[]>,
-    private readonly signal?: AbortSignal
+    private readonly signal?: AbortSignal,
+    // Cleanup is governed by user exclusions, not live scope/departure membership.
+    private readonly cleanupIncludes: (path: string) => boolean = includes
   ) {}
   private async read(): Promise<Document> {
     const raw = await this.state.getMeta!(KEY)
@@ -291,11 +293,22 @@ export class V2Directories {
     doc.incoming = (doc.incoming ?? []).filter((d) => d.file_id !== item.file_id)
     await this.save(doc)
   }
+  async knows(fileId: string): Promise<boolean> {
+    const doc = await this.read()
+    return (
+      doc.directories.some((directory) => directory.file_id === fileId) ||
+      (doc.incoming?.some((item) => item.file_id === fileId && item.kind === 'directory') ?? false)
+    )
+  }
   async departed(fileId: string, keep = false) {
     const doc = await this.read()
     const waiting = doc.incoming?.find((item) => item.file_id === fileId)
     const old = doc.directories.find((d) => d.file_id === fileId)
-    if ((waiting && !this.includes(waiting.path)) || (old && !this.includes(old.path))) return false
+    if (
+      (waiting && !this.cleanupIncludes(waiting.path)) ||
+      (old && (!this.cleanupIncludes(old.path) || !this.cleanupIncludes(old.localPath ?? old.path)))
+    )
+      return false
     if (waiting?.kind === 'directory')
       doc.refused = doc.refused?.filter((item) => item.path !== waiting.path)
     doc.incoming = (doc.incoming ?? []).filter((d) => d.file_id !== fileId)
@@ -323,7 +336,10 @@ export class V2Directories {
     )) {
       this.signal?.throwIfAborted()
       const path = localPath(removal)
-      if (!this.includes(path) || (typeof removal !== 'string' && !this.includes(removal.path)))
+      if (
+        !this.cleanupIncludes(path) ||
+        (typeof removal !== 'string' && !this.cleanupIncludes(removal.path))
+      )
         continue
       // Legacy cleanup lacks identity evidence. Preserve it for review rather than
       // deleting whatever now occupies the spelling after an upgrade.

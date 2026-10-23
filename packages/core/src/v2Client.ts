@@ -134,7 +134,8 @@ export class V2EngineClient implements EngineClient {
         return (await this.http.decode(V2CommitResponseSchema, response, 'POST', '/v2/commit'))
           .results
       },
-      signal
+      signal,
+      (path) => !excludeDirectory(path)
     )
   }
 
@@ -446,7 +447,10 @@ export class V2EngineClient implements EngineClient {
         if (!entry) {
           // Directory departure owns its cleanup; only unknown/file identities
           // need a tombstone in the file feed before their ledger entry exists.
-          if (await this.directories?.departed(event.file_id)) continue
+          if (await this.directories?.knows(event.file_id)) {
+            await this.directories!.departed(event.file_id)
+            continue
+          }
         }
         items.push({
           seq: event.cursor,
