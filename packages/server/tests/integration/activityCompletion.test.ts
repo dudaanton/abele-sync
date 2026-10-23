@@ -1,4 +1,7 @@
 import Fastify from 'fastify'
+import websocket from '@fastify/websocket'
+import { once } from 'node:events'
+import { type ServerResponse } from 'node:http'
 import { PassThrough, Readable } from 'node:stream'
 import { describe, expect, it, vi } from 'vitest'
 import { registerActivity } from '../../src/history/activity.js'
@@ -7,6 +10,80 @@ import { hasPgTestDb } from '../helpers/tempDb.js'
 
 for (const dialect of ['sqlite', 'pg'] as const)
   describe.skipIf(dialect === 'pg' && !hasPgTestDb)(`transfer completion (${dialect})`, () => {
+    it('does not wait for the abandoned HTTP response after a WebSocket upgrade', async () => {
+      const f = await tokenFixture(dialect)
+      const app = Fastify()
+      await app.register(websocket)
+      let response!: ServerResponse
+      app.addHook('onRequest', async (request, reply) => {
+        if (!request.ws) return
+        response = reply.raw
+        // Ownership transfers to the WebSocket. Its HTTP response need not
+        // receive a close event when the upgraded transport closes.
+        response.detachSocket(response.socket!)
+      })
+      registerActivity(app, {
+        db: f.t.db,
+        config: f.t.config,
+        store: f.t.store,
+        hub: f.t.hub,
+        dialect,
+      })
+      app.get('/events', { websocket: true }, (socket) => socket.send('ready'))
+      try {
+        await app.ready()
+        const socket = await app.injectWS('/events')
+        const closed = once(socket, 'close')
+        socket.terminate()
+        await closed
+        expect(response.closed).toBe(false)
+        expect(response.listenerCount('close')).toBe(0)
+        await app.close()
+      } finally {
+        response?.emit('close')
+        await app.close()
+        await f.close()
+      }
+    })
+    it('does not wait for a response that closed before the activity hook ran', async () => {
+      const f = await tokenFixture(dialect)
+      const app = Fastify()
+      let response!: ServerResponse
+      let checked!: () => void
+      const activityReached = new Promise<void>((resolve) => {
+        checked = resolve
+      })
+      app.addHook('onRequest', async (_request, reply) => {
+        response = reply.raw
+        const closed = once(response, 'close')
+        response.destroy()
+        await closed
+      })
+      registerActivity(app, {
+        db: f.t.db,
+        config: f.t.config,
+        store: f.t.store,
+        hub: f.t.hub,
+        dialect,
+      })
+      app.addHook('onRequest', async () => checked())
+      app.get('/closed', () => 'not delivered')
+      try {
+        const address = await app.listen({ host: '127.0.0.1', port: 0 })
+        await expect(fetch(address + '/closed')).rejects.toBeInstanceOf(Error)
+        await activityReached
+        expect(response.closed).toBe(true)
+        // A listener added after close can never release the shutdown drain.
+        expect(response.listenerCount('close')).toBe(0)
+        await app.close()
+      } finally {
+        // Release the old implementation's stranded drain after the red assertion.
+        response?.emit('close')
+        app.server.closeAllConnections()
+        await app.close()
+        await f.close()
+      }
+    })
     it('excludes aborted streams, HEADs and errors while counting completed downloads once', async () => {
       const f = await tokenFixture(dialect)
       const app = Fastify()

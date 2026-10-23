@@ -203,6 +203,10 @@ export function registerActivity(app: FastifyInstance, deps: AppDeps) {
   }
   app.addHook('onRequest', async (request, reply) => {
     const raw = reply.raw
+    // An upgrade hands transport ownership to WebSocket, not this HTTP response.
+    // Earlier async hooks may also have closed an ordinary response already.
+    // Neither can supply a future response-close event for the shutdown drain.
+    if (request.ws || raw.closed || raw.destroyed) return
     // Decide on 'close', which every response emits exactly once, after 'finish'
     // when there is one. Fastify's onResponse runs only on 'finish' or 'error':
     // it also runs for failed responses, and never for one closed before end().
