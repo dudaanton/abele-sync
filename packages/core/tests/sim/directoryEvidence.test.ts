@@ -174,6 +174,14 @@ it.each([191, 192, 193, 194])(
           // prove local deletion of the remote subtree. Remember its candidate path.
           identities.set(local, `replacement-${name}`)
           await observe(true)
+          const again = local + '-again'
+          identities.set(again, identities.get(local)!)
+          identities.delete(local)
+          await fs.moveDirectory(local, again)
+          origins.delete(local)
+          origins.set(again, 'original')
+          local = again
+          await observe(true)
         }
         if (seed % 2 === 0) {
           // Recreating the old name must not overwrite the held source's identity
@@ -227,6 +235,7 @@ it.each([191, 192, 193, 194])(
       return points
     }
     const points = await execute()
+    console.info(`directory model seed ${seed}: ${points.length} crash cuts`)
     for (const cut of points) await execute(cut)
   },
   20000

@@ -34,6 +34,7 @@ const DocumentSchema = z
             direction: z.enum(['push', 'pull']),
             evidence: z.literal(true).optional(),
             source: PathSchema.optional(),
+            candidateIdentity: z.string().min(1).optional(),
           })
           .strict()
       )
@@ -90,6 +91,7 @@ export interface DirectoryRefusal extends Refusal {
   /** Recomputed on every directory scan, unlike an explicit server refusal. */
   evidence?: true
   source?: string
+  candidateIdentity?: string
 }
 
 /** Scanner protection shares the same durable image as the directory decision. */
@@ -464,8 +466,13 @@ export class V2Directories {
       candidates.add(row.path)
       previousCandidates.set(row.source, candidates)
     }
+    const wasCandidate = (source: string, dir: (typeof local)[number]) =>
+      previousCandidates.get(source)?.has(wirePath(dir.path)) ||
+      previousEvidence.some(
+        (row) => row.source === source && row.candidateIdentity === dir.identity
+      )
     const hasPreviousCandidate = (source: string) =>
-      local.some((dir) => previousCandidates.get(source)?.has(wirePath(dir.path)))
+      local.some((dir) => wirePath(dir.path) !== source && wasCandidate(source, dir))
     for (const old of doc.directories) {
       const current = local.find((l) => wirePath(l.path) === old.path)
       if (current) {
@@ -504,7 +511,7 @@ export class V2Directories {
       const candidates = local.filter(
         (l) =>
           wirePath(l.path) !== old.path &&
-          (l.identity === old.identity || previousCandidates.get(old.path)?.has(wirePath(l.path)))
+          (l.identity === old.identity || wasCandidate(old.path, l))
       )
       const children = entries.filter((child) => child.wirePath.startsWith(old.path + '/'))
       const empty =
@@ -539,6 +546,7 @@ export class V2Directories {
             {
               path,
               source: old.path,
+              candidateIdentity: candidates.find((dir) => wirePath(dir.path) === path)?.identity,
               code: 'conflict',
               message: 'directory move evidence is ambiguous; old and candidate subtrees are held',
               direction: 'push',

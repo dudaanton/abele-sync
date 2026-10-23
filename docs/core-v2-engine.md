@@ -78,7 +78,10 @@ need directory ports:
   corroboration is ambiguous. A durable, visible refusal protects both the old
   subtree and every candidate subtree: file and directory scans emit no creates,
   moves or deletes within either side. Candidates cannot acquire fresh identities
-  while held. Every directory scan re-evaluates these evidence holds, independently
+  while held. Save both candidate paths and their observed object identities so
+  inode replacement or another rename cannot silently release a held subtree.
+  Replacing a resolved hold with its move journal is one durable publication.
+  Every directory scan re-evaluates these evidence holds, independently
   of explicit retries for server refusals. Restoring a known child's bytes can
   therefore resolve a hold into a move; passage of time cannot authorize deletion.
   Empty directories have no tracked children to endanger: a unique rename,
