@@ -674,15 +674,19 @@ export class PullPlacer {
         null,
         stage
       )
-      if (!remembered)
-        await this.pending.retain(change.file_id, this.opts.heldStageLimits, this.opts.log)
+      if (
+        !remembered &&
+        !(await this.pending.retain(change.file_id, this.opts.heldStageLimits, this.opts.log))
+      )
+        await stage.discard()
       return remembered
     } catch (error) {
       this.opts.expected.clear(target)
       if (!this.inTheWay(error)) throw error
-      if (sealed)
-        await this.pending.retain(change.file_id, this.opts.heldStageLimits, this.opts.log)
-      else {
+      if (
+        !sealed ||
+        !(await this.pending.retain(change.file_id, this.opts.heldStageLimits, this.opts.log))
+      ) {
         await stage.discard()
         await this.pending.clear(change.file_id)
       }

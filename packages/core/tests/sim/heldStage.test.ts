@@ -112,60 +112,68 @@ it('retains verified refused bytes and exact intent through every crash and reso
   for (const cut of await execute()) await execute(cut)
 }, 20000)
 
-it('keeps a save made after sealing visible to scan while recovery retains the incoming bytes', async () => {
-  const scheduler = new SimScheduler(182),
-    fs = new MemoryStreamingFS(scheduler),
-    state = new DurableStateStore(scheduler)
-  const bytes = new TextEncoder().encode('incoming'),
-    local = new TextEncoder().encode('my edits'),
-    sha = await sha256(bytes)
-  const begin = fs.beginAtomicWrite.bind(fs)
-  fs.beginAtomicWrite = async (...args) => {
-    const stage = await begin(...args),
-      seal = stage.seal.bind(stage)
-    stage.seal = async (identity) => {
-      await seal(identity)
-      await fs.writeAtomic('a.bin', local, 1)
+it.each([true, false])(
+  'keeps a save visible and retains only durably owned bytes (metadata=%s)',
+  async (metadata) => {
+    const scheduler = new SimScheduler(182),
+      fs = new MemoryStreamingFS(scheduler),
+      state = new DurableStateStore(scheduler)
+    if (!metadata) {
+      Object.defineProperty(state, 'getMeta', { value: undefined })
+      Object.defineProperty(state, 'setMeta', { value: undefined })
     }
-    return stage
-  }
-  const client = {
-    openVersion: async () => ({
+    const bytes = new TextEncoder().encode('incoming'),
+      local = new TextEncoder().encode('my edits'),
+      sha = await sha256(bytes)
+    const begin = fs.beginAtomicWrite.bind(fs)
+    fs.beginAtomicWrite = async (...args) => {
+      const stage = await begin(...args),
+        seal = stage.seal.bind(stage)
+      stage.seal = async (identity) => {
+        await seal(identity)
+        await fs.writeAtomic('a.bin', local, 1)
+      }
+      return stage
+    }
+    const client = {
+      openVersion: async () => ({
+        size: bytes.length,
+        read: async (at: number, length: number) => bytes.slice(at, at + length),
+        assertUnchanged: async () => {},
+        close: async () => {},
+      }),
+    } as unknown as EngineClient
+    const change: ChangeItem = {
+      seq: 1,
+      file_id: 'f',
+      version_id: 'v',
+      path: 'a.bin',
+      prev_path: null,
+      op: 'create',
+      kind: 'attachment',
+      sha,
       size: bytes.length,
-      read: async (at: number, length: number) => bytes.slice(at, at + length),
-      assertUnchanged: async () => {},
-      close: async () => {},
-    }),
-  } as unknown as EngineClient
-  const change: ChangeItem = {
-    seq: 1,
-    file_id: 'f',
-    version_id: 'v',
-    path: 'a.bin',
-    prev_path: null,
-    op: 'create',
-    kind: 'attachment',
-    sha,
-    size: bytes.length,
-    mtime: 1,
-    actor: { kind: 'system', id: 's', name: 's' },
-    at: '',
+      mtime: 1,
+      actor: { kind: 'system', id: 's', name: 's' },
+      at: '',
+    }
+    expect(
+      (
+        await applyStaged(client, fs, state, [change], {
+          dirty: new Set(),
+          expected: new ExpectedWrites(),
+          filter: { excluded: () => false },
+          prefetchBytes: 0,
+        })
+      ).held
+    ).toHaveLength(1)
+    const { recoverPendingPullWrites, scan } = await import('../../src/index.js')
+    await recoverPendingPullWrites(fs, state, ['f'], client)
+    expect(fs.snapshot().get('a.bin')).toEqual(local)
+    if (metadata) expect([...fs.stages.values()][0]).toMatchObject({ bytes, sealed: true })
+    else expect(fs.stages.size).toBe(0)
+    expect((await scan(fs, state, { excluded: () => false })).ops).toMatchObject([
+      { op: 'create', path: 'a.bin', sha: await sha256(local) },
+    ])
   }
-  expect(
-    (
-      await applyStaged(client, fs, state, [change], {
-        dirty: new Set(),
-        expected: new ExpectedWrites(),
-        filter: { excluded: () => false },
-        prefetchBytes: 0,
-      })
-    ).held
-  ).toHaveLength(1)
-  const { recoverPendingPullWrites, scan } = await import('../../src/index.js')
-  await recoverPendingPullWrites(fs, state, ['f'], client)
-  expect(fs.snapshot().get('a.bin')).toEqual(local)
-  expect([...fs.stages.values()][0]).toMatchObject({ bytes, sealed: true })
-  expect((await scan(fs, state, { excluded: () => false })).ops).toMatchObject([
-    { op: 'create', path: 'a.bin', sha: await sha256(local) },
-  ])
-})
+)

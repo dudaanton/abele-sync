@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { ChangeItem } from '@abele/sync-protocol'
 import { PendingPullWrites } from '../../src/pullWrite.js'
 import { MemoryStateStore, type StateEntry } from '../../src/state.js'
+import { MemoryFileSystem } from '../../src/fs.js'
 
 const base: StateEntry = {
   path: 'note.md',
@@ -28,6 +29,21 @@ const change: ChangeItem = {
 }
 
 describe('pending pull write authority', () => {
+  it('retires the receipt with its superseded intent and never leaves unowned evidence', async () => {
+    const state = new MemoryStateStore(),
+      fs = new MemoryFileSystem()
+    const discarded: string[] = []
+    fs.discardInstallation = async (id) => {
+      discarded.push(id)
+    }
+    const writes = new PendingPullWrites(state, fs)
+    await writes.prepare(change, base, 'note.md', null, undefined, 'receipt')
+    await writes.superseded({ ...change, seq: 3, version_id: 'newer' })
+    expect(discarded).toEqual(['receipt'])
+    expect(await state.getMeta('pull-write:file')).toBeNull()
+    await writes.superseded({ ...change, seq: 3, version_id: 'newer' })
+    expect(discarded).toEqual(['receipt'])
+  })
   it('records the preparing host claim and does not retroactively reattribute an existing intent', async () => {
     let owner = 'original-claim'
     const state = Object.assign(new MemoryStateStore(), { effectOwner: () => owner })

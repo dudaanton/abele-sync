@@ -130,6 +130,7 @@ export class PendingPullWrites {
       JSON.stringify({ ...pending, retiring: true })
     )
     if (pending.stageId) await discardPullStage(this.fs, pending.stageId)
+    if (pending.receiptId) await this.fs.discardInstallation?.(pending.receiptId)
     await this.clear(pending.fileId)
   }
 
@@ -149,15 +150,15 @@ export class PendingPullWrites {
     fileId: string,
     limits?: { count: number; bytes: number },
     log?: (message: string) => void
-  ): Promise<void> {
+  ): Promise<boolean> {
     const pending = await this.read(fileId)
-    if (!pending?.stageId) return
+    if (!pending?.stageId) return false
     const held: PendingPullWrite[] = []
     // Enumeration is required to bound retention across process restarts.
     if (!this.state.metadataKeys) {
       log?.(`pull: evicting held stage ${pending.wirePath}: host cannot enumerate owned stages`)
       await this.retire(pending)
-      return
+      return true
     }
     for (const key of await this.state.metadataKeys('pull-write:')) {
       const saved = await this.read(key.slice('pull-write:'.length))
@@ -181,6 +182,7 @@ export class PendingPullWrites {
       await this.retire(oldest)
       bytes -= oldest.size ?? 0
     }
+    return true
   }
 
   private async read(fileId: string): Promise<PendingPullWrite | null> {
