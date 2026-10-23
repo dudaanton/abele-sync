@@ -394,6 +394,11 @@ Directory departures and queued empty-directory cleanup respect the current
 user exclusion predicate independently of connection membership or durable departure
 bookkeeping. A known directory tombstone remains a directory event even when an
 exclusion prevents its departure; it must never enter plugin file staging.
+Directory departure publishes a replay marker (file ID and feed sequence) in
+the same document write that removes its installed/incoming record. These markers
+outlive physical cleanup and are collected only after the durable pull cursor
+has consumed their sequence. This also covers incoming-only directories with no
+local removal record. Collection persists with the next directory document write.
 Pull/directory gate selections must include `feedTombstones.test.ts` and
 `directoryDepartureCleanup.test.ts`, including their restart and exclusion cases.
 

@@ -418,7 +418,7 @@ export class V2EngineClient implements EngineClient {
               'v2-authored-departures',
               JSON.stringify([...this.authoredDepartures])
             )
-          await this.directories?.departed(event.file_id, retain)
+          await this.directories?.departed(event.file_id, retain, event.cursor)
           this.departed.add(event.path)
           if (this.ports)
             await this.ports.state.setMeta!('v2-departures', JSON.stringify([...this.departed]))
@@ -448,7 +448,7 @@ export class V2EngineClient implements EngineClient {
           // Directory departure owns its cleanup; only unknown/file identities
           // need a tombstone in the file feed before their ledger entry exists.
           if (await this.directories?.knows(event.file_id)) {
-            await this.directories!.departed(event.file_id)
+            await this.directories!.departed(event.file_id, false, event.cursor)
             continue
           }
         }

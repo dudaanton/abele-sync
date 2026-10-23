@@ -92,6 +92,11 @@ file/content version effects for first-upload traces (I11). Content transport
 records byte totals by SHA for streaming `openVersion` requests. Delete holds
 are explicitly confirmed only when the model records a local deletion/move.
 
+`directoryTombstoneReplay.test.ts` explores every scheduled cut through directory
+feed classification, cleanup and cursor persistence, for installed and incoming-only
+directories. Restart must not stage their tombstone as a file; classification
+survives completed physical cleanup and ends only after durable cursor consumption.
+
 Limits of this slice: one engine plus a remote v2 writer per generated trace;
 no host UI, notices, SQLite client state, real process SIGKILL, case-insensitive
 disk, virtual deadline timers, scope/token/restore-generation mutations or

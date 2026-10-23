@@ -6,13 +6,15 @@ import { ExpectedWrites } from '../../src/echo.js'
 import { StagedChanges } from '../../src/defer.js'
 
 it.each([
-  ['installed', false],
-  ['incoming', false],
-  ['installed', true],
-  ['incoming', true],
+  ['installed', false, false],
+  ['incoming', false, false],
+  ['installed', true, false],
+  ['incoming', true, false],
+  ['installed', false, true],
+  ['incoming', false, true],
 ] as const)(
-  'a known %s directory tombstone never enters plugin file staging (excluded=%s)',
-  async (known, excluded) => {
+  'a known %s directory tombstone never enters plugin file staging (excluded=%s, restart=%s)',
+  async (known, excluded, restart) => {
     const fs = new MemoryFileSystem(),
       state = new MemoryStateStore()
     const path = '.obsidian/plugins/example/assets'
@@ -34,36 +36,44 @@ it.each([
       })
     )
     const scope = { kind: 'folder' as const, id: 'root', path: 'Root' }
-    const client = new V2EngineClient(
-      encodeAccessToken({ v: 1, address: 'https://example.test', key: 'k'.repeat(43), scope }),
-      {
-        fetch: async (url) =>
-          new URL(String(url)).pathname === '/v2/connection'
-            ? Response.json({
-                protocol: 2,
-                token_id: 'token',
-                space_id: 'space',
-                scope,
-                status: 'active',
-                limits: { max_file_bytes: 10000, quota_bytes: null },
-              })
-            : Response.json({
-                items: [
-                  {
-                    type: 'delete',
-                    file_id: directory.file_id,
-                    path,
-                    version_id: 'deleted',
-                    cursor: 2,
-                    at: '2026-01-01T00:00:00.000Z',
-                  },
-                ],
-                cursor: 2,
-                next: null,
-              }),
-      }
-    )
+    const makeClient = () =>
+      new V2EngineClient(
+        encodeAccessToken({ v: 1, address: 'https://example.test', key: 'k'.repeat(43), scope }),
+        {
+          fetch: async (url) =>
+            new URL(String(url)).pathname === '/v2/connection'
+              ? Response.json({
+                  protocol: 2,
+                  token_id: 'token',
+                  space_id: 'space',
+                  scope,
+                  status: 'active',
+                  limits: { max_file_bytes: 10000, quota_bytes: null },
+                })
+              : Response.json({
+                  items: [
+                    {
+                      type: 'delete',
+                      file_id: directory.file_id,
+                      path,
+                      version_id: 'deleted',
+                      cursor: 2,
+                      at: '2026-01-01T00:00:00.000Z',
+                    },
+                  ],
+                  cursor: 2,
+                  next: null,
+                }),
+        }
+      )
+    let client = makeClient()
     await client.prepare(fs, state, () => excluded, undefined, true)
+    if (restart) {
+      await client.changes(1)
+      expect(await state.getCursor()).toBe(1)
+      client = makeClient()
+      await client.prepare(fs, state, () => excluded, undefined, true)
+    }
     const staged = new StagedChanges(state)
     await pull(client, fs, state, {
       expected: new ExpectedWrites(),

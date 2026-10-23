@@ -25,6 +25,16 @@ const DocumentSchema = z
   .object({
     schemaVersion: z.literal(2).optional(),
     incoming: z.array(V2ManifestItemSchema).optional(),
+    tombstones: z
+      .array(
+        z
+          .object({
+            fileId: z.string().min(1),
+            seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+          })
+          .strict()
+      )
+      .optional(),
     refused: z
       .array(
         z
@@ -80,6 +90,7 @@ interface LocalDirectory extends DirectoryItem {
 interface Document {
   schemaVersion?: 2
   incoming?: V2ManifestItem[]
+  tombstones?: Array<{ fileId: string; seq: number }>
   refused?: DirectoryRefusal[]
   directories: LocalDirectory[]
   pending?: { key: string; op: V2CommitOp; identity: string; localPath?: string }
@@ -193,6 +204,11 @@ export class V2Directories {
   private async read(): Promise<Document> {
     const raw = await this.state.getMeta!(KEY)
     const doc = raw === null ? { directories: [], removals: [] } : await parseDocument(raw)
+    if (doc.tombstones?.length) {
+      const cursor = await this.state.getCursor()
+      doc.tombstones = doc.tombstones.filter((row) => row.seq > cursor)
+      if (!doc.tombstones.length) delete doc.tombstones
+    }
     this.indexRefusals(doc.refused ?? [])
     return doc
   }
@@ -306,10 +322,11 @@ export class V2Directories {
     const doc = await this.read()
     return (
       doc.directories.some((directory) => directory.file_id === fileId) ||
+      (doc.tombstones?.some((row) => row.fileId === fileId) ?? false) ||
       (doc.incoming?.some((item) => item.file_id === fileId && item.kind === 'directory') ?? false)
     )
   }
-  async departed(fileId: string, keep = false) {
+  async departed(fileId: string, keep = false, seq?: number) {
     const doc = await this.read()
     const waiting = doc.incoming?.find((item) => item.file_id === fileId)
     const old = doc.directories.find((d) => d.file_id === fileId)
@@ -318,6 +335,14 @@ export class V2Directories {
       (old && (!this.cleanupIncludes(old.path) || !this.cleanupIncludes(old.localPath ?? old.path)))
     )
       return false
+    // Classification and removal ownership must be published together. Cleanup
+    // may finish before the feed cursor, including for incoming-only directories.
+    if (seq !== undefined && (old || waiting?.kind === 'directory')) {
+      doc.tombstones = [
+        ...(doc.tombstones ?? []).filter((row) => row.fileId !== fileId),
+        { fileId, seq },
+      ]
+    }
     if (waiting?.kind === 'directory')
       doc.refused = doc.refused?.filter((item) => item.path !== waiting.path)
     doc.incoming = (doc.incoming ?? []).filter((d) => d.file_id !== fileId)
