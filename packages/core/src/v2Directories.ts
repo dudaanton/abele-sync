@@ -541,15 +541,15 @@ export class V2Directories {
         for (const match of localByIdentity.get(row.candidateIdentity ?? '') ?? [])
           nominated.add(match)
       }
-      if (current) nominated.delete(current)
-      if (!nominated.size) {
-        for (const child of childrenByParent.get(old.path) ?? []) {
-          for (const path of suffixParents.get(child.wirePath.slice(old.path.length)) ?? []) {
-            const dir = localByPath.get(path)!
-            if (path !== old.path && trackedByPath.get(path)?.identity !== dir.identity)
-              nominated.add(dir)
-            await work.step()
-          }
+      if (current) nominated.add(current)
+      // Saved nominations are hints. Fresh relative-child evidence must be
+      // considered even when an old candidate is still visible.
+      for (const child of childrenByParent.get(old.path) ?? []) {
+        for (const path of suffixParents.get(child.wirePath.slice(old.path.length)) ?? []) {
+          const dir = localByPath.get(path)!
+          if (path !== old.path && trackedByPath.get(path)?.identity !== dir.identity)
+            nominated.add(dir)
+          await work.step()
         }
       }
       // With all hints lost we cannot identify which untracked subtree owns
@@ -591,10 +591,17 @@ export class V2Directories {
       const children = childrenByParent.get(old.path) ?? []
       const empty = children.length === 0 && !directoryParents.has(old.path)
       let moved: (typeof local)[number] | undefined
-      if (candidates.length === 1 && !trackedByPath.has(wirePath(candidates[0]!.path))) {
-        const candidate = candidates[0]!
-        if (empty) moved = candidate
+      const corroborated: typeof candidates = []
+      for (const candidate of candidates) {
+        await work.step()
+        const tracked = trackedByPath.get(wirePath(candidate.path))
+        if (tracked && tracked.file_id !== old.file_id) continue
+        if (empty && candidates.length === 1) {
+          corroborated.push(candidate)
+          continue
+        }
         for (const child of children) {
+          await work.step()
           const target = wirePath(candidate.path) + child.wirePath.slice(old.path.length)
           if (inventory.blocked(target)) continue
           const path = inventory.resolve(target, 'file')
@@ -603,11 +610,12 @@ export class V2Directories {
           const found = await fingerprintFile(this.fs, path, sha256)
           const after = await this.fs.stat(path)
           if (found.sha === child.sha && after?.size === here.size && after.mtime === here.mtime) {
-            moved = candidate
+            corroborated.push(candidate)
             break
           }
         }
       }
+      if (corroborated.length === 1) moved = corroborated[0]
       // Never reinterpret an ambiguous move as recursive deletion. In
       // particular, replacement of an occupied remote identity needs resolution.
       if (!moved && ((candidates.length > 0 && !empty) || evidenceBySource.has(old.path))) {
@@ -649,6 +657,14 @@ export class V2Directories {
       if (blockedTree(old.path) || (moved && blockedTree(moved.path))) {
         doc.refused = retained
         this.indexRefusals(doc.refused ?? [])
+        continue
+      }
+      if (moved && wirePath(moved.path) === old.path) {
+        // Returning the verified tree resolves locally. Persist its baseline
+        // and removal of every source nomination together, without a wire move.
+        old.localPath = moved.path
+        old.identity = moved.identity
+        await this.save(doc)
         continue
       }
       // A widened/reset scope needs its snapshot before absence is a deletion.

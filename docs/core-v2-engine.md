@@ -343,3 +343,18 @@ paint and process input while large scans run.
 A stable directory scan reuses one metadata image. Large directory documents validate
 rows in yielding chunks; repeated cold schema parses must not precede the first host
 checkpoint. Incoming work still reloads its updated durable image before planning.
+
+Every scan re-derives directory candidates from current inode, path and relative-child
+evidence. Persisted nominations are protective hints, never an exclusive candidate
+list. The original path is always eligible for content corroboration. Check all
+eligible candidates: exactly one corroborated tree resolves the hold within that
+scan, even when unrelated fallback nominations remain. Multiple corroborated trees
+remain held. Returning the corroborated tree to its original spelling clears the
+hold and refreshes its local identity in one durable save, without a server move.
+A move elsewhere replaces the hold with its durable move journal as before.
+
+User resolution preserves the same safety rule: restore tracked content at the
+chosen tree (or move it back), remove competing matching copies, then call
+SyncEngine.retryNow() or rescan(). These public actions re-scan directory evidence;
+they do not blindly clear an evidence hold. No force-delete/force-adopt API is
+implied by retry.

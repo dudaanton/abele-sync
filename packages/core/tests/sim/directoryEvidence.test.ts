@@ -73,7 +73,20 @@ describe.each([191, 192, 193, 194])(
         if (receipts.has(key)) return receipts.get(key)!
         const results: CommitOpResult[] = []
         for (const op of ops) {
-          expect(op.op).not.toBe('mkdir') // no candidate may gain a fresh identity
+          if (op.op === 'mkdir' && op.path === 'unrelated-folder') {
+            results.push({
+              status: 'applied',
+              file_id: 'unrelated-directory',
+              version_id: 'other-v1',
+              path: op.path,
+              seq,
+              sha: null,
+              size: 0,
+              mtime: 1,
+            })
+            continue
+          }
+          expect(op.op).not.toBe('mkdir') // no real candidate may gain a fresh identity
           if (op.op !== 'move_directory' && op.op !== 'delete_directory')
             throw new Error('unexpected op')
           expect(op.file_id).toBe('directory')
@@ -141,6 +154,9 @@ describe.each([191, 192, 193, 194])(
         scheduler.cut = cut
         try {
           await run()
+          // A per-file observation may catch an I/O error; process death still
+          // invalidates the fixture even if that was the final scan boundary.
+          scheduler.fence(fs.epoch)
         } catch (error) {
           if (!(error instanceof EpochError) || !cut) throw error
           scheduler.cut = undefined
@@ -175,9 +191,28 @@ describe.each([191, 192, 193, 194])(
       origins.set(local, 'original')
       identities.set(local, 'unobserved-object')
       await fs.move(local + '/child.md', local + '/renamed.md')
+      await fs.mkdir('unrelated-folder')
+      identities.set('unrelated-folder', 'unrelated-inode')
+      origins.set('unrelated-folder', 'unrelated')
       await observe(true)
       await fs.move(local + '/renamed.md', local + '/child.md')
       await fs.writeAtomic(local + '/child.md', bytes, 4)
+      await observe(false)
+      // D-197: the user can undo an ambiguous rename and restore its content.
+      // A single scan must release the hold without a redundant server move.
+      const originalPath = local
+      await fs.moveDirectory(local, 'temporary')
+      origins.delete(local)
+      local = 'temporary'
+      origins.set(local, 'original')
+      identities.set(local, identities.get(originalPath)!)
+      await fs.writeAtomic(local + '/child.md', new Uint8Array([8, 8, 8]), 5)
+      await observe(true)
+      await fs.moveDirectory(local, originalPath)
+      origins.delete(local)
+      local = originalPath
+      origins.set(local, 'original')
+      await fs.writeAtomic(local + '/child.md', bytes, 6)
       await observe(false)
       for (const name of names) {
         const from = local
