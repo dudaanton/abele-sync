@@ -35,6 +35,7 @@ const sameEntry = (a: StateEntry | null, b: StateEntry | null): boolean =>
 
 /** A store without durable metadata cannot prove a previous process's write; never infer it. */
 export class PendingPullWrites {
+  private decisionIndex?: { image: string | null; versions: Set<string> }
   constructor(
     private readonly state: StateStore,
     private readonly fs?: FileSystem,
@@ -200,13 +201,17 @@ export class PendingPullWrites {
     if (!this.state.getMeta || !this.state.setMeta) return
     const pending = await this.read(change.file_id)
     if (pending?.versionId !== change.version_id) {
-      const filed = parse(await this.state.getMeta(DEFERRED_KEY))
-      if (
-        !filed.staged.some(
-          (one) =>
-            one.change.file_id === change.file_id && one.change.version_id === change.version_id
-        )
-      )
+      const image = await this.state.getMeta(DEFERRED_KEY)
+      if (this.decisionIndex?.image !== image)
+        this.decisionIndex = {
+          image,
+          versions: new Set(
+            parse(image).staged.map((one) =>
+              JSON.stringify([one.change.file_id, one.change.version_id])
+            )
+          ),
+        }
+      if (!this.decisionIndex.versions.has(JSON.stringify([change.file_id, change.version_id])))
         return
     }
     await this.retireDecisions([change])

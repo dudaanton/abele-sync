@@ -374,6 +374,35 @@ it('an excluded old replay cannot retire a newer held decision', async () => {
   expect(f.removals.get(id)).toBe(1)
 })
 
+it('excluded ownership lookup parses unchanged metadata once and refreshes changed owners', async () => {
+  const f = await fixture(196),
+    pending = new PendingPullWrites(f.state, f.fs)
+  await f.staging().stage(
+    Array.from({ length: 200 }, (_, n) => ({
+      change: f.change(`deferred-${n}`),
+      base: null,
+    }))
+  )
+  const image = await f.state.getMeta('deferred-changes')
+  const parse = JSON.parse
+  let reads = 0
+  JSON.parse = (raw, ...args) => {
+    if (raw === image) reads++
+    return parse(raw, ...args)
+  }
+  try {
+    for (let n = 0; n < 100; n++) await pending.retireDecision(f.change(`excluded-${n}`))
+  } finally {
+    JSON.parse = parse
+  }
+  expect(reads).toBe(1)
+  expect(await f.staging().list()).toHaveLength(200)
+  await f.staging().stage([{ change: f.change('new-owner'), base: null }])
+  await pending.retireDecision(f.change('new-owner'))
+  expect(await f.staging().list()).toHaveLength(200)
+  expect((await f.staging().list()).some((change) => change.file_id === 'new-owner')).toBe(false)
+})
+
 it('byte-limit eviction keeps the unresolved decision retryable', async () => {
   const f = await fixture(192),
     id = await f.retain('a')
