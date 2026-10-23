@@ -192,11 +192,14 @@ describe('Adversarial: real daemon SIGKILL, local files and SQLite state', () =>
           const client = clientFor(a)
           const initial = (await client.manifest(null)).items[0]!
           const pull = cut.startsWith('pull-')
-          await write(pull ? a : b, 'note.md', 'edited before SIGKILL\n')
+          // These cuts exercise actual streaming, not the bounded small-file lane.
+          const streamed = ['pull-write', 'pull-append', 'pull-seal'].includes(cut)
+          const edited = 'edited before SIGKILL\n' + (streamed ? 'x'.repeat(2 * 1024 * 1024) : '')
+          await write(pull ? a : b, 'note.md', edited)
           if (pull) await syncOnce(a)
           await killAt(b, cut)
           await converge(a, b)
-          expect(await read(a, 'note.md')).toBe('edited before SIGKILL\n')
+          expect(await read(a, 'note.md')).toBe(edited)
           const heads = (await client.manifest(null)).items
           expect(heads).toHaveLength(1)
           expect(heads[0]!.file_id).toBe(initial.file_id)
