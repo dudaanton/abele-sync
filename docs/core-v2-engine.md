@@ -81,6 +81,13 @@ in the same wave. Per-attempt results merge in manifest order: ledger publicatio
 applied callbacks and cursor progress cannot overtake an unresolved earlier take.
 Preparation intents may be persisted ahead of settlement so interrupted writes
 remain recoverable. State mutations are serialized around isolated transactions.
+Transaction adaptation runs inside that serialization lane against the unqueued
+store. Callback writes never queue behind their enclosing transaction. Scoped
+handles, legacy callbacks without a handle, and unadvertised root-handle callbacks
+retain their existing transaction semantics; legacy hosts still require exclusive
+root access for the callback. Nested legacy work uses a revocable view, while
+unrelated root mutations wait for the transaction and resolve their method at
+execution time rather than capturing a temporary transaction handle.
 
 Hosts may coalesce concurrent directory durability requests behind their existing
 ports. Every mutation must await a barrier that started after that mutation;
@@ -384,6 +391,12 @@ the tracked source (physical and wire names), and `prev_path`. An unheld destina
 does not authorize removal from a held source. Approval retains the staged decision
 and reports it held; ordinary pull retains a retryable refusal. Incoming metadata
 can still be staged for review before these placement checks.
+Pending-write recovery and direct placement use the same refusal gate before
+adoption or disk mutation. The durable refusal image is checked even without a
+prepared client; its ancestor index is cached only while that exact image remains
+unchanged. `recoverPendingPullWrites` returns `{ held }` for blocked rows and
+preserves their stage and exact intent without enrolling them in stage eviction.
+Clearing the hold allows ordinary exact-version recovery to resume.
 
 Directory scans index canonical paths, object identities, ancestors, tracked children
 and relative child names once per inventory. Lookup cost follows path components and

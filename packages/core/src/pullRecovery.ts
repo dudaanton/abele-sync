@@ -112,14 +112,15 @@ export async function recoverPendingPullWrites(
   fs: FileSystem,
   state: StateStore,
   fileIds: readonly string[],
-  client?: Pick<EngineClient, 'getBlob' | 'openVersion'>,
+  client?: Pick<EngineClient, 'getBlob' | 'openVersion' | 'pathRefusal'>,
   opts: {
     signal?: AbortSignal
     expected?: ExpectedWrites
     retries?: FileRetries
     log?: (message: string) => void
   } = {}
-): Promise<void> {
+): Promise<{ held: ChangeItem[] }> {
+  const report: { held: ChangeItem[] } = { held: [] }
   const placerFor = (sequenceKnown: boolean) =>
     new PullPlacer(
       client ?? {
@@ -169,6 +170,10 @@ export async function recoverPendingPullWrites(
         actor: { kind: 'system', id: 'recovery', name: 'recovery' },
         at: '',
       }
+      if (await placer.refusal(change, entry)) {
+        report.held.push(change)
+        continue
+      }
       await placer.pending.superseded(change)
       if (intent.retiring) continue
       if (
@@ -187,6 +192,7 @@ export async function recoverPendingPullWrites(
       // Installation may have committed the ledger before retiring a formerly
       // held stage. Only unresolved refusals remain available to scan/push.
       if (intent.heldOrder !== undefined) {
+        report.held.push(change)
         await placer.pending.retain(fileId, undefined, opts.log)
         for (const name of [...protectedPaths, `pull-write:${fileId}`])
           await opts.retries?.succeeded(name, 'recovery')
@@ -227,4 +233,5 @@ export async function recoverPendingPullWrites(
           await opts.retries.failed(name, 'recovery', error, error instanceof ExternalStateError)
     }
   }
+  return report
 }

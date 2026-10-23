@@ -6,6 +6,7 @@ import {
   placeWave,
 } from './placement.js'
 import { pathOccupant } from './pathOccupant.js'
+import { placementRefusal } from './placementRefusal.js'
 import { olderPull, recordPull } from './pullHistory.js'
 import { transact } from './stateTransaction.js'
 import { replayAuthority } from './replayAuthority.js'
@@ -279,16 +280,8 @@ export class Puller {
   }
 
   private async changeRefusal(change: ChangeItem) {
-    if (!this.client.pathRefusal) return undefined
     const entry = await this.state.byFileId(change.file_id)
-    // A move can remove a protected source even when its destination is free.
-    // Check both ledger names and feed history, including implicit moves.
-    for (const path of new Set([change.path, entry?.path, entry?.wirePath, change.prev_path])) {
-      if (path == null) continue
-      const refusal = this.client.pathRefusal(path)
-      if (refusal) return refusal
-    }
-    return undefined
+    return placementRefusal(this.client, this.state, change, entry)
   }
 
   private async retryObligations(): Promise<void> {

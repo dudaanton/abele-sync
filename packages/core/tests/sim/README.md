@@ -8,6 +8,11 @@ bounded-source and staged modes. It restarts after every scheduled crash boundar
 concurrent cases additionally inject cancellation and failure at every boundary.
 The same disk/ledger/cursor, installation reuse and stage cleanup oracles apply.
 Cancellation also checks that no later applied callback is emitted.
+Concurrent cases also exercise legacy transaction callbacks without a handle.
+`recoveryDirectoryHold.test.ts` restarts with an exact move intent/private stage
+and a source or destination directory hold, replays every recovery crash boundary,
+then checks convergence after explicit hold resolution. It also checks direct
+placement and recovery without a prepared client.
 
 From the repository root, after installing the locked dependencies:
 

@@ -1,4 +1,5 @@
 import { pathOccupant } from './pathOccupant.js'
+import { placementRefusal } from './placementRefusal.js'
 import { olderPull, pullHistoryKey, recordPull } from './pullHistory.js'
 import { replayAuthority } from './replayAuthority.js'
 import { transact } from './stateTransaction.js'
@@ -51,7 +52,7 @@ export class PullPlacer {
   private readonly paths: (path: string) => Promise<LocalPaths>
 
   constructor(
-    private readonly client: Pick<EngineClient, 'getBlob' | 'openVersion'>,
+    private readonly client: Pick<EngineClient, 'getBlob' | 'openVersion' | 'pathRefusal'>,
     private readonly fs: FileSystem,
     private readonly state: StateStore,
     private readonly opts: Pick<
@@ -130,6 +131,7 @@ export class PullPlacer {
    * and the host must prove publication by stage/receipt identity, never matching bytes alone.
    */
   async adopt(change: ChangeItem, entry: StateEntry | null): Promise<boolean> {
+    if (await this.refusal(change, entry)) return false
     if (change.op === 'delete' || change.sha === null) return false
     if ((await this.paths(change.path)).blocked(change.path)) return false
     const pending = await this.pending.matching(change, entry)
@@ -364,6 +366,7 @@ export class PullPlacer {
     fetched: Map<string, Uint8Array>,
     local: Map<string, StateEntry>
   ): Promise<boolean | 'aside'> {
+    if (await this.refusal(change, entry)) return false
     // The spelling on disk: the entry's own where it is the same path — an NFD disk keeps
     // its own decomposition of an NFC wire path — and the wire's otherwise. Case is part of
     // the path here, not folded away: a server-side rename of `Note.md` to `note.md` is a
@@ -796,6 +799,12 @@ export class PullPlacer {
 
   private get bufferedLimit(): number {
     return Math.max(0, Math.min(MAX_CHUNK_BYTES, this.opts.prefetchBytes ?? MAX_CHUNK_BYTES))
+  }
+
+  async refusal(change: ChangeItem, entry: StateEntry | null) {
+    const refusal = await placementRefusal(this.client, this.state, change, entry)
+    if (refusal) this.opts.log?.(`pull: holding ${change.path}: ${refusal.message}`)
+    return refusal
   }
 
   private async smallBytes(

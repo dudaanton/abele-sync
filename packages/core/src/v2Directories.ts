@@ -115,6 +115,33 @@ export interface DirectoryRefusal extends Refusal {
   candidateIdentity?: string
 }
 
+const placementRefusals = new WeakMap<
+  StateStore,
+  { raw: string | null; paths: Map<string, DirectoryRefusal> }
+>()
+/** Recovery can run before a client's directory cache is prepared. Cache by the
+ * exact durable image, never by a run's age or a prior successful placement. */
+export async function storedDirectoryRefusal(state: StateStore, paths: Iterable<string>) {
+  const raw = (await state.getMeta?.(KEY)) ?? null
+  let cached = placementRefusals.get(state)
+  if (!cached || cached.raw !== raw) {
+    const rows = raw === null ? [] : ((await parseDocument(raw)).refused ?? [])
+    cached = { raw, paths: new Map(rows.map((row) => [row.path, row])) }
+    placementRefusals.set(state, cached)
+  }
+  for (const path of paths) {
+    let parent = wirePath(path)
+    for (;;) {
+      const refusal = cached.paths.get(parent)
+      if (refusal) return refusal
+      const slash = parent.lastIndexOf('/')
+      if (slash < 0) break
+      parent = parent.slice(0, slash)
+    }
+  }
+  return undefined
+}
+
 /** Scanner protection shares the same durable image as the directory decision. */
 export async function heldDirectoryPaths(state: StateStore): Promise<Set<string>> {
   const raw = await state.getMeta?.(KEY)
