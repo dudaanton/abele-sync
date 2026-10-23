@@ -564,7 +564,7 @@ export class V2Directories {
       candidatesBySource.set(old.path, [...nominated])
     }
     // Unresolved evidence survives absent/excluded/colliding candidates. Only a
-    // corroborated replacement journal may retire it.
+    // corroborated baseline or replacement journal may retire it.
     doc.refused = doc.refused?.filter(
       (item) => item.evidence || item.direction === 'pull' || localByPath.has(item.path)
     )

@@ -1,7 +1,9 @@
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
+import coreConfig from './packages/core/vitest.config.ts'
 import nodeConfig from './packages/node/vitest.config.ts'
 
+const scale = 'tests/unit/directoryScale.test.ts'
 const recovery = 'tests/unit/groupCrashRecovery.test.ts'
 const project = (name: string) => ({
   extends: `./packages/${name}/vitest.config.ts`,
@@ -12,13 +14,27 @@ export default defineConfig({
   test: {
     projects: [
       {
+        ...coreConfig,
+        root: project('core').root,
+        test: {
+          ...coreConfig.test,
+          name: '@abele/sync-core-scale',
+          include: [scale],
+          // A wall-clock heartbeat measures SDK blocking only when another
+          // test worker cannot exhaust the shared CPU quota between its ticks.
+          // Keep the latency/operation assertions unchanged; serialize the
+          // measurement before native crash replay and ordinary host suites.
+          sequence: { groupOrder: 0 },
+        },
+      },
+      {
         ...nodeConfig,
         root: project('node').root,
         test: {
           ...nodeConfig.test,
           name: '@abele/sync-node-crash-recovery',
           include: [recovery],
-          sequence: { groupOrder: 0 },
+          sequence: { groupOrder: 1 },
         },
       },
       ...['cli', 'core', 'node', 'protocol', 'server'].map((name) => ({
@@ -26,10 +42,11 @@ export default defineConfig({
         test: {
           name: name === 'cli' ? 'abele-sync' : `@abele/sync-${name}`,
           ...(name === 'node' ? { exclude: [recovery] } : {}),
+          ...(name === 'core' ? { exclude: [scale] } : {}),
           // Nested crash replay performs millions of native filesystem operations.
           // Concurrent acceptance fsyncs exhaust its per-test budget on APFS; run
           // it first, then retain normal worker parallelism for the other files.
-          sequence: { groupOrder: 1 },
+          sequence: { groupOrder: 2 },
         },
       })),
     ],
