@@ -277,8 +277,7 @@ export class Puller {
     if (checkpoint || this.report.cursor === 0) await this.bootstrap()
     if (!this.followedCheckpoint) {
       await this.follow()
-      await this.retryObligations()
-      await this.save()
+      if (await this.retryObligations()) await this.save()
     }
     if (this.report.bootstrapped) await this.recheck()
     this.syncHeld()
@@ -290,7 +289,7 @@ export class Puller {
     return placementRefusal(this.client, this.state, change, entry)
   }
 
-  private async retryObligations(): Promise<void> {
+  private async retryObligations(): Promise<boolean> {
     // An older refusal/hold must never become a clean base beneath a newer hold
     // for the same path. Coalesce the two durable collections as one snapshot.
     const changes = [...this.heldFiles.values(), ...this.refused.files.values()].sort(
@@ -314,6 +313,9 @@ export class Puller {
     await this.page(retry, async () => {
       await this.save()
     })
+    // follow() already published the frontier and checkpoints. An empty retry
+    // pass changes no owner and needs no second settlement transaction.
+    return retry.length > 0
   }
 
   /**
@@ -437,8 +439,7 @@ export class Puller {
           this.reached = progress.head
           await this.follow()
           this.followedCheckpoint = true
-          await this.retryObligations()
-          await this.save()
+          if (await this.retryObligations()) await this.save()
           return
         }
       }
