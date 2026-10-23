@@ -34,13 +34,23 @@ it('retires a tracked-file pull interrupted before installation after a server r
     await owner.commit([
       { op: 'modify', file_id: base.fileId, base_version_id: base.versionId, ...blob, mtime: 1234 },
     ])
-    const save = state.setMeta.bind(state)
-    state.setMeta = (key, value) => {
-      save(key, value)
-      if (key.startsWith('pull-write:') && value) throw new Error('interrupted tracked pull')
+    const transaction = state.transaction.bind(state)
+    state.transaction = async (work) => {
+      let prepared = false
+      const result = await transaction(async (tx) => {
+        const save = tx.setMeta!.bind(tx)
+        tx.setMeta = (key, value) => {
+          if (key.startsWith('pull-write:') && value) prepared = true
+          return save(key, value)
+        }
+        return work(tx)
+      })
+      // Crash after the preparation is acknowledged, before installation begins.
+      if (prepared) throw new Error('interrupted tracked pull')
+      return result
     }
     await expect(a.sync('server-1')).rejects.toThrow('interrupted tracked pull')
-    state.setMeta = save
+    state.transaction = transaction
     const intent = state.getMeta(`pull-write:${base.fileId}`)!
     expect(JSON.parse(intent).base).toEqual(base)
     await server.restart(async () => {
