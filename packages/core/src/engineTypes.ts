@@ -61,6 +61,8 @@ export interface EngineStatus {
 }
 
 export interface EngineOptions {
+  /** Independent pull placements prepared at once (1..32, default 1). */
+  placementConcurrency?: number
   /** Share with other connections and host hydration/forwarding to cap active transfers. */
   transferBudget?: import('./streaming.js').TransferBudget
   client: EngineClient

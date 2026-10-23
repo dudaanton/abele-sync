@@ -46,7 +46,7 @@ const sameStat = (a: FileInfo | null, b: FileInfo | null): boolean =>
 export class PullPlacer {
   private readonly budget: TransferBudget
   /** Shas the server answered with bytes that do not hash to them; nothing of theirs is written. */
-  readonly lying = new Set<string>()
+  readonly lying: Set<string>
   readonly pending: PendingPullWrites
   private readonly paths: (path: string) => Promise<LocalPaths>
 
@@ -69,11 +69,14 @@ export class PullPlacer {
       | 'heldStageLimits'
     >,
     private readonly hash: (bytes: Uint8Array) => Promise<string>,
-    private readonly sequenceKnown = true
+    private readonly sequenceKnown = true,
+    private readonly settlement: () => Promise<void> = async () => {},
+    shared?: PullPlacer
   ) {
-    this.pending = new PendingPullWrites(state, fs, sequenceKnown)
-    this.paths = LocalPaths.filePass(fs, state)
-    this.budget = opts.transferBudget ?? new TransferBudget()
+    this.pending = shared?.pending ?? new PendingPullWrites(state, fs, sequenceKnown)
+    this.paths = shared?.paths ?? LocalPaths.filePass(fs, state)
+    this.budget = shared?.budget ?? opts.transferBudget ?? new TransferBudget()
+    this.lying = shared?.lying ?? new Set<string>()
   }
 
   /**
@@ -285,16 +288,20 @@ export class PullPlacer {
    * is held for a later pull, rather than the whole sync failing on it every time.
    */
   async drop(entry: StateEntry, change?: ChangeItem): Promise<boolean> {
+    await this.settlement()
     if ((await LocalPaths.forFile(this.fs, entry.wirePath, this.state)).blocked(entry.wirePath))
       return false
     if (!(await this.clearPath(entry.path, entry))) return false
     this.opts.expected.clear(entry.path)
+    checkCancellation(this.opts.signal)
     await transact(this.state, async (tx) => {
       await tx.delete(entry.path)
       if (change) await recordPull(tx, change, true)
       await tx.setMeta?.(scanHintKey(entry.path), null)
       await new PendingPullWrites(tx, this.fs).clear(entry.fileId)
+      checkCancellation(this.opts.signal)
     })
+    checkCancellation(this.opts.signal)
     await notifyApplied(this.opts, {
       path: entry.wirePath,
       kind: 'delete',
@@ -401,6 +408,7 @@ export class PullPlacer {
       // the original object: it may have been removed/recreated during downtime.
       if (!this.fs.reopenStage) return false
       const hold = async () => {
+        await this.settlement()
         const stage = await this.fs.reopenStage!(pending.stageId!)
         if (stage.offset === change.size) {
           await stage.seal({ sha, size: change.size! })
@@ -441,6 +449,7 @@ export class PullPlacer {
       : await this.clear(target, from, change, sha, firstTarget)
     if (state === 'held') return false
     if (state === 'aside') {
+      await this.settlement()
       this.opts.log?.(
         `pull: passing over ${change.path}: the file here is one this device does not sync`
       )
@@ -714,6 +723,7 @@ export class PullPlacer {
     } catch (error) {
       this.opts.expected.clear(target)
       if (!this.inTheWay(error)) throw error
+      await this.settlement()
       if (
         from !== null &&
         entry !== null &&
@@ -855,6 +865,7 @@ export class PullPlacer {
     const occupant = await pathOccupant(this.fs, this.state, target, change.file_id)
     if (occupant !== null) {
       if (occupant.fileId === change.file_id) return { free: observed }
+      await this.settlement()
       // Unknown hosts use conservative name equivalence. An alias may therefore
       // be a distinct public file: never evict it as an exact-path replacement.
       if (occupant.path !== target) return 'held'
@@ -919,6 +930,8 @@ export class PullPlacer {
     freshReplacement: StateEntry | null = null,
     liveStage?: AtomicStage
   ): Promise<boolean> {
+    await this.settlement()
+    checkCancellation(this.opts.signal)
     const have = await settledStat(this.fs, target, sha, wrote, this.hash)
     const stageId = await this.pending.stageId(change)
     const receiptId = await this.pending.receiptId(change)
@@ -958,6 +971,7 @@ export class PullPlacer {
       await tx.setMeta?.(`pull-base:${target}`, null)
       if (from !== null) await tx.setMeta?.(scanHintKey(from), null)
       if (stageId === undefined) await new PendingPullWrites(tx, this.fs).clear(change.file_id)
+      checkCancellation(this.opts.signal)
       return true
     })
     if (!recorded) return false
@@ -967,6 +981,7 @@ export class PullPlacer {
       await this.pending.clear(change.file_id)
     }
     if (receiptId !== undefined) await this.fs.discardInstallation?.(receiptId)
+    checkCancellation(this.opts.signal)
     const source = change.prev_path ?? (from === null ? undefined : from.normalize('NFC'))
     await notifyApplied(this.opts, {
       path: change.path,

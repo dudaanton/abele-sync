@@ -3,10 +3,15 @@ import { ExpectedWrites, pull, sha256, type EngineClient } from '../../src/index
 import { DurableStateStore } from './durableState.js'
 import { MemoryStreamingFS } from './streamingMemoryFs.js'
 import { EpochError, SimScheduler } from './scheduler.js'
+import { SyncCancelled } from '../../src/cancellation.js'
 
-it.each(['buffered', 'bounded', 'stage'] as const)(
-  'first-pull publication and batched page progress survive every await (mode=%s)',
-  async (mode) => {
+it.each(
+  (['buffered', 'bounded', 'stage'] as const).flatMap((mode) =>
+    [1, 3].map((placementConcurrency) => ({ mode, placementConcurrency }))
+  )
+)(
+  'first-pull publication and batched page progress survive every await (mode=$mode, placement=$placementConcurrency)',
+  async ({ mode, placementConcurrency }) => {
     const bounded = mode !== 'buffered'
     const versions = await Promise.all(
       Array.from({ length: 3 }, async (_, n) => {
@@ -24,8 +29,12 @@ it.each(['buffered', 'bounded', 'stage'] as const)(
         }
       })
     )
-    async function execute(cut?: string) {
+    async function execute(cut?: string, interruption: 'crash' | 'cancel' | 'failure' = 'crash') {
       const scheduler = new SimScheduler(151)
+      let stop = new AbortController(),
+        interrupted = false
+      const injected = new Error('injected placement failure')
+      const lateAcknowledgements: string[] = []
       let fs = new MemoryStreamingFS(scheduler),
         state = new DurableStateStore(scheduler)
       const downloads: string[] = []
@@ -81,21 +90,40 @@ it.each(['buffered', 'bounded', 'stage'] as const)(
       }
       const run = () =>
         pull(client(), fs, state, {
+          placementConcurrency,
+          signal: stop.signal,
+          onApplied: (event) => {
+            if (stop.signal.aborted) lateAcknowledgements.push(event.path)
+          },
           expected: new ExpectedWrites(),
           dirty: new Set(),
           filter: { excluded: () => false },
           ...(mode === 'stage' ? { prefetchBytes: 0 } : {}),
         })
-      scheduler.cut = cut
+      scheduler.cut = interruption === 'crash' ? cut : undefined
+      scheduler.hook = async (point) => {
+        if (interruption === 'crash' || point !== cut || interrupted) return
+        interrupted = true
+        if (interruption === 'cancel') stop.abort()
+        else throw injected
+      }
       try {
         await run()
       } catch (error) {
-        if (!(error instanceof EpochError) || !cut) throw error
+        if (
+          !cut ||
+          !(error instanceof EpochError || error instanceof SyncCancelled || error === injected)
+        )
+          throw error
       }
       const points = scheduler.points.slice()
+      expect(lateAcknowledgements).toEqual([])
       if (cut) {
-        expect(scheduler.epoch).toBe(1)
+        if (interruption === 'crash') expect(scheduler.epoch).toBe(1)
+        else expect(interrupted).toBe(true)
         scheduler.cut = undefined
+        scheduler.hook = undefined
+        stop = new AbortController()
         fs = fs.reopen()
         if (!bounded) Object.assign(fs, { beginAtomicWrite: undefined, reopenStage: undefined })
         state = state.reopen()
@@ -118,6 +146,16 @@ it.each(['buffered', 'bounded', 'stage'] as const)(
       return points
     }
     const points = await execute()
+    console.log(
+      `Placement ${mode}/${placementConcurrency}: ${points.length} crash cuts` +
+        (placementConcurrency > 1 ? `, ${points.length} cancellation and failure cuts each` : '')
+    )
     for (const cut of points) await execute(cut)
+    if (placementConcurrency > 1) {
+      for (const cut of points) {
+        await execute(cut, 'cancel')
+        await execute(cut, 'failure')
+      }
+    }
   }
 )

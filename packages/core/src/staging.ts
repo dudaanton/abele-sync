@@ -85,6 +85,8 @@ function supersededLine(change: ChangeItem, entry: StateEntry | null, ours: bool
 
 /** The engine's adapters and settings, as staging needs them. */
 export interface StagingContext {
+  placementConcurrency?: number | undefined
+  signal?: (() => AbortSignal) | undefined
   onApplied?: import('./applied.js').AppliedOptions['onApplied']
   client: EngineClient
   fs: FileSystem
@@ -351,7 +353,16 @@ export class Staging {
       fs,
       state,
       list.map((one) => one.change),
-      { filter, dirty, expected, log, preserveMissing, onApplied: this.ctx.onApplied }
+      {
+        filter,
+        dirty,
+        expected,
+        log,
+        preserveMissing,
+        onApplied: this.ctx.onApplied,
+        placementConcurrency: this.ctx.placementConcurrency,
+        signal: this.ctx.signal?.(),
+      }
     )
     return new Set(report.held.map((change) => change.file_id))
   }

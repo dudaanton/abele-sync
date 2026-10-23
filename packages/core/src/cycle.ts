@@ -138,6 +138,8 @@ export class SyncCycle {
     this.asides = new AsideMarks(opts.state)
     this.holds = new DeleteHolds(opts.state)
     this.staging = new Staging({
+      placementConcurrency: opts.placementConcurrency,
+      signal: ctx.signal,
       client: opts.client,
       fs: opts.fs,
       state: opts.state,
@@ -749,6 +751,7 @@ export class SyncCycle {
   ): Promise<PullReport> {
     const { client, fs, state } = this.ctx.opts
     const report = await pull(client, fs, state, {
+      placementConcurrency: this.ctx.opts.placementConcurrency,
       retries: this.retries,
       signal: this.ctx.signal?.(),
       protectMissing: true,

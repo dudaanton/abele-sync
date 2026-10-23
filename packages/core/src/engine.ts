@@ -1,4 +1,5 @@
 import type { ChangeItem } from '@abele/sync-protocol'
+import { placementLimit } from './placement.js'
 import { SyncCycle } from './cycle.js'
 import type { DeleteDecision, HeldDelete } from './deletes.js'
 import { ExpectedWrites } from './echo.js'
@@ -123,6 +124,7 @@ export class SyncEngine implements ExclusiveOperationPort {
 
   readonly transferBudget: import('./streaming.js').TransferBudget
   constructor(opts: EngineOptions) {
+    placementLimit(opts.placementConcurrency)
     this.transferBudget = opts.transferBudget ?? new TransferBudget()
     const hands =
       opts.stillHeld === undefined && opts.recovery === undefined

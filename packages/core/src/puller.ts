@@ -79,6 +79,9 @@ export interface PullOptions {
   noted?: Set<string>
   /** How many blobs to fetch at once. */
   concurrency?: number
+  /** Independent filesystem preparations at once; safe integer 1..32, default 1.
+   * Ledger settlement and acknowledgements remain in manifest order. */
+  placementConcurrency?: number | undefined
   /**
    * How many downloaded bytes a page may hold before they are written: the page is taken in
    * runs that fit, one file bigger than the whole budget making a run of its own. 64 MiB when

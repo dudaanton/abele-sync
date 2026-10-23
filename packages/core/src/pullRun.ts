@@ -1,3 +1,10 @@
+import {
+  placementLimit,
+  placementState,
+  placementWaves,
+  placementFootprints,
+  placeWave,
+} from './placement.js'
 import { pathOccupant } from './pathOccupant.js'
 import { olderPull, recordPull } from './pullHistory.js'
 import { transact } from './stateTransaction.js'
@@ -31,6 +38,12 @@ import { checkCancellation } from './cancellation.js'
 import { GENERATION_KEY } from './restoreGeneration.js'
 
 import { PullHolds, importLegacyPullHolds } from './pullHolds.js'
+interface TakeAttempt {
+  placer: PullPlacer
+  report: PullReport
+  held: boolean
+  settle: () => Promise<void>
+}
 const MANIFEST_PROGRESS = 'pull-manifest-progress'
 const MANIFEST_PAGE_DATA = 'pull-manifest-page'
 interface ManifestProgress {
@@ -175,7 +188,6 @@ export class Puller {
   private readonly refused: PullHolds
   /** Earliest event in the current page which has not finished its durable handling. */
   private pendingSeq: number | null = null
-  private attemptHeld = false
   /** Every file id a manifest page or a feed page of this run named, applied or not. */
   private readonly seen = new Set<string>()
   private get heldFiles() {
@@ -204,6 +216,8 @@ export class Puller {
     private readonly opts: PullOptions,
     private readonly report: PullReport
   ) {
+    placementLimit(opts.placementConcurrency)
+    if ((opts.placementConcurrency ?? 1) > 1) this.state = state = placementState(state)
     this.holds = new PullHolds(state)
     this.refused = new PullHolds(
       state,
@@ -670,22 +684,65 @@ export class Puller {
     for (const run of runsWithin(taking, downloads, budget)) {
       checkCancellation(this.opts.signal)
       const fetched = await this.prefetch(run, local)
-      for (const change of run) {
-        checkCancellation(this.opts.signal)
-        // Keep the durable obligation until this attempt has actually resolved it.
-        this.attemptHeld = false
-        const base = (await this.state.byFileId(change.file_id))?.versionId ?? null
-        if (this.opts.retries && !this.opts.retries.ready(change.path, 'pull')) this.hold(change)
-        else
-          try {
-            await this.take(change, fetched, local)
-            await this.opts.retries?.succeeded(change.path, 'pull')
-          } catch (error) {
-            if (!(await this.retryFailure(change, error))) throw error
+      const footprints =
+        (this.opts.placementConcurrency ?? 1) === 1
+          ? new Map(run.map((change) => [change, { paths: [], identities: [], exclusive: true }]))
+          : await placementFootprints(run, this.state, this.fs, this.opts.signal)
+      for (const wave of placementWaves(
+        run,
+        placementLimit(this.opts.placementConcurrency),
+        footprints
+      )) {
+        await placeWave(wave, this.opts.signal, async (change, settle, signal) => {
+          const report: PullReport = {
+            applied: 0,
+            skipped: 0,
+            held: [],
+            deferred: 0,
+            cursor: this.report.cursor,
+            bootstrapped: this.report.bootstrapped,
           }
-        if (this.attemptHeld) this.holds.setBase(change.file_id, base)
-        else this.resolve(change)
-        await finish(change)
+          const attempt: TakeAttempt = {
+            report,
+            held: false,
+            settle,
+            placer: new PullPlacer(
+              this.client,
+              this.fs,
+              this.state,
+              { ...this.opts, signal },
+              this.hash,
+              true,
+              settle,
+              this.placer
+            ),
+          }
+          const base = (await this.state.byFileId(change.file_id))?.versionId ?? null
+          let succeeded = false
+          if (this.opts.retries && !this.opts.retries.ready(change.path, 'pull'))
+            attempt.held = true
+          else {
+            try {
+              await this.take(change, fetched, local, attempt)
+              succeeded = true
+            } catch (error) {
+              if (!this.opts.retries || !isFileFailure(error)) throw error
+              await settle()
+              await this.opts.retries.failed(change.path, 'pull', error)
+              attempt.held = true
+            }
+          }
+          await settle()
+          if (succeeded) await this.opts.retries?.succeeded(change.path, 'pull')
+          checkCancellation(signal)
+          this.report.applied += report.applied
+          this.report.skipped += report.skipped
+          if (attempt.held) {
+            this.hold(change)
+            this.holds.setBase(change.file_id, base)
+          } else this.resolve(change)
+          await finish(change)
+        })
       }
     }
     this.firstHeld = this.holds.earliest()
@@ -813,21 +870,22 @@ export class Puller {
   private async take(
     change: ChangeItem,
     fetched: Map<string, Uint8Array>,
-    local: Map<string, StateEntry>
+    local: Map<string, StateEntry>,
+    attempt: TakeAttempt
   ): Promise<void> {
     const entry = await this.state.byFileId(change.file_id)
     if (await olderPull(this.state, change, entry)) {
-      this.report.skipped++
+      attempt.report.skipped++
       return
     }
-    await this.placer.pending.superseded(change)
+    await attempt.placer.pending.superseded(change)
     if (this.stagedReplay && change.op !== 'delete') {
       let target: string
       try {
-        target = await this.placer.targetOf(change, entry)
+        target = await attempt.placer.targetOf(change, entry)
       } catch (error) {
         if (!(error instanceof AbeleError && error.code === 'path_taken')) throw error
-        this.hold(change)
+        attempt.held = true
         return
       }
       if (
@@ -838,12 +896,13 @@ export class Puller {
           await pathOccupant(this.fs, this.state, target, change.file_id)
         )
       ) {
-        this.hold(change)
+        attempt.held = true
         return
       }
     }
     if (this.passedOver(change)) {
-      await this.passOver(change, entry)
+      await attempt.settle()
+      attempt.held = await this.passOver(change, entry)
       return
     }
     // Already here: a change re-read on the way back to the head, or one this device made.
@@ -853,37 +912,39 @@ export class Puller {
       entry?.versionId === change.version_id &&
       !(this.opts.recheck?.has(entry.fileId) && (await this.fs.stat(entry.path)) === null)
     ) {
-      await this.placer.settled(change)
-      this.report.skipped++
+      await attempt.placer.settled(change)
+      attempt.report.skipped++
       return
     }
     // A recorded installation can settle even on an intermediate page. Check
     // its provenance before treating equal untracked bytes as an offline edit.
-    if (await this.placer.adopt(change, entry)) {
-      this.report.applied++
+    if (await attempt.placer.adopt(change, entry)) {
+      attempt.report.applied++
       return
     }
-    const adoption = await this.placer.adoptExisting(change, entry, this.latestSnapshot)
+    const adoption = await attempt.placer.adoptExisting(change, entry, this.latestSnapshot)
     if (adoption === 'held') {
       // An untracked equal file may be an offline edit. Only the actual head can
       // acknowledge it; an intermediate page cannot establish its clean base.
-      this.hold(change)
+      attempt.held = true
       return
     }
     if (adoption) {
-      this.report.applied++
+      attempt.report.applied++
       return
     }
     if (touchesDeferred(this.opts.defer, change.path, change.prev_path, entry?.wirePath)) {
       // The equality probe above permits metadata adoption only, never a later disk write.
+      await attempt.settle()
       await this.stageAll([stageFrom(change, entry)])
       return
     }
     if (this.isDirty(change, entry)) {
+      await attempt.settle()
       if (await this.goneBoth(change, entry)) return
       if (this.walking && !this.heldFiles.has(change.file_id) && this.isNoted(change, entry))
         this.note(change)
-      else this.hold(change)
+      else attempt.held = true
       return
     }
 
@@ -894,27 +955,28 @@ export class Puller {
       change.op !== 'delete' &&
       !this.opts.recheck?.has(entry.fileId) &&
       (await this.fs.stat(entry.path)) === null &&
-      (await this.placer.pending.matching(change, entry)) === null
+      (await attempt.placer.pending.matching(change, entry)) === null
     ) {
-      this.hold(change)
+      attempt.held = true
       return
     }
     if (change.op === 'delete' || change.sha === null) {
+      await attempt.settle()
       // A delete of a file this device never had is nothing to do, not something done.
-      if (entry === null) this.report.skipped++
-      else if (await this.placer.edited(entry)) this.hold(change)
-      else if (await this.placer.drop(entry, change)) this.report.applied++
-      else this.hold(change)
+      if (entry === null) attempt.report.skipped++
+      else if (await attempt.placer.edited(entry)) attempt.held = true
+      else if (await attempt.placer.drop(entry, change)) attempt.report.applied++
+      else attempt.held = true
       return
     }
-    if (this.placer.lying.has(change.sha)) {
-      this.hold(change)
+    if (attempt.placer.lying.has(change.sha)) {
+      attempt.held = true
       return
     }
-    const placed = await this.placer.place(change, change.sha, entry, fetched, local)
-    if (placed === 'aside') this.report.skipped++
-    else if (placed) this.report.applied++
-    else this.hold(change)
+    const placed = await attempt.placer.place(change, change.sha, entry, fetched, local)
+    if (placed === 'aside') attempt.report.skipped++
+    else if (placed) attempt.report.applied++
+    else attempt.held = true
   }
 
   /**
@@ -923,10 +985,10 @@ export class Puller {
    * same page hides the move: to this device it has gone,
    * and its entry goes with it, or the next scan would push it straight back at its old path.
    */
-  private async passOver(change: ChangeItem, entry: StateEntry | null): Promise<void> {
+  private async passOver(change: ChangeItem, entry: StateEntry | null): Promise<boolean> {
     if (deferredSource(this.opts.defer, change, entry)) {
       await this.stageAll([stageFrom(change, entry)])
-      return
+      return false
     }
     // Exclusion ends both ordinary held pulls and exact deferred decisions.
     // Publish that revocation before cleanup; staging.tidy may never run after a crash.
@@ -936,15 +998,15 @@ export class Puller {
     // under a head over the cap, moved here — not a file leaving the synced set.
     if (entry === null || entry.wirePath === change.path) {
       this.report.skipped++
-      return
+      return false
     }
     // Not over a local edit, though: that is the engine's to push and settle first.
     if (this.isDirty(change, entry) || (await this.placer.edited(entry))) {
-      this.hold(change)
-      return
+      return true
     }
     if (await this.placer.drop(entry, change)) this.report.applied++
-    else this.hold(change)
+    else return true
+    return false
   }
 
   /** A change for a file this device does not sync, or for the engine's own state. */
@@ -1000,7 +1062,6 @@ export class Puller {
   }
 
   private hold(change: ChangeItem): void {
-    this.attemptHeld = true
     this.holds.put({
       change,
       base: this.holds.records.get(change.file_id)?.base ?? null,

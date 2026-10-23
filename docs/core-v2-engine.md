@@ -59,6 +59,25 @@ path coordinator or claim simultaneous live-host verification.
 
 ## Filesystem and state ports
 
+`PullOptions.placementConcurrency` (also exposed on `EngineOptions`) bounds
+independent filesystem preparations to 1–32; the default is 1. It applies to
+ordinary pulls and staged approval, independently of download concurrency.
+Moves are conservative single-participant waves. Equal/ancestor paths,
+case/Unicode aliases, host path keys and shared file identities cannot prepare
+in the same wave. Per-attempt results merge in manifest order: ledger publication,
+applied callbacks and cursor progress cannot overtake an unresolved earlier take.
+Preparation intents may be persisted ahead of settlement so interrupted writes
+remain recoverable. State mutations are serialized around isolated transactions.
+
+Hosts may coalesce concurrent directory durability requests behind their existing
+ports. Every mutation must await a barrier that started after that mutation;
+joining an already-running barrier alone is insufficient. File barriers and the
+conditional publication protocol are unchanged. Cancellation stops admission,
+aborts active transfers and drains admitted filesystem work and settlement before
+returning. A cancelled participant emits no applied callback. Failure releases
+all waiters and retains pending installation evidence for restart. No operation
+waits for a fixed number of participants.
+
 File mutation ports follow the [exclusive/checked host contract](#filesystem-host-contract).
 A checked host may implement conditional effects without object identity, but
 must document the final-check-to-mutation gap and return false from installation

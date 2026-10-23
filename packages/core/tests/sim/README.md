@@ -3,6 +3,12 @@ No sockets, devices, real vaults or provider processes are involved. All server
 storage lives in disposable `.scratch/sim-*` directories. No new dependency was
 added (`fast-check` passed the dependency audit; generation/shrinking is local).
 
+`pullPublication.test.ts` explores placement widths 1 and 3 in buffered,
+bounded-source and staged modes. It restarts after every scheduled crash boundary;
+concurrent cases additionally inject cancellation and failure at every boundary.
+The same disk/ledger/cursor, installation reuse and stage cleanup oracles apply.
+Cancellation also checks that no later applied callback is emitted.
+
 From the repository root, after installing the locked dependencies:
 
 ```sh
