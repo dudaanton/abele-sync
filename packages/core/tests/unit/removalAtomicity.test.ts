@@ -9,7 +9,8 @@ import { ExpectedWrites, pull } from '../../src/index.js'
 
 async function fixture(
   pageEvents?: (base: import('../../src/state.js').StateEntry) => unknown[],
-  path = 'Root.md'
+  path = 'Root.md',
+  folder = false
 ) {
   const fs = new MemoryFileSystem(),
     state = new MemoryStateStore()
@@ -26,7 +27,9 @@ async function fixture(
     mtime: 1,
   }
   await state.put(base)
-  const scope = { kind: 'group' as const, id: 'root', path: path }
+  const scope = folder
+    ? { kind: 'folder' as const, id: 'root', path: '/' }
+    : { kind: 'group' as const, id: 'root', path: path }
   const client = new V2EngineClient(
     encodeAccessToken({ v: 1, address: 'https://example.test', key: 'k'.repeat(43), scope }),
     {
@@ -64,56 +67,90 @@ async function fixture(
   return { fs, state, client, base, original, edit }
 }
 
-it('does not resurrect retained content when replay starts before a settled departure and cursor publication', async () => {
-  const { fs, state, client, base, original } = await fixture((base) => [
-    {
-      type: 'content',
-      file_id: base.fileId,
-      path: base.path,
-      cursor: 2,
-      at: '2026-01-01T00:00:00.000Z',
-      prev_path: null,
-      item: {
-        file_id: base.fileId,
-        version_id: 'b',
-        path: base.path,
-        sha: base.sha,
-        size: base.size,
-        mtime: base.mtime,
-        kind: 'note',
-      },
-    },
-    {
-      type: 'removal',
-      file_id: base.fileId,
-      path: base.path,
-      cursor: 3,
-      at: '2026-01-01T00:00:00.000Z',
-    },
-  ])
-  await state.setCursor(1)
-  const host = vi.fn(async () => true)
-  client.onRemoval = host
-  const page = await client.changes(1)
-  await captureDepartures(state, page.departures, fs, page.memberships)
-  await dispatchDepartures(state, client)
-  expect(await state.getCursor()).toBe(1)
-  expect(await state.get(base.path)).toBeNull()
-  expect(client.includes(base.path)).toBe(false)
-  // Restart from the durable cursor at the exact cut after settlement.
-  await client.prepare(fs, state, () => false, undefined, true)
-  await pull(client, fs, state, {
-    dirty: new Set(),
-    noted: new Set(),
-    expected: new ExpectedWrites(),
-    filter: { excluded: (path) => !client.includes(path) },
-  })
-  expect(await state.getCursor()).toBe(3)
-  expect(client.includes(base.path)).toBe(false)
-  expect(await state.get(base.path)).toBeNull()
-  expect(await fs.read(base.path)).toEqual(original)
-  expect(host).toHaveBeenCalledTimes(1)
-})
+it.each(['feed', 'manifest'])(
+  'does not resurrect retained content when %s replay starts before a settled departure and cursor publication',
+  async (mode) => {
+    const { fs, state, client, base, original } = await fixture(
+      (base) => [
+        {
+          type: 'content',
+          file_id: base.fileId,
+          path: base.path,
+          cursor: 2,
+          at: '2026-01-01T00:00:00.000Z',
+          prev_path: null,
+          item: {
+            file_id: base.fileId,
+            version_id: 'b',
+            path: base.path,
+            sha: base.sha,
+            size: base.size,
+            mtime: base.mtime,
+            kind: 'note',
+          },
+        },
+        {
+          type: 'removal',
+          file_id: base.fileId,
+          path: base.path,
+          cursor: 3,
+          at: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      'Root.md',
+      mode === 'manifest'
+    )
+    await state.setCursor(1)
+    const host = vi.fn(async () => true)
+    client.onRemoval = host
+    const page = await client.changes(1)
+    await captureDepartures(state, page.departures, fs, page.memberships)
+    await dispatchDepartures(state, client)
+    expect(await state.getCursor()).toBe(1)
+    expect(await state.get(base.path)).toBeNull()
+    expect(client.includes(base.path)).toBe(false)
+    if (mode === 'manifest') {
+      await state.setMeta(
+        'pull-manifest-progress',
+        JSON.stringify({
+          generation: null,
+          scope: null,
+          head: 2,
+          completed: [],
+          firstHeld: null,
+        })
+      )
+      await state.setMeta(
+        'pull-manifest-page',
+        JSON.stringify({
+          items: page.items,
+          head_seq: 2,
+          next: null,
+          membershipPaths: [base.path],
+          recheck: [],
+          seen: [],
+          heldChanges: [],
+        })
+      )
+    }
+    // Restart from the durable cursor at the exact cut after settlement.
+    await client.prepare(fs, state, () => false, undefined, true)
+    const report = await pull(client, fs, state, {
+      dirty: new Set(),
+      noted: new Set(),
+      expected: new ExpectedWrites(),
+      filter: { excluded: (path) => !client.includes(path) },
+    })
+    expect(report.bootstrapped).toBe(mode === 'manifest')
+    expect(await state.getCursor()).toBe(3)
+    expect(client.includes(base.path)).toBe(false)
+    expect(await state.get(base.path)).toBeNull()
+    expect(await fs.read(base.path)).toEqual(original)
+    expect(host).toHaveBeenCalledTimes(1)
+    await client.prepare(fs, state, () => false, undefined, true)
+    expect(client.includes(base.path)).toBe(false)
+  }
+)
 
 it('V2 removal refuses a save at the filesystem effect boundary and retains its base', async () => {
   const { fs, state, client, base, edit } = await fixture()

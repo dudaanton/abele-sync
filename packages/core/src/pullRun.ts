@@ -467,8 +467,11 @@ export class Puller {
           return tx.setMeta?.(MANIFEST_PROGRESS, progressHeader(checkpoint))
         }
         await this.commit(async (tx) => {
-          for (const path of page.membershipPaths ?? [])
-            await writeDepartureMark(tx, DEPARTURE_MARK, path, false)
+          if (this.client.publishManifestMembership)
+            await this.client.publishManifestMembership(tx, page.items)
+          else
+            for (const path of page.membershipPaths ?? [])
+              await writeDepartureMark(tx, DEPARTURE_MARK, path, false)
           await tx.setMeta?.(MANIFEST_PAGE_DATA, progressPage(checkpoint, page))
           await saveProgress(tx)
         })

@@ -397,6 +397,25 @@ export class V2EngineClient implements EngineClient {
       await this.fileItem(item, item.seq)
     }
   }
+  async publishManifestMembership(
+    state: StateStore,
+    items: readonly ManifestItem[]
+  ): Promise<void> {
+    for (const item of items) {
+      if (
+        await predatesDeparture(
+          state,
+          item.file_id,
+          item.seq,
+          this.connectionInfo!.token_id,
+          this.http.observedGeneration ?? null
+        )
+      )
+        continue
+      await writeDepartureMark(state, DEPARTURE_MARK, item.path, false)
+      afterStateCommit(state, () => this.departed.delete(item.path))
+    }
+  }
   async manifest(cursor: string | null, limit?: number, signal?: AbortSignal) {
     const page = await this.http.json(V2ManifestSchema, 'GET', '/v2/manifest', {
       query: { next: cursor, limit },

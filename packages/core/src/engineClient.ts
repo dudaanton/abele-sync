@@ -46,6 +46,11 @@ export interface EngineClient {
   rememberManifest?(
     items: readonly import('@abele/sync-protocol').ManifestItem[]
   ): void | Promise<void>
+  /** Publish snapshot membership under the owning checkpoint transaction, including replay. */
+  publishManifestMembership?(
+    state: StateStore,
+    items: readonly import('@abele/sync-protocol').ManifestItem[]
+  ): Promise<void>
   changes(
     since: number,
     limit?: number,
