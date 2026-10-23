@@ -351,6 +351,9 @@ eligible candidates: exactly one corroborated tree resolves the hold within that
 scan, even when unrelated fallback nominations remain. Multiple corroborated trees
 remain held. Returning the corroborated tree to its original spelling clears the
 hold and refreshes its local identity in one durable save, without a server move.
+Plan execution resolves entries by file identity in the current document, because
+settling an earlier operation reloads that document. A changed path or version
+invalidates the plan; references from the planning snapshot must not receive writes.
 A move elsewhere replaces the hold with its durable move journal as before.
 
 User resolution preserves the same safety rule: restore tracked content at the

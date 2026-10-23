@@ -648,7 +648,11 @@ export class V2Directories {
     const blockedTree = (path: string) =>
       this.refusalFor(path) ||
       doc.refused?.some((row) => row.evidence && row.path.startsWith(wirePath(path) + '/'))
-    for (const { old, moved, empty } of plans) {
+    for (const { old: planned, moved, empty } of plans) {
+      // record() reloads the document after each commit. Plans retain evidence,
+      // never ownership of a mutable entry in that earlier document snapshot.
+      const old = doc.directories.find((entry) => entry.file_id === planned.file_id)
+      if (!old || old.path !== planned.path || old.version_id !== planned.version_id) continue
       const retained: DirectoryRefusal[] | undefined = doc.refused
       if (moved) {
         doc.refused = doc.refused?.filter((row) => !row.evidence || row.source !== old.path)

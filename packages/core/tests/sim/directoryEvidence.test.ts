@@ -73,6 +73,20 @@ describe.each([191, 192, 193, 194])(
         if (receipts.has(key)) return receipts.get(key)!
         const results: CommitOpResult[] = []
         for (const op of ops) {
+          if (op.op === 'delete_directory' && op.file_id === 'earlier') {
+            expect(op.empty_only).toBe(true)
+            results.push({
+              status: 'applied',
+              file_id: 'earlier',
+              version_id: 'a2',
+              path: 'a',
+              seq,
+              sha: null,
+              size: 0,
+              mtime: 1,
+            })
+            continue
+          }
           if (op.op === 'mkdir' && op.path === 'unrelated-folder') {
             results.push({
               status: 'applied',
@@ -213,6 +227,34 @@ describe.each([191, 192, 193, 194])(
       local = originalPath
       origins.set(local, 'original')
       await fs.writeAtomic(local + '/child.md', bytes, 6)
+      // D-201: an earlier committed plan reloads the document before this
+      // return-to-source resolution. Both the new inode and retirement survive.
+      identities.set(local, 'restored-inode')
+      const doc = JSON.parse((await state.getMeta('v2-directories'))!)
+      doc.directories.unshift({
+        file_id: 'earlier',
+        version_id: 'a1',
+        path: 'a',
+        kind: 'directory',
+        mtime: 1,
+        identity: 'absent',
+        localPath: 'a',
+      })
+      await state.setMeta('v2-directories', JSON.stringify(doc))
+      await observe(false)
+      expect(
+        JSON.parse((await state.getMeta('v2-directories'))!).directories.find(
+          (d: { file_id: string }) => d.file_id === 'directory'
+        ).identity
+      ).toBe('restored-inode')
+      await fs.moveDirectory(local, 'elsewhere')
+      origins.delete(local)
+      local = 'elsewhere'
+      origins.set(local, 'original')
+      identities.set(local, 'restored-inode')
+      await fs.move(local + '/child.md', local + '/renamed.md')
+      await observe(true)
+      await fs.move(local + '/renamed.md', local + '/child.md')
       await observe(false)
       for (const name of names) {
         const from = local

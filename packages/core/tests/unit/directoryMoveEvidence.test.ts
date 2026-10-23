@@ -9,6 +9,99 @@ import { MemoryStreamingFS } from '../sim/streamingMemoryFs.js'
 import { SimScheduler } from '../sim/scheduler.js'
 import { scan } from '../../src/scanner.js'
 
+it('D-201 refreshes the current entry after an earlier plan commits', async () => {
+  const fs = new MemoryStreamingFS(new SimScheduler(201)),
+    state = new MemoryStateStore()
+  const bytes = new Uint8Array([1, 2, 3]),
+    sha = await sha256(bytes)
+  await fs.writeAtomic('old/child.md', bytes, 1)
+  const list = fs.listDirectories.bind(fs)
+  let inode = 'obsolete'
+  fs.listDirectories = async function* () {
+    for await (const dir of list()) yield { ...dir, identity: inode }
+  }
+  await state.setCursor(1)
+  await state.setMeta(
+    'v2-directories',
+    JSON.stringify({
+      directories: [
+        {
+          file_id: 'original',
+          version_id: 'v1',
+          path: 'old',
+          kind: 'directory',
+          mtime: 1,
+          identity: inode,
+          localPath: 'old',
+        },
+      ],
+      removals: [],
+    })
+  )
+  await state.put({
+    path: 'old/child.md',
+    wirePath: 'old/child.md',
+    fileId: 'child',
+    versionId: 'v1',
+    sha,
+    size: 3,
+    mtime: 1,
+  })
+  const ops: V2CommitOp[] = []
+  const directories = new V2Directories(
+    fs,
+    state,
+    () => true,
+    async (batch) => {
+      ops.push(...batch)
+      return batch.map((op) => ({
+        status: 'applied',
+      file_id: 'file_id' in op ? op.file_id : 'new',
+        version_id: 'v2',
+        path: 'a',
+        seq: 2,
+        sha: null,
+        size: 0,
+        mtime: 1,
+      })) as never
+    }
+  )
+  await fs.moveDirectory('old', 'fresh')
+  await fs.writeAtomic('fresh/child.md', new Uint8Array([9, 9, 9]), 2)
+  await directories.scan()
+  expect(directories.refusalFor('old')).toBeDefined()
+  await fs.moveDirectory('fresh', 'old')
+  inode = 'restored'
+  await fs.writeAtomic('old/child.md', bytes, 3)
+  const doc = JSON.parse((await state.getMeta('v2-directories'))!)
+  doc.directories.unshift({
+    file_id: 'earlier',
+    version_id: 'v1',
+    path: 'a',
+    kind: 'directory',
+    mtime: 1,
+    identity: 'absent',
+    localPath: 'a',
+  })
+  await state.setMeta('v2-directories', JSON.stringify(doc))
+  await directories.scan()
+  expect(ops).toEqual([
+    { op: 'delete_directory', file_id: 'earlier', base_version_id: 'v1', empty_only: true },
+  ])
+  expect(directories.refusals()).toEqual([])
+  expect(
+    JSON.parse((await state.getMeta('v2-directories'))!).directories.find(
+      (d: { file_id: string }) => d.file_id === 'original'
+    ).identity
+  ).toBe('restored')
+  await fs.moveDirectory('old', 'elsewhere')
+  await fs.move('elsewhere/child.md', 'elsewhere/renamed.md')
+  await directories.scan()
+  expect(ops).toHaveLength(1)
+  expect(directories.refusalFor('old')).toBeDefined()
+  expect(directories.refusalFor('elsewhere/renamed.md')).toBeDefined()
+})
+
 it.each(['replacement', 'recycled', 'corroborated'] as const)(
   'directory rename requires corroboration (%s)',
   async (mode) => {
