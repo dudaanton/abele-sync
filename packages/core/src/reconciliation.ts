@@ -1,3 +1,4 @@
+import { ScanWork, type ScanScheduling } from './scanWork.js'
 import { transact } from './stateTransaction.js'
 import { isFileFailure, type FileRetries } from './fileRetry.js'
 import type { FileInfo, FileSystem } from './fs.js'
@@ -15,9 +16,10 @@ import { checkCancellation } from './cancellation.js'
 import { authoredJournal } from './journalOrigin.js'
 import { scanHintEpoch, readScanHint, writeScanHint } from './scanHints.js'
 
-async function stagedPaths(state: StateStore): Promise<Set<string>> {
+async function stagedPaths(state: StateStore, work = new ScanWork()): Promise<Set<string>> {
   const paths = new Set<string>()
   for (const record of await new StagedChanges(state).list()) {
+    await work.step()
     const entry = await state.byFileId(record.change.file_id)
     for (const path of [
       record.change.path,
@@ -292,12 +294,26 @@ export async function preserveGenerationConflicts(
 /** Retired entries may explain disk bytes but never regain publication authority. */
 async function comparisonState(
   state: StateStore,
-  retired: readonly StateEntry[]
+  retired: readonly StateEntry[],
+  opts: ScanScheduling = {}
 ): Promise<StateStore> {
-  const entries = new Map(retired.map((entry) => [entry.wirePath, entry]))
-  for await (const entry of state.all()) entries.set(entry.wirePath, entry)
-  const byPath = new Map([...entries.values()].map((entry) => [entry.path, entry]))
-  const byId = new Map([...entries.values()].map((entry) => [entry.fileId, entry]))
+  const work = new ScanWork(opts)
+  const entries = new Map<string, StateEntry>()
+  for (const entry of retired) {
+    await work.step()
+    entries.set(entry.wirePath, entry)
+  }
+  for await (const entry of state.all()) {
+    await work.step()
+    entries.set(entry.wirePath, entry)
+  }
+  const byPath = new Map<string, StateEntry>(),
+    byId = new Map<string, StateEntry>()
+  for (const entry of entries.values()) {
+    await work.step()
+    byPath.set(entry.path, entry)
+    byId.set(entry.fileId, entry)
+  }
   // Retired entries are comparison evidence only. Writes always use the current ledger.
   return {
     async *all() {
@@ -333,24 +349,32 @@ export async function reconciliationScan(
   client?: EngineClient,
   signal?: AbortSignal,
   observedCursor?: number,
-  retries?: FileRetries
+  retries?: FileRetries,
+  yieldTask?: () => Promise<void>
 ): Promise<{ found: ScanResult; reconciliation: ReconciliationState | null; basis: StateStore }> {
+  const scheduling = { signal, yieldTask }
+  const work = new ScanWork(scheduling)
+  checkCancellation(signal)
   const comparisonCursor = observedCursor ?? (await state.getCursor())
-  const basis = retiredEntries ? await comparisonState(state, retiredEntries) : state
+  const basis = retiredEntries ? await comparisonState(state, retiredEntries, scheduling) : state
   let reconciliation = await readReconciliation(state)
   const missingBefore = new Set<string>(
     JSON.parse((await state.getMeta?.('content-missing')) ?? '[]')
   )
   const missing: string[] = []
   const absent: string[] = []
-  const staged = await stagedPaths(state)
+  const staged = await stagedPaths(state, work)
   const entries = new Map<string, StateEntry>()
   const files = new Map<string, FileInfo>()
   const disk = new Map<string, FileInfo>()
-  for await (const info of fs.list()) disk.set(info.path, info)
+  for await (const info of fs.list()) {
+    await work.step()
+    disk.set(info.path, info)
+  }
   const older: Array<{ entry: StateEntry; info: FileInfo }> = []
   let reason: string | null = null
   for await (const entry of basis.all()) {
+    await work.step()
     checkCancellation(signal)
     if (isEngineOwn(entry.wirePath) || filter.excluded(entry.wirePath, entry.size)) continue
     entries.set(entry.wirePath, entry)
@@ -371,6 +395,7 @@ export async function reconciliationScan(
   const changedOlder: typeof older = []
   if (older.length > 1) {
     for (const { entry, info } of older) {
+      await work.step()
       checkCancellation(signal)
       if (retries && !retries.ready(entry.wirePath, 'scan')) continue
       try {
@@ -431,6 +456,7 @@ export async function reconciliationScan(
   }
   if (retiredEntries && older.length > 0)
     reason = 'tracked files have older timestamps than the ledger'
+  checkCancellation(signal)
   await state.setMeta?.('content-missing', JSON.stringify(missing))
   const journal = await state.getJournal()
   const destructive = journal?.ops.some((op) => op.op === 'delete' || op.op === 'move') ?? false
@@ -493,6 +519,7 @@ export async function reconciliationScan(
   if (reconciliation?.phase === 'requested') {
     found = await scan(fs, basis, filter, {
       retries,
+      yieldTask,
       revalidate: 'all',
       pairMoves: false,
       signal,
@@ -510,9 +537,10 @@ export async function reconciliationScan(
       skipped: [],
       collisions: [],
     }
-    const selected = await revalidationPaths(files, state, { revalidate: 16 })
+    const selected = await revalidationPaths(files, state, { revalidate: 16, ...scheduling })
     const epoch = await scanHintEpoch(state)
     for (const [path, info] of files) {
+      await work.step()
       checkCancellation(signal)
       if (retries && !retries.ready(path, 'scan')) {
         found.dirty.add(path)
@@ -533,6 +561,7 @@ export async function reconciliationScan(
           throw new Error('file changed during content revalidation')
         if (cached === null) {
           const after = await fs.stat(info.path)
+          checkCancellation(signal)
           if (after?.size === info.size && after.mtime === info.mtime)
             await writeScanHint(state, info, epoch, fingerprint.sha)
         }

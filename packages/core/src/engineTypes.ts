@@ -61,6 +61,8 @@ export interface EngineStatus {
 }
 
 export interface EngineOptions {
+  /** Cooperative inventory scheduler: yield a host task; defaults to setTimeout(0). */
+  yieldTask?: () => Promise<void>
   /** Independent pull placements prepared at once (1..32, default 1). */
   placementConcurrency?: number
   /** Share with other connections and host hydration/forwarding to cap active transfers. */

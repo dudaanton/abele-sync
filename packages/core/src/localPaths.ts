@@ -1,4 +1,4 @@
-import { ScanWork } from './scanWork.js'
+import { ScanWork, type ScanScheduling } from './scanWork.js'
 import { transact } from './stateTransaction.js'
 import { AbeleError, caseKey, validatePath } from '@abele/sync-protocol'
 import type { FileSystem } from './fs.js'
@@ -154,9 +154,13 @@ export class LocalPaths {
       )
     return matches.length === 1 ? matches[0] : undefined
   }
-  static async read(fs: FileSystem, state?: StateStore): Promise<LocalPaths> {
+  static async read(
+    fs: FileSystem,
+    state?: StateStore,
+    opts: ScanScheduling = {}
+  ): Promise<LocalPaths> {
     const result = new LocalPaths()
-    const work = new ScanWork()
+    const work = new ScanWork(opts)
     const parents = (path: string) => {
       const segments = path.split('/')
       for (let n = 1; n < segments.length; n++)

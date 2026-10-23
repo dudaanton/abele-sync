@@ -1,11 +1,22 @@
+import { checkCancellation } from './cancellation.js'
+
+export interface ScanScheduling {
+  /** Yield a host task (not merely a resolved promise). Defaults to setTimeout(0). */
+  yieldTask?: () => Promise<void>
+  signal?: AbortSignal
+}
+
 /** Macrotask checkpoints: resolved promises alone never let a renderer paint. */
 export class ScanWork {
   private count = 0
   private started = performance.now()
+  constructor(private readonly opts: ScanScheduling = {}) {}
   async step() {
-    // Bound both batch size and CPU time; avoid reading the clock for every path.
-    if (++this.count % 128 !== 0 || performance.now() - this.started < 8) return
-    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    checkCancellation(this.opts.signal)
+    if (++this.count < 256 && performance.now() - this.started < 8) return
+    await (this.opts.yieldTask?.() ?? new Promise<void>((resolve) => setTimeout(resolve, 0)))
+    checkCancellation(this.opts.signal)
+    this.count = 0
     this.started = performance.now()
   }
 }

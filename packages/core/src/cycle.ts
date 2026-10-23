@@ -179,7 +179,8 @@ export class SyncCycle {
       .record(
         stoppableListings(opts.fs, () => signal),
         structuredClone(record),
-        this.filter
+        this.filter,
+        { signal, yieldTask: opts.yieldTask }
       )
       .catch((error: unknown) => {
         if (!(error instanceof EngineError && error.code === 'lost'))
@@ -319,7 +320,10 @@ export class SyncCycle {
     // whether or not the host asked for the rescan.
     await importLegacyPullHolds(state, client)
     await this.recordScope(this.ctx.signal?.())
-    const scope = await this.scope.review(scanningFs, this.filter)
+    const scope = await this.scope.review(scanningFs, this.filter, {
+      signal: this.ctx.signal?.(),
+      yieldTask: this.ctx.opts.yieldTask,
+    })
     for (const path of scope.forgotten) {
       log(`scope: ${path} went while this device did not sync it; the vault's copy is kept`)
     }
@@ -380,7 +384,8 @@ export class SyncCycle {
         client,
         this.ctx.signal?.(),
         comparisonCursor,
-        this.retries
+        this.retries,
+        this.ctx.opts.yieldTask
       )
     )
     const reconciliation = inspection.reconciliation
@@ -477,6 +482,7 @@ export class SyncCycle {
         : undefined
     const found = await this.scanWork(() =>
       scan(scanningFs, state, this.scanFilter, {
+        yieldTask: this.ctx.opts.yieldTask,
         retries: this.retries,
         signal: this.ctx.signal?.(),
         persistHints: true,

@@ -1,3 +1,5 @@
+import { ScanWork, type ScanScheduling } from './scanWork.js'
+import { checkCancellation } from './cancellation.js'
 import type { FileSystem } from './fs.js'
 import { IgnoreRules } from './ignore.js'
 import { unguarded } from './guard.js'
@@ -94,10 +96,16 @@ export class ScopeMarks {
    * then file this scope. Neither the server nor, but for a ledger no scope was ever filed for,
    * the disk is asked anything.
    */
-  record(fs: FileSystem, scope: ScopeRecord, filter: ScanFilter): Promise<void> {
+  record(
+    fs: FileSystem,
+    scope: ScopeRecord,
+    filter: ScanFilter,
+    opts: ScanScheduling = {}
+  ): Promise<void> {
     return serially(this.state, async () => {
       const marks = await this.load()
-      const entries = await this.entries()
+      const work = new ScanWork(opts)
+      const entries = await this.entries(opts)
       const raw = this.state.getMeta ? await this.state.getMeta(SCOPE_KEY) : null
       const previous = raw === null ? null : parseRecord(raw)
       let changed = false
@@ -107,22 +115,27 @@ export class ScopeMarks {
         changed = true
       }
       for (const entry of entries) {
+        await work.step()
         if (isEngineOwn(entry.wirePath)) continue
         if (filter.excluded(entry.wirePath, entry.size)) mark(entry)
       }
       if (this.state.getMeta !== undefined && raw === null) {
         for (const entry of entries) {
+          await work.step()
           if (isEngineOwn(entry.wirePath) || marks.has(entry.fileId)) continue
           if ((await fs.stat(entry.path)) === null) mark(entry)
         }
       } else if (previous !== null && canonical(previous) !== canonical(scope)) {
         const before = filterOf(previous)
         for (const entry of entries) {
+          await work.step()
           if (isEngineOwn(entry.wirePath)) continue
           if (before.excluded(entry.wirePath, entry.size)) mark(entry)
         }
       }
+      checkCancellation(opts.signal)
       if (changed) await this.save(marks)
+      checkCancellation(opts.signal)
       await this.state.setMeta?.(SCOPE_KEY, JSON.stringify(scope))
     })
   }
@@ -132,17 +145,23 @@ export class ScopeMarks {
    * read — as the scan reads them all anyway — and the disk is asked only about the few that
    * were marked and are back in scope.
    */
-  review(fs: FileSystem, filter: ScanFilter): Promise<ScopeReview> {
-    return serially(this.state, () => this.reviewNow(fs, filter))
+  review(fs: FileSystem, filter: ScanFilter, opts: ScanScheduling = {}): Promise<ScopeReview> {
+    return serially(this.state, () => this.reviewNow(fs, filter, opts))
   }
 
-  private async reviewNow(fs: FileSystem, filter: ScanFilter): Promise<ScopeReview> {
+  private async reviewNow(
+    fs: FileSystem,
+    filter: ScanFilter,
+    opts: ScanScheduling
+  ): Promise<ScopeReview> {
     const marks = await this.load()
+    const work = new ScanWork(opts)
     const review: ScopeReview = { forgotten: [], recheck: new Set() }
     const live = new Set<string>()
     let changed = false
     let rewound = false
-    for (const entry of await this.entries()) {
+    for (const entry of await this.entries(opts)) {
+      await work.step()
       if (isEngineOwn(entry.wirePath)) continue
       live.add(entry.fileId)
       if (filter.excluded(entry.wirePath, entry.size)) {
@@ -158,6 +177,7 @@ export class ScopeMarks {
         // still here only costs a walk, while a dropped entry with the cursor past the file's
         // last change would leave it missing here with nothing to bring it.
         if (!rewound) {
+          checkCancellation(opts.signal)
           await this.state.setCursor(0)
           rewound = true
         }
@@ -170,10 +190,12 @@ export class ScopeMarks {
       }
     }
     for (const id of [...marks]) {
+      await work.step()
       if (live.has(id)) continue
       marks.delete(id)
       changed = true
     }
+    checkCancellation(opts.signal)
     if (changed) await this.save(marks)
     return review
   }
@@ -189,9 +211,13 @@ export class ScopeMarks {
   }
 
   /** Every entry, read to the end before anything is dropped: a store may not take a write mid-iteration. */
-  private async entries(): Promise<StateEntry[]> {
+  private async entries(opts: ScanScheduling): Promise<StateEntry[]> {
     const entries: StateEntry[] = []
-    for await (const entry of this.state.all()) entries.push(entry)
+    const work = new ScanWork(opts)
+    for await (const entry of this.state.all()) {
+      await work.step()
+      entries.push(entry)
+    }
     return entries
   }
 

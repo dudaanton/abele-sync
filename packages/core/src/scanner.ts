@@ -1,3 +1,4 @@
+import { ScanWork, type ScanScheduling } from './scanWork.js'
 import { AbeleError, caseKey, splitPath, validatePath, type CommitOp } from '@abele/sync-protocol'
 import type { FileInfo, FileSystem } from './fs.js'
 import { fingerprintFile } from './fs.js'
@@ -76,7 +77,7 @@ export interface ScanResult {
   collisions: CaseCollision[]
 }
 
-export interface ScanOptions {
+export interface ScanOptions extends ScanScheduling {
   retries?: import('./fileRetry.js').FileRetries
   signal?: AbortSignal
   /** Durable scan hints only; uploads and pull writes still verify their actual bytes. */
@@ -111,15 +112,25 @@ export async function revalidationPaths(
   opts: ScanOptions
 ): Promise<Set<string>> {
   if (!opts.revalidate) return new Set()
-  const candidates = [...files.keys()].sort(byPath)
+  const work = new ScanWork(opts)
+  const candidates: string[] = []
+  for (const path of files.keys()) {
+    await work.step()
+    candidates.push(path)
+  }
+  candidates.sort(byPath)
   const after = (await state.getMeta?.('content-sweep-after')) ?? ''
-  const ordered = [
-    ...candidates.filter((path) => path > after),
-    ...candidates.filter((path) => path <= after),
-  ]
+  const later: string[] = [],
+    earlier: string[] = []
+  for (const path of candidates) {
+    await work.step()
+    ;(path > after ? later : earlier).push(path)
+  }
+  const ordered = [...later, ...earlier]
   const selected: string[] = []
   let bytes = 0
   for (const path of ordered) {
+    await work.step()
     if (
       opts.revalidate !== 'all' &&
       (selected.length >= (opts.revalidate ?? 0) ||
@@ -130,6 +141,7 @@ export async function revalidationPaths(
     selected.push(path)
     bytes += files.get(path)!.size
   }
+  checkCancellation(opts.signal)
   if (!opts.readOnly && selected.length > 0)
     await state.setMeta?.('content-sweep-after', selected[selected.length - 1]!)
 
@@ -179,10 +191,12 @@ async function walkTree(
   skip: (path: string, reason: string) => void,
   collisions: CaseCollision[],
   remembered: Map<string, { winner: string; losers: string[] }>,
-  inventory: LocalPaths
+  inventory: LocalPaths,
+  work: ScanWork
 ): Promise<Map<string, FileInfo>> {
   const candidates = new Map<string, FileInfo[]>()
   for await (const listed of fs.list()) {
+    await work.step()
     // The wire has no time before 1970. A host that reports one would have every batch the
     // file is in refused as a whole, so the clock starts at the epoch here whatever it says.
     const info = listed.mtime < 0 ? { ...listed, mtime: 0 } : listed
@@ -206,6 +220,7 @@ async function walkTree(
   }
   const files = new Map<string, FileInfo>()
   for (const [wirePath, twins] of candidates) {
+    await work.step()
     if (inventory.blocked(wirePath)) continue
     const known = remembered.get(wirePath)
     if (known && !twins.some((t) => t.path === known.winner)) {
@@ -244,9 +259,10 @@ async function walkTree(
  * and must modify its entry rather than create a second one under the same path. Exclusion
  * decides only whether an entry with no file on disk is deleted, which `scan` does below.
  */
-async function readState(state: StateStore): Promise<Map<string, StateEntry>> {
+async function readState(state: StateStore, work: ScanWork): Promise<Map<string, StateEntry>> {
   const entries = new Map<string, StateEntry>()
   for await (const entry of state.all()) {
+    await work.step()
     if (isEngineOwn(entry.wirePath)) continue
     entries.set(entry.wirePath, entry)
   }
@@ -334,6 +350,8 @@ export async function scan(
   filter: ScanFilter,
   opts: ScanOptions = {}
 ): Promise<ScanResult> {
+  const work = new ScanWork(opts)
+  checkCancellation(opts.signal)
   const hash = opts.hash ?? sha256
   const hintEpoch = opts.persistHints ? await scanHintEpoch(state) : ''
   const skipped: SkippedPath[] = []
@@ -360,12 +378,13 @@ export async function scan(
   }
 
   const present = new Set<string>()
-  const entries = await readState(state)
+  const entries = await readState(state, work)
   const recreated = new Map<string, SourceRecreation>()
   const recreationKeys = state.metadataKeys
     ? await state.metadataKeys('pull-source-recreated:')
     : [...entries.values()].map((entry) => `pull-source-recreated:${entry.fileId}`)
   for (const key of recreationKeys) {
+    await work.step()
     const id = key.slice('pull-source-recreated:'.length)
     const entry = await state.byFileId(id)
     const record = entry && (await sourceRecreation(state, entry))
@@ -374,7 +393,8 @@ export async function scan(
   const recreatedPaths = new Set(
     [...recreated].flatMap(([path, record]) => [path, record.target.normalize('NFC')])
   )
-  const inventory = await LocalPaths.read(fs, state)
+  const inventory = await LocalPaths.read(fs, state, opts)
+  checkCancellation(opts.signal)
   if (!opts.readOnly) await inventory.rememberDirectories(state)
   const collisions: CaseCollision[] = inventory.directoryCollisions()
   const remembered = await rememberedCollisions(state)
@@ -386,9 +406,14 @@ export async function scan(
     skip,
     collisions,
     remembered,
-    inventory
+    inventory,
+    work
   )
-  for (const path of remembered.keys()) if (!present.has(path)) remembered.delete(path)
+  for (const path of remembered.keys()) {
+    await work.step()
+    if (!present.has(path)) remembered.delete(path)
+  }
+  checkCancellation(opts.signal)
   if (!opts.readOnly)
     await state.setMeta?.('normalization-collisions', JSON.stringify([...remembered]))
 
@@ -396,16 +421,19 @@ export async function scan(
   // so a case-only rename on a case-sensitive disk is still paired into a move below.
   const synced = new Map<string, string>()
   for (const entry of entries.values()) {
+    await work.step()
     if (present.has(entry.wirePath) && !recreated.has(entry.wirePath))
       synced.set(caseKey(entry.wirePath), entry.wirePath)
   }
 
+  const tracked = new Map<string, FileInfo>()
+  if (opts.revalidate)
+    for (const [path, info] of files) {
+      await work.step()
+      if (entries.has(path)) tracked.set(path, info)
+    }
   const revalidate = opts.revalidate
-    ? await revalidationPaths(
-        new Map([...files].filter(([path]) => entries.has(path))),
-        state,
-        opts
-      )
+    ? await revalidationPaths(tracked, state, opts)
     : new Set<string>()
 
   const hashes = new Map<string, string>()
@@ -415,6 +443,7 @@ export async function scan(
   const fresh: string[] = []
   let unreadCandidate = false
   for (const [wirePath, info] of files) {
+    await work.step()
     checkCancellation(opts.signal)
     const entry = recreated.has(wirePath) ? undefined : entries.get(wirePath)
     if (opts.retries && !opts.retries.ready(wirePath, 'scan')) {
@@ -470,6 +499,7 @@ export async function scan(
         sha = fingerprint.sha
         if (opts.persistHints && !opts.readOnly) {
           const after = await fs.stat(info.path)
+          checkCancellation(opts.signal)
           if (after?.size === info.size && after.mtime === info.mtime)
             await writeScanHint(state, info, hintEpoch, sha)
         }
@@ -527,14 +557,18 @@ export async function scan(
       }
     }
   }
-  const missing = [...entries.values()].filter(
-    (entry) =>
+  const missing: StateEntry[] = []
+  for (const entry of entries.values()) {
+    await work.step()
+    if (
       !inventory.blocked(entry.wirePath) &&
       (!recreated.has(entry.wirePath) || classified.has(entry.wirePath)) &&
       (!opts.retries || opts.retries.ready(entry.wirePath, 'scan')) &&
       (!present.has(entry.wirePath) || classified.has(entry.wirePath)) &&
       !filter.excluded(entry.wirePath, entry.size)
-  )
+    )
+      missing.push(entry)
+  }
   fresh.sort(byPath)
   missing.sort((a, b) => byPath(a.wirePath, b.wirePath))
   const classifiedTargets = new Set(classified.values())
