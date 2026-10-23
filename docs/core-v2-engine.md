@@ -361,3 +361,9 @@ chosen tree (or move it back), remove competing matching copies, then call
 SyncEngine.retryNow() or rescan(). These public actions re-scan directory evidence;
 they do not blindly clear an evidence hold. No force-delete/force-adopt API is
 implied by retry.
+
+Directory evidence holds block installation and local publication, but incoming
+deferred metadata remains reviewable. Stage it before testing placement refusals,
+including when replaying an older refusal after deferral is enabled. An approval
+that meets the hold remains a deferred decision; it must not be reported as applied
+or dropped merely because no bytes were written.

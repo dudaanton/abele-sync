@@ -230,6 +230,17 @@ describe('daemon plugin code approval', () => {
       expect(after.find((item) => item.path === code('local-delete'))).toEqual(oldBefore)
       expect(existsSync(join(pair.b, code('local-rename')))).toBe(false)
       expect(await listed('local-rename', pair.b)).toBeDefined()
+      expect((await decide('local-rename', '--approve', pair.b)).code).toBe(0)
+      await write(pair.a, code('local-rename'), 'newPluginUpdated()')
+      await write(pair.a, code('local-rename', 'manifest.json'), '{"version":"2.0.0"}')
+      await syncOnce(pair.a)
+      await syncOnce(pair.b)
+      expect(await listed('local-rename', pair.b)).toBeDefined()
+      const approval = await decide('local-rename', '--approve', pair.b)
+      expect(approval.code, approval.all).toBe(1)
+      expect(approval.all).toContain('still held')
+      expect(await listed('local-rename', pair.b)).toBeDefined()
+      expect(await read(pair.b, code('local-rename'))).toBe('newPlugin()')
     } finally {
       reused.mockRestore()
     }

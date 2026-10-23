@@ -19,6 +19,68 @@ import { ExpectedWrites } from '../../src/echo.js'
 import { resumeJournal } from '../../src/pusher.js'
 import type { EngineClient } from '../../src/engineClient.js'
 import { stoppableClient } from '../../src/guard.js'
+import { readStaged, StagedChanges } from '../../src/defer.js'
+
+it.each([false, true])(
+  'lists deferred changes behind a directory hold (already refused=%s)',
+  async (alreadyRefused) => {
+    const fs = new MemoryFileSystem(),
+      state = new MemoryStateStore()
+    const bytes = new Uint8Array([1]),
+      sha = await sha256(bytes)
+    await state.setCursor(1)
+    const change: ChangeItem = {
+      seq: 2,
+      file_id: 'code',
+      version_id: 'v2',
+      path: 'blocked/main.js',
+      prev_path: null,
+      kind: 'attachment',
+      op: 'create',
+      sha,
+      size: 1,
+      mtime: 1,
+      actor: { kind: 'system', id: 'test', name: 'test' },
+      at: '',
+    }
+    let refusing = true
+    const getBlob = vi.fn(async () => bytes)
+    const client = {
+      changes: async (since: number) => ({
+        items: since < 2 ? [change] : [],
+        next_since: 2,
+        head_seq: 2,
+      }),
+      pathRefusal: () =>
+        refusing ? { code: 'conflict', message: 'directory evidence is ambiguous' } : undefined,
+      getBlob,
+    } as unknown as EngineClient
+    const options = {
+      expected: new ExpectedWrites(),
+      dirty: new Set<string>(),
+      filter: { excluded: () => false },
+    }
+    if (alreadyRefused) await pull(client, fs, state, options)
+    const staged = new StagedChanges(state, fs)
+    await pull(client, fs, state, {
+      ...options,
+      defer: () => true,
+      onDefer: (rows) => staged.stage(rows),
+    })
+    expect((await readStaged(state)).map((row) => row.version_id)).toEqual(['v2'])
+    expect(getBlob).not.toHaveBeenCalled()
+    expect(await fs.stat(change.path)).toBeNull()
+    const held = await applyStaged(client, fs, state, [change], options)
+    expect(held.applied).toBe(0)
+    expect(held.held).toEqual([change])
+    expect(getBlob).not.toHaveBeenCalled()
+    expect(await fs.stat(change.path)).toBeNull()
+    refusing = false
+    const installed = await applyStaged(client, fs, state, [change], options)
+    expect(installed.applied).toBe(1)
+    expect(await fs.read(change.path)).toEqual(bytes)
+  }
+)
 
 class DirectoryFs extends MemoryFileSystem {
   dirs = new Map<string, string>()

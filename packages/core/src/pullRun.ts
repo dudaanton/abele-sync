@@ -269,14 +269,24 @@ export class Puller {
     const changes = [...this.heldFiles.values(), ...this.refused.files.values()].sort(
       (a, b) => a.seq - b.seq
     )
-    await this.page(
-      newest(lastPerFile(changes)).filter(
-        (change) => !this.client.pathRefusal?.(change.path) || this.heldFiles.has(change.file_id)
-      ),
-      async () => {
-        await this.save()
-      }
-    )
+    const retry: ChangeItem[] = []
+    for (const change of newest(lastPerFile(changes))) {
+      if (
+        !this.client.pathRefusal?.(change.path) ||
+        this.heldFiles.has(change.file_id) ||
+        (this.opts.defer &&
+          touchesDeferred(
+            this.opts.defer,
+            change.path,
+            change.prev_path,
+            (await this.state.byFileId(change.file_id))?.wirePath
+          ))
+      )
+        retry.push(change)
+    }
+    await this.page(retry, async () => {
+      await this.save()
+    })
   }
 
   /**
@@ -608,6 +618,19 @@ export class Puller {
         await finish(change)
         continue
       }
+      // A directory hold forbids placement, not recording incoming metadata for
+      // review. Approval still takes the ordinary refusal path below.
+      try {
+        const stage = await this.staging(change)
+        if (stage !== null) {
+          staged.push(stage)
+          continue
+        }
+      } catch (error) {
+        if (!(await this.retryFailure(change, error))) throw error
+        await finish(change)
+        continue
+      }
       const refusal = this.client.pathRefusal?.(change.path)
       if (refusal) {
         ;(this.report.rejected ??= []).push({
@@ -622,7 +645,8 @@ export class Puller {
             base: (await this.state.byFileId(change.file_id))?.versionId ?? null,
             firstSeq: this.coverage.get(change.file_id) ?? change.seq,
           })
-          this.holds.resolve(change)
+          if (this.stagedReplay) this.hold(change)
+          else this.holds.resolve(change)
         } else {
           // Legacy stores cannot retain an inbox: leave the feed cursor before it.
           this.hold(change)
@@ -630,14 +654,7 @@ export class Puller {
         await finish(change)
         continue
       }
-      try {
-        const stage = await this.staging(change)
-        if (stage === null) taking.push(change)
-        else staged.push(stage)
-      } catch (error) {
-        if (!(await this.retryFailure(change, error))) throw error
-        await finish(change)
-      }
+      taking.push(change)
     }
     await this.stageAll(staged)
     for (const { change } of staged) {

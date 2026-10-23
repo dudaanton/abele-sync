@@ -9,6 +9,62 @@ import { MemoryStreamingFS } from '../sim/streamingMemoryFs.js'
 import { SimScheduler } from '../sim/scheduler.js'
 import { scan } from '../../src/scanner.js'
 
+it('an inode-reuse hold protects the missing source and candidate across scans', async () => {
+  const fs: FileSystem = new MemoryFileSystem(),
+    state = new MemoryStateStore()
+  const bytes = new Uint8Array([1, 2, 3]),
+    sha = await sha256(bytes)
+  await fs.writeAtomic('other/child.md', new Uint8Array([4, 5, 6]), 1)
+  fs.listDirectories = async function* () {
+    yield { path: 'other', identity: 'recycled', mtime: 1 }
+  }
+  await state.setCursor(1)
+  await state.put({
+    path: 'old/child.md',
+    wirePath: 'old/child.md',
+    fileId: 'child',
+    versionId: 'v1',
+    sha,
+    size: 3,
+    mtime: 1,
+  })
+  await state.setMeta(
+    'v2-directories',
+    JSON.stringify({
+      directories: ['old', 'other'].map((path) => ({
+        file_id: path,
+        version_id: 'v1',
+        path,
+        kind: 'directory',
+        mtime: 1,
+        identity: 'recycled',
+        localPath: path,
+      })),
+      removals: [],
+      // A previous version may already have nominated the independently owned path.
+      refused: [
+        {
+          path: 'other',
+          source: 'old',
+          candidateIdentity: 'recycled',
+          code: 'conflict',
+          message: 'ambiguous',
+          direction: 'push',
+          evidence: true,
+        },
+      ],
+    })
+  )
+  const commit = vi.fn()
+  const directories = new V2Directories(fs, state, () => true, commit)
+  for (let pass = 0; pass < 2; pass++) {
+    await directories.scan()
+    expect(commit).not.toHaveBeenCalled()
+    expect(directories.refusalFor('old/child.md')).toBeDefined()
+    expect(directories.refusalFor('other/child.md')).toBeDefined()
+  }
+})
+
 it('D-201 refreshes the current entry after an earlier plan commits', async () => {
   const fs = new MemoryStreamingFS(new SimScheduler(201)),
     state = new MemoryStateStore()
@@ -56,7 +112,7 @@ it('D-201 refreshes the current entry after an earlier plan commits', async () =
       ops.push(...batch)
       return batch.map((op) => ({
         status: 'applied',
-      file_id: 'file_id' in op ? op.file_id : 'new',
+        file_id: 'file_id' in op ? op.file_id : 'new',
         version_id: 'v2',
         path: 'a',
         seq: 2,
