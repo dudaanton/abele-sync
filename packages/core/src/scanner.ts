@@ -499,7 +499,8 @@ export async function scan(
         sha = fingerprint.sha
         if (opts.persistHints && !opts.readOnly) {
           const after = await fs.stat(info.path)
-          checkCancellation(opts.signal)
+          // Drain the verified hint for an already-issued read. Cancellation
+          // stops the next path; it must not force this same content read on restart.
           if (after?.size === info.size && after.mtime === info.mtime)
             await writeScanHint(state, info, hintEpoch, sha)
         }

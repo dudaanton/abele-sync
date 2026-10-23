@@ -561,7 +561,8 @@ export async function reconciliationScan(
           throw new Error('file changed during content revalidation')
         if (cached === null) {
           const after = await fs.stat(info.path)
-          checkCancellation(signal)
+          // Drain the verified hint for an already-issued read. Cancellation
+          // stops the next path; it must not force this same content read on restart.
           if (after?.size === info.size && after.mtime === info.mtime)
             await writeScanHint(state, info, epoch, fingerprint.sha)
         }
