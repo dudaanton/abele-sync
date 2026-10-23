@@ -13,6 +13,7 @@ import { inTheWay, sentBy, type Content, type PushDisk } from './pushDisk.js'
 import type { PushReport, Refusal, ResumeOptions } from './pusher.js'
 import type { Aside, Verdicts } from './pushVerdicts.js'
 import type { StateEntry, StateStore } from './state.js'
+import { rejectedOp } from './pushRefusal.js'
 
 /**
  * A commit's verdicts carried onto this disk and into this state, one op at a time, inside the
@@ -52,8 +53,11 @@ export class VerdictRecorder {
   /** Write a refusal down, once. */
   refuse(sha: string, refusal: Refusal): void {
     if (this.refused.has(sha)) return
-    this.refused.set(sha, { code: refusal.code, message: refusal.message })
-    this.opts.log?.(`push: the server will not take ${sha}: ${refusal.code} ${refusal.message}`)
+    this.refused.set(sha, {
+      code: refusal.code,
+      message: refusal.message,
+      details: refusal.details,
+    })
   }
 
   /** One op and what the server made of it. */
@@ -70,7 +74,7 @@ export class VerdictRecorder {
       // as the scan found it and the op reported as refused, so the engine keeps its path clear
       // of the pulls and the next scan sends it again.
       const message = `the server answered with a path this device will not take: ${problem}`
-      this.report.rejected.push({ op, code: 'invalid_path', message })
+      this.report.rejected.push(await rejectedOp(this.state, op, { code: 'invalid_path', message }))
       this.opts.log?.(`push: ${op.op} not recorded: ${message}`)
       return
     }
@@ -80,8 +84,9 @@ export class VerdictRecorder {
       // goes back where it was: the entry still says the old path, and left at the new one
       // the file would be a rename every scan sends and the server refuses again, while the
       // pull holds whatever the server settled on because the old path counts as edited.
-      this.report.rejected.push({ op, code: result.code, message: result.message })
-      this.opts.log?.(`push: ${op.op} refused: ${result.code} ${result.message}`)
+      const rejected = await rejectedOp(this.state, op, result, this.opts.maxFileBytes)
+      this.report.rejected.push(rejected)
+      this.opts.log?.(`push: ${op.op} refused: ${result.code} ${rejected.message}`)
       if ('sha' in op && FINAL_REFUSALS.has(result.code)) this.refuse(op.sha, result)
       if (op.op === 'move') await this.disk.undoMove(op)
       return

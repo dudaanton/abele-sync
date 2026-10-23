@@ -33,6 +33,7 @@ import { VerdictPlanner } from './pushVerdicts.js'
 import type { StateStore, StateEntry, Journal } from './state.js'
 import { checkCancellation } from './cancellation.js'
 import { isFinalForBatch } from './commitErrors.js'
+import { rejectedOp } from './pushRefusal.js'
 import { requestReconciliation } from './reconciliation.js'
 export { batches } from './pushBatches.js'
 
@@ -62,12 +63,18 @@ export interface RejectedOp {
   op: CommitOp | Extract<V2CommitOp, { op: 'mkdir' }>
   code: ErrorCode
   message: string
+  /** Logical wire path, resolved per operation rather than from a blob digest. */
+  path?: string
+  size?: number
+  /** Byte ceiling supplied by the server, or null when it was not disclosed. */
+  limit?: number | null
 }
 
 /** What the server said when it refused some bytes for good: over the cap, or over the quota. */
 export interface Refusal {
   code: ErrorCode
   message: string
+  details?: Record<string, unknown>
 }
 
 /**
@@ -125,6 +132,8 @@ export interface ResumeOptions {
    * refusal; the engine owns the map and empties it when the cap or the quota changes.
    */
   refused?: Map<string, Refusal>
+  /** Last learned server file ceiling, for refusals whose response omits details. */
+  maxFileBytes?: number
   /**
    * Which files this device syncs at all. A verdict whose head this device does not sync —
    * over its size cap, most often, where the server's newer file won a race with a small local
@@ -584,9 +593,10 @@ class Pusher {
       }
       const said = refusal ?? wait
       if (said === undefined) continue
-      this.report.rejected.push({ op, ...said })
+      const rejected = await rejectedOp(this.state, op, said, this.opts.maxFileBytes)
+      this.report.rejected.push(rejected)
       this.opts.log?.(
-        `push: ${op.op} refused: ${said.code} ${said.message} ` +
+        `push: ${op.op} refused: ${said.code} ${rejected.message} ` +
           (refusal === undefined ? '(sent again next time)' : '(not sent again)')
       )
     }
@@ -683,7 +693,7 @@ class Pusher {
         `push: the server refused the batch of ${sending.length}: ${error.code} ${error.message}`
       )
       for (const op of sending) {
-        this.report.rejected.push({ op, code: error.code, message: error.message })
+        this.report.rejected.push(await rejectedOp(this.state, op, error, this.opts.maxFileBytes))
       }
       await this.state.setJournal(null)
       return
@@ -699,12 +709,14 @@ class Pusher {
       )
     }
     const superseded = new Set<number>()
-    const countSuperseded = (at: number) => {
+    const countSuperseded = async (at: number, state = this.state) => {
       const result = results[at]!
       // Reports count acknowledged answers, including already-settled replay,
       // without granting the old answer authority to mutate the current file.
       if (result.status === 'rejected')
-        this.report.rejected.push({ op: sending[at]!, code: result.code, message: result.message })
+        this.report.rejected.push(
+          await rejectedOp(state, sending[at]!, result, this.opts.maxFileBytes)
+        )
       else if (result.status === 'applied') this.report.applied++
       else if (result.status === 'merged') this.report.merged++
       else this.report.conflicts++
@@ -718,7 +730,7 @@ class Pusher {
         const path = result.status !== 'rejected' ? result.path : op.op === 'create' ? op.path : ''
         if (!(await receiptStillCurrent(this.fs, this.state, { op, result, path }))) {
           superseded.add(at)
-          countSuperseded(at)
+          await countSuperseded(at)
         }
       }
     const verdicts = await this.planner.plan(sending, results, superseded)
@@ -768,7 +780,7 @@ class Pusher {
                 const path =
                   result.status !== 'rejected' ? result.path : op.op === 'create' ? op.path : ''
                 if (!(await receiptStillCurrent(this.fs, tx, { op, result, path }))) {
-                  countSuperseded(at)
+                  await countSuperseded(at, tx)
                   recorded++
                   continue
                 }
@@ -939,8 +951,7 @@ class Pusher {
       // Other devices' uploads fill the quota for now: this push goes on without the file, and
       // the next one asks again rather than taking the answer as final.
       if (error.code === 'quota_waiting') {
-        this.waiting.set(sha, { code: error.code, message: error.message })
-        this.opts.log?.(`push: ${sha} waits for room: ${error.message}`)
+        this.waiting.set(sha, { code: error.code, message: error.message, details: error.details })
         return
       }
       // The file changed between the scan and the upload, so those bytes are not that

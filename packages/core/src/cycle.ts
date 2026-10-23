@@ -275,6 +275,7 @@ export class SyncCycle {
       expected: this.ctx.expected,
       onApplied: this.ctx.opts.onApplied,
       refused: this.refused,
+      maxFileBytes: undefined as number | undefined,
       filter: this.filter,
       // A push answered with the server's bytes for a staged path stages them, as a pull would
       ...(this.ctx.opts.defer === undefined
@@ -323,6 +324,7 @@ export class SyncCycle {
     const vault = await client.state()
     this.ctx.set({ headSeq: vault.head_seq, cursor: await state.getCursor() })
     this.learnLimits(vault.settings.max_file_bytes, vault.settings.quota_bytes)
+    common.maxFileBytes = vault.settings.max_file_bytes
     await this.retries.refreshServerPolicy(this.refusedUnder!, vault.head_seq)
     const comparisonCursor = await state.getCursor()
     let earlyPull: PullReport | null = null
@@ -539,6 +541,7 @@ export class SyncCycle {
     for (const refusal of client.directoryRefusals?.() ?? []) {
       pushed.rejected.push({
         op: { op: 'mkdir', path: refusal.path },
+        path: refusal.path,
         code: refusal.code,
         message: refusal.message,
       })
