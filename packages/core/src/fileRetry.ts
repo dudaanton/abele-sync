@@ -2,6 +2,7 @@ import { AbeleError } from '@abele/sync-protocol'
 import type { FileSystem } from './fs.js'
 import type { StateStore } from './state.js'
 import { isFinalForBatch } from './commitErrors.js'
+import { afterStateCommit, transact } from './stateTransaction.js'
 
 export type RetryPhase = 'pull' | 'push' | 'scan' | 'recovery'
 export interface WaitingFile {
@@ -212,9 +213,17 @@ export class FileRetries {
       ...(attempt === undefined ? {} : { attempt }),
     }
     if (!state.setMeta || !state.metadataKeys) throw error
-    await state.setMeta(key(path), JSON.stringify(row))
-    this.rows.set(path, row)
-    this.log(`sync: ${path} waiting: ${row.reason}${row.quarantined ? ' (recovery review)' : ''}`)
+    const persist = async (tx: StateStore) => {
+      await tx.setMeta!(key(path), JSON.stringify(row))
+      afterStateCommit(tx, () => {
+        this.rows.set(path, row)
+        this.log(
+          `sync: ${path} waiting: ${row.reason}${row.quarantined ? ' (recovery review)' : ''}`
+        )
+      })
+    }
+    if (state === this.state) await transact(state, persist)
+    else await persist(state)
   }
   async succeeded(path: string, phase?: RetryPhase, state = this.state): Promise<void> {
     const row = this.rows.get(path)
@@ -223,9 +232,14 @@ export class FileRetries {
       (phase && row.phase !== phase && !(phase === 'pull' && row.phase === 'push' && !row.local))
     )
       return
-    await state.setMeta?.(key(path), null)
-    // A scoped mutation is only tentative until its caller commits and reloads.
-    if (state === this.state) this.rows.delete(path)
+    const persist = async (tx: StateStore) => {
+      await tx.setMeta?.(key(path), null)
+      afterStateCommit(tx, () => {
+        if (this.rows.get(path) === row) this.rows.delete(path)
+      })
+    }
+    if (state === this.state) await transact(state, persist)
+    else await persist(state)
   }
   async retryNow(): Promise<void> {
     await this.load()

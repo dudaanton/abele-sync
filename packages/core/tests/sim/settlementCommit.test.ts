@@ -1,5 +1,6 @@
 import { expect, it } from 'vitest'
 import { PullHolds } from '../../src/pullHolds.js'
+import { FileRetries } from '../../src/fileRetry.js'
 import { transact } from '../../src/stateTransaction.js'
 import { commitAppliedSettlement } from '../../src/settlement.js'
 import { change } from '../unit/holdFixture.js'
@@ -11,8 +12,16 @@ it('keeps unresolved work, ledger publication and cursor atomic at every commit 
     const scheduler = new SimScheduler(701)
     let state = new DurableStateStore(scheduler)
     let holds = new PullHolds(state)
+    const retryOwner = () =>
+      new FileRetries(
+        state,
+        () => 10000,
+        () => {}
+      )
+    let retries = retryOwner()
     await holds.load()
     const item = await change(0)
+    await retries.failed(item.path, 'pull', new Error('disk failure'))
     holds.put({ change: item, base: null, firstSeq: item.seq })
     await transact(state, async (tx) => {
       await holds.persist(10, true, tx)
@@ -34,6 +43,7 @@ it('keeps unresolved work, ledger publication and cursor atomic at every commit 
             mtime: item.mtime!,
           })
           await holds.persist(10, true, tx)
+          await retries.succeeded(item.path, 'pull', tx)
         }
       )
     }
@@ -50,9 +60,12 @@ it('keeps unresolved work, ledger publication and cursor atomic at every commit 
       state = state.reopen()
       holds = new PullHolds(state)
       await holds.load()
+      retries = retryOwner()
+      await retries.load()
       const cursor = await state.getCursor()
       expect([0, 10]).toContain(cursor)
       expect(holds.files.has(item.file_id)).toBe(cursor === 0)
+      expect(retries.has(item.path)).toBe(cursor === 0)
       expect((await state.byFileId(item.file_id)) !== null).toBe(cursor === 10)
     }
     let start = scheduler.points.length
