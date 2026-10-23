@@ -845,24 +845,20 @@ export class Puller {
       this.report.applied++
       return
     }
-    if (
-      !this.latestSnapshot &&
-      entry === null &&
-      (await this.placer.matchesTarget(change, entry))
-    ) {
+    const adoption = await this.placer.adoptExisting(change, entry, this.latestSnapshot)
+    if (adoption === 'held') {
       // An untracked equal file may be an offline edit. Only the actual head can
       // acknowledge it; an intermediate page cannot establish its clean base.
       this.hold(change)
       return
     }
-    if (await this.placer.adoptExisting(change, entry, this.latestSnapshot)) {
+    if (adoption) {
       this.report.applied++
       return
     }
     if (touchesDeferred(this.opts.defer, change.path, change.prev_path, entry?.wirePath)) {
-      // An earlier equality probe permits metadata adoption only, never a later disk write.
-      if (await this.placer.adoptExisting(change, entry, this.latestSnapshot)) this.report.applied++
-      else await this.stageAll([stageFrom(change, entry)])
+      // The equality probe above permits metadata adoption only, never a later disk write.
+      await this.stageAll([stageFrom(change, entry)])
       return
     }
     if (this.isDirty(change, entry)) {

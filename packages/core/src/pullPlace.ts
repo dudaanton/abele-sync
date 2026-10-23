@@ -169,7 +169,7 @@ export class PullPlacer {
     change: ChangeItem,
     entry: StateEntry | null,
     newest = false
-  ): Promise<boolean> {
+  ): Promise<boolean | 'held'> {
     if (change.op === 'delete' || change.sha === null) return false
     // Arbitrary/staged changes may be historical and still require the old base.
     // A fully collected remote snapshot can acknowledge fresh equal bytes directly.
@@ -211,6 +211,10 @@ export class PullPlacer {
     )
       return false
     if (!sameStat(before, await this.fs.stat(target))) return false
+    // Equality on an intermediate page does not authorize making an untracked
+    // offline edit the clean base for a later page. Reuse this probe, rather
+    // than resolving and reading the target a second time in the caller.
+    if (!newest && entry === null) return 'held'
     return this.remember(
       change,
       change.sha,
