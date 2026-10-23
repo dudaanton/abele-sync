@@ -193,6 +193,14 @@ export const changedState = () =>
   new EngineError('conflict', 'state changed outside the transaction; retry')
 
 const legacyQueue = new WeakMap<StateStore, Promise<unknown>>()
+const committed = new WeakMap<StateStore, Array<() => void>>()
+
+/** In-memory acknowledgements belong to the outer durable commit, not to the
+ * successful return of a nested transaction callback. Unknown host callbacks
+ * conservatively leave their patches dirty, so retry cannot lose work. */
+export function afterStateCommit(state: StateStore, acknowledge: () => void): void {
+  committed.get(state)?.push(acknowledge)
+}
 /** A per-record savepoint inside an existing transaction, including legacy hosts.
  * Failed work never publishes its patch into the surrounding transaction. */
 export async function savepoint<T>(
@@ -232,15 +240,29 @@ export async function savepoint<T>(
  * fallback cannot isolate writes made directly by another host task. Concurrent hosts
  * must implement transactionScoped and pass a distinct handle (never the root store). */
 export function transact<T>(state: StateStore, work: (tx: StateStore) => Promise<T>): Promise<T> {
-  const run = () =>
-    state.transaction((tx) => {
+  const parent = committed.get(state)
+  const run = async () => {
+    const acknowledgements: Array<() => void> = []
+    const scoped = async (tx: StateStore) => {
+      committed.set(tx, acknowledgements)
+      try {
+        return await work(tx)
+      } finally {
+        committed.delete(tx)
+      }
+    }
+    const result = await state.transaction((tx) => {
       if (state.transactionScoped && (!tx || tx === state))
         throw new EngineError(
           'protocol',
           'scoped state store did not provide a transaction capability'
         )
-      return tx === undefined || tx === state ? legacyWork(state, work) : work(tx)
+      return tx === undefined || tx === state ? legacyWork(state, scoped) : scoped(tx)
     })
+    if (parent) for (const acknowledge of acknowledgements) parent.push(acknowledge)
+    else for (const acknowledge of acknowledgements) acknowledge()
+    return result
+  }
   if (state.transactionScoped) return run()
   const previous = legacyQueue.get(state) ?? Promise.resolve()
   const operation = previous.then(run, run)

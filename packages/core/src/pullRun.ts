@@ -9,6 +9,7 @@ import { pathOccupant } from './pathOccupant.js'
 import { placementRefusal } from './placementRefusal.js'
 import { olderPull, recordPull } from './pullHistory.js'
 import { transact } from './stateTransaction.js'
+import { commitAppliedSettlement } from './settlement.js'
 import { replayAuthority } from './replayAuthority.js'
 import { isFileFailure } from './fileRetry.js'
 import {
@@ -459,10 +460,9 @@ export class Puller {
           checkpoint.firstHeld = null
           return tx.setMeta?.(MANIFEST_PROGRESS, progressHeader(checkpoint))
         }
-        await transact(this.state, async (tx) => {
+        await this.commit(async (tx) => {
           await tx.setMeta?.(MANIFEST_PAGE_DATA, progressPage(checkpoint, page))
           await saveProgress(tx)
-          await this.persist(tx)
         })
         // Retain the snapshot boundary before awaiting the tail. A crash followed
         // by a rewind must not turn later feed changes into initial-inventory notes.
@@ -484,18 +484,16 @@ export class Puller {
             if (this.heldFiles.get(change.file_id) !== change) {
               checkpoint.completed.push(change.file_id)
             }
-            await transact(this.state, async (tx) => {
+            await this.commit(async (tx) => {
               await saveProgress(tx)
-              await this.persist(tx)
             })
           }
         )
         checkpoint.heldChanges = []
         checkpoint.seen = [...this.seen].filter((id) => this.opts.recheck?.has(id))
-        await transact(this.state, async (tx) => {
+        await this.commit(async (tx) => {
           await tx.setMeta?.(MANIFEST_PAGE_DATA, progressPage(checkpoint, page))
           await saveProgress(tx)
-          await this.persist(tx)
         })
         cursor = page.next
         if (cursor !== null) {
@@ -833,24 +831,28 @@ export class Puller {
   /**
    * Where the cursor stands after a page: at what was read, or just before the earliest
    * change this run held, so the next run fetches that change again.
-   * Called only inside a state transaction: the hold record and cursor commit together.
+   * The shared commit owns the transaction, unresolved patches and cursor publication.
    */
-  private async persist(tx: StateStore): Promise<void> {
-    this.firstHeld = this.holds.earliest()
-    this.report.cursor = Math.min(
-      this.reached,
-      this.firstHeld === null ? this.reached : this.firstHeld - 1,
-      this.pendingSeq === null ? this.reached : this.pendingSeq - 1
+  private async commit(publish?: (tx: StateStore) => Promise<void>): Promise<void> {
+    this.report.cursor = await commitAppliedSettlement(
+      this.state,
+      () => {
+        this.firstHeld = this.holds.earliest()
+        const first = Math.min(this.firstHeld ?? Infinity, this.pendingSeq ?? Infinity)
+        return { reached: this.reached, firstUnresolved: first === Infinity ? null : first }
+      },
+      async (tx) => {
+        await this.holds.persist(
+          this.walking
+            ? Math.min(this.manifestHead ?? this.reached, this.heldHead ?? Infinity)
+            : this.coveredHead,
+          this.inventoryComplete,
+          tx
+        )
+        await this.refused.persist(this.coveredHead, this.inventoryComplete, tx)
+        await publish?.(tx)
+      }
     )
-    await this.holds.persist(
-      this.walking
-        ? Math.min(this.manifestHead ?? this.reached, this.heldHead ?? Infinity)
-        : this.coveredHead,
-      this.inventoryComplete,
-      tx
-    )
-    await this.refused.persist(this.coveredHead, this.inventoryComplete, tx)
-    await tx.setCursor(this.report.cursor)
   }
 
   /** A checkpoint is another resume position: it cannot skip unrepresented work
@@ -860,8 +862,7 @@ export class Puller {
   }
 
   private async save(): Promise<void> {
-    await transact(this.state, async (tx) => {
-      await this.persist(tx)
+    await this.commit(async (tx) => {
       if (!this.report.bootstrapped || this.walking) return
       if (this.heldFiles.size && this.bootstrapContext !== null) {
         const progress = this.bootstrapContext

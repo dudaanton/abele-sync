@@ -1,4 +1,4 @@
-import { transact } from './stateTransaction.js'
+import { afterStateCommit, transact } from './stateTransaction.js'
 import type { ChangeItem } from '@abele/sync-protocol'
 import type { StateStore } from './state.js'
 import type { EngineClient } from './engineClient.js'
@@ -43,7 +43,8 @@ export class PullHolds {
   private first: string | null = null
   private last: string | null = null
   private readonly previous = new Map<string, string | null>()
-  private readonly changed = new Set<string>()
+  private readonly changed = new Map<string, number>()
+  private revision = 0
   private heap: { id: string; seq: number }[] = []
   private generation: string | null = null
   private readonly paths = new Map<string, Set<string>>()
@@ -123,7 +124,7 @@ export class PullHolds {
     } else {
       if (this.last !== null) {
         this.records.get(this.last)!.next = id
-        this.changed.add(this.last)
+        this.changed.set(this.last, ++this.revision)
       } else this.first = id
       this.previous.set(id, this.last)
       this.last = id
@@ -132,14 +133,14 @@ export class PullHolds {
     }
     this.files.set(id, held.change)
     this.indexPath(held.change)
-    this.changed.add(id)
+    this.changed.set(id, ++this.revision)
   }
 
   setBase(id: string, base: string | null): void {
     const held = this.records.get(id)
     if (held !== undefined && held.base !== base) {
       held.base = base
-      this.changed.add(id)
+      this.changed.set(id, ++this.revision)
     }
   }
 
@@ -150,7 +151,7 @@ export class PullHolds {
     const previous = this.previous.get(id) ?? null
     if (previous !== null) {
       this.records.get(previous)!.next = held.next
-      this.changed.add(previous)
+      this.changed.set(previous, ++this.revision)
     } else this.first = held.next
     if (held.next !== null) this.previous.set(held.next, previous)
     else this.last = previous
@@ -158,7 +159,7 @@ export class PullHolds {
     this.forgetPath(held.change)
     this.records.delete(id)
     this.files.delete(id)
-    this.changed.add(id)
+    this.changed.set(id, ++this.revision)
     // Bound the lazy minimum index even when an old hold pins a long-lived run.
     if (this.heap.length > this.records.size * 2 + 1024) {
       this.heap = []
@@ -216,7 +217,8 @@ export class PullHolds {
     inventoryComplete: boolean,
     tx: StateStore = this.state
   ): Promise<void> {
-    for (const id of this.changed) {
+    const patch = new Map(this.changed)
+    for (const id of patch.keys()) {
       const node = this.records.get(id)
       await tx.setMeta?.(this.key(id), node === undefined ? null : JSON.stringify(node))
     }
@@ -232,7 +234,10 @@ export class PullHolds {
             last: this.last,
           }
     await tx.setMeta?.(this.progressKey, this.header === null ? null : JSON.stringify(this.header))
-    this.changed.clear()
+    afterStateCommit(tx, () => {
+      for (const [id, revision] of patch)
+        if (this.changed.get(id) === revision) this.changed.delete(id)
+    })
   }
 }
 
