@@ -8,8 +8,10 @@ import type { EngineClient } from '../../src/engineClient.js'
 import { DurableStateStore } from './durableState.js'
 import { SimScheduler, EpochError } from './scheduler.js'
 
-it('identity heads match raw feed application across random pages and every crash boundary', async () => {
-  for (let seed = 1; seed <= 8; seed++) {
+// Keep every crash cut, with an independent budget for each deterministic seed.
+it.each([1, 2, 3, 4, 5, 6, 7, 8])(
+  'identity heads match raw feed application across random pages and every crash boundary (seed %i)',
+  async (seed) => {
     const random = new SimScheduler(seed)
     const live = new Map<string, ChangeItem>(),
       events: ChangeItem[] = []
@@ -145,5 +147,6 @@ it('identity heads match raw feed application across random pages and every cras
       if (cut === 'state.setCursor#1') continue
       expect((await execute(false, cut)).image, `seed ${seed}, ${cut}`).toEqual(raw.image)
     }
-  }
-}, 20000)
+  },
+  20000
+)
