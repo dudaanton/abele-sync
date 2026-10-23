@@ -182,6 +182,7 @@ it.each([191, 192, 193, 194])(
           origins.delete(local)
           origins.set(again, 'original')
           local = again
+          identities.set(local, `unobserved-replacement-${name}`)
           await observe(true)
         }
         if (seed % 2 === 0) {

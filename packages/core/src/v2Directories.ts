@@ -458,6 +458,8 @@ export class V2Directories {
     // Occupancy owns the wire identity. A host may replace a directory inode while
     // retaining its contents; that is not authority to recursively delete the server tree.
     // Identity is only rename evidence when the canonical source path is absent.
+    const entries: StateEntry[] = []
+    for await (const entry of this.state.all()) entries.push(entry)
     const previousEvidence = (doc.refused ?? []).filter((row) => row.evidence)
     const previousCandidates = new Map<string, Set<string>>()
     for (const row of doc.refused ?? []) {
@@ -471,6 +473,39 @@ export class V2Directories {
       previousEvidence.some(
         (row) => row.source === source && row.candidateIdentity === dir.identity
       )
+    // Losing both a candidate name and its inode is not deletion evidence.
+    // Relative child paths can nominate a replacement, but only the content
+    // check below can authorize it. Known unchanged foreign directories cannot.
+    for (const old of doc.directories) {
+      if (
+        local.some((dir) => wirePath(dir.path) === old.path) &&
+        !previousEvidence.some((row) => row.source === old.path)
+      )
+        continue
+      if (
+        local.some(
+          (dir) =>
+            wirePath(dir.path) !== old.path &&
+            (dir.identity === old.identity || wasCandidate(old.path, dir))
+        )
+      )
+        continue
+      const children = entries.filter((entry) => entry.wirePath.startsWith(old.path + '/'))
+      for (const dir of local) {
+        const path = wirePath(dir.path)
+        if (path === old.path) continue
+        if (doc.directories.some((other) => other.path === path && other.identity === dir.identity))
+          continue
+        for (const child of children) {
+          const target = path + child.wirePath.slice(old.path.length)
+          if (!(await this.fs.stat(inventory.resolve(target, 'file')))) continue
+          const candidates = previousCandidates.get(old.path) ?? new Set<string>()
+          candidates.add(path)
+          previousCandidates.set(old.path, candidates)
+          break
+        }
+      }
+    }
     const hasPreviousCandidate = (source: string) =>
       local.some((dir) => wirePath(dir.path) !== source && wasCandidate(source, dir))
     for (const old of doc.directories) {
@@ -499,8 +534,6 @@ export class V2Directories {
       (old) => !missing.some((parent) => parent !== old && old.path.startsWith(parent.path + '/'))
     )
     const plans: Array<{ old: LocalDirectory; moved?: (typeof local)[number]; empty: boolean }> = []
-    const entries: StateEntry[] = []
-    for await (const entry of this.state.all()) entries.push(entry)
     for (const old of roots.sort((a, b) => a.path.length - b.path.length)) {
       this.signal?.throwIfAborted()
       // Inode equality only nominates candidates. A replacement rename and

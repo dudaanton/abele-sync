@@ -80,6 +80,9 @@ need directory ports:
   moves or deletes within either side. Candidates cannot acquire fresh identities
   while held. Save both candidate paths and their observed object identities so
   inode replacement or another rename cannot silently release a held subtree.
+  If object/path hints disappear, surviving relative child paths nominate plausible
+  replacement candidates too; only verified content can authorize their move.
+  A disappearing hint alone is not proof that the user deleted the subtree.
   Replacing a resolved hold with its move journal is one durable publication.
   Every directory scan re-evaluates these evidence holds, independently
   of explicit retries for server refusals. Restoring a known child's bytes can
