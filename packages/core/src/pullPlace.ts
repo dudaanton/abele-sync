@@ -10,7 +10,7 @@ import { EngineError } from './errors.js'
 import type { FileInfo, FileSystem, ConditionalFileOperation } from './fs.js'
 import { MAX_CHUNK_BYTES, type AtomicStage } from './streaming.js'
 import { fingerprintFile } from './fs.js'
-import { downloadToStage, TransferBudget, type ChunkSource } from './streaming.js'
+import { chunks, downloadToStage, TransferBudget, type ChunkSource } from './streaming.js'
 import type { PullOptions } from './puller.js'
 import { PendingPullWrites } from './pullWrite.js'
 import type { StateEntry, StateStore } from './state.js'
@@ -58,6 +58,7 @@ export class PullPlacer {
       | 'preserveMissing'
       | 'transferBudget'
       | 'onApplied'
+      | 'prefetchBytes'
     >,
     private readonly hash: (bytes: Uint8Array) => Promise<string>,
     private readonly sequenceKnown = true
@@ -411,17 +412,13 @@ export class PullPlacer {
     const beforeTarget = state.free
     await this.state.setMeta?.(`pull-base:${target}`, JSON.stringify({ base: entry }))
     if (!state.removed && !sameStat(firstTarget, beforeTarget)) return false
-    if (
-      this.fs.beginAtomicWrite &&
-      this.fs.reopenStage &&
-      this.client.openVersion &&
-      change.size !== null
-    ) {
+    const streaming = this.fs.beginAtomicWrite && this.fs.reopenStage && this.client.openVersion && change.size !== null
+    let bytes = streaming ? await this.smallLocalBytes(sha, local) : null
+    if (streaming && bytes === null) {
       return this.streamPlace(change, sha, entry, target, from, beforeTarget, beforeFrom, local)
     }
-    let bytes: Uint8Array | null = null
     if (entry === null || entry.sha !== sha || (firstTarget === null && beforeFrom === null)) {
-      bytes = await this.bytesOf(sha, fetched, local)
+      bytes ??= await this.bytesOf(sha, fetched, local)
       if (bytes === null) return false
     }
     if (!sameStat(beforeTarget, await this.fs.stat(target))) return false
@@ -588,6 +585,66 @@ export class PullPlacer {
     }
   }
 
+  /** A known small copy fits one transfer buffer; it needs no stage or remote read.
+   * Larger copies still use the bounded streaming path. Never search unknown files. */
+  private async smallLocalBytes(
+    sha: string,
+    local: Map<string, StateEntry>
+  ): Promise<Uint8Array | null> {
+    const entry = local.get(sha)
+    if (!entry || this.bufferedLimit === 0 || entry.size > this.bufferedLimit) return null
+    const source = await this.localSource(sha, local)
+    if (source === null) return null
+    return this.smallBytes(source, sha, entry.size)
+  }
+
+  private get bufferedLimit(): number {
+    return Math.max(0, Math.min(MAX_CHUNK_BYTES, this.opts.prefetchBytes ?? MAX_CHUNK_BYTES))
+  }
+
+  private async smallBytes(
+    source: ChunkSource,
+    sha: string,
+    size: number
+  ): Promise<Uint8Array | null> {
+    let closed = false
+    const close = async () => {
+      if (!closed) {
+        closed = true
+        await source.close()
+      }
+    }
+    try {
+      if (
+        !Number.isSafeInteger(size) ||
+        size < 0 ||
+        size > this.bufferedLimit ||
+        source.size !== size
+      )
+        return null
+      return await this.budget.run(async () => {
+        const bytes = new Uint8Array(size)
+        let at = 0
+        for await (const chunk of chunks(
+          {
+            size,
+            read: (offset, length, signal) => source.read(offset, length, signal),
+            assertUnchanged: () => source.assertUnchanged(),
+            close,
+          },
+          this.budget.maxChunkBytes,
+          this.opts.signal
+        )) {
+          bytes.set(chunk, at)
+          at += chunk.length
+        }
+        return (await this.hash(bytes)) === sha ? bytes : null
+      }, this.opts.signal)
+    } finally {
+      await close()
+    }
+  }
+
   private async localSource(
     sha: string,
     local: Map<string, StateEntry>
@@ -601,7 +658,7 @@ export class PullPlacer {
         return await this.fs.openRead(entry.path)
       }
       const have = await this.fs.stat(entry.path)
-      if (!have || have.size > MAX_CHUNK_BYTES) return null
+      if (!have || have.size > this.bufferedLimit) return null
       const bytes = await this.fs.read(entry.path)
       if ((await this.hash(bytes)) !== sha) return null
       return {

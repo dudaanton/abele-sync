@@ -193,3 +193,65 @@ it.each([false, true])(
   }
 )
 
+it('copies a known small bounded source locally without allocating a stage or downloading', async () => {
+  const fs: FileSystem = new MemoryFileSystem(),
+    state = new MemoryStateStore()
+  const bytes = new TextEncoder().encode('sample duplicate content'),
+    sha = await sha256(bytes)
+  await fs.writeAtomic('existing.md', bytes, 1000)
+  await state.put({
+    path: 'existing.md',
+    wirePath: 'existing.md',
+    fileId: 'existing',
+    versionId: 'base',
+    sha,
+    size: bytes.length,
+    mtime: 1000,
+  })
+  fs.openRead = async (path) => source(await fs.read(path))
+  const begin = vi.fn(async () => {
+    throw new Error('Unexpected staging')
+  })
+  fs.beginAtomicWrite = begin
+  fs.reopenStage = async () => {
+    throw new Error('Unexpected recovery')
+  }
+  const openVersion = vi.fn(async () => {
+    throw new Error('Unexpected download')
+  })
+  const getBlob = vi.fn(async () => {
+    throw new Error('Unexpected blob')
+  })
+  await pull(
+    {
+      manifest: async () => ({
+        items: [
+          {
+            file_id: 'copy',
+            version_id: 'copy-version',
+            path: 'copy.md',
+            sha,
+            size: bytes.length,
+            mtime: 2000,
+            seq: 5,
+            kind: 'note',
+          },
+        ],
+        head_seq: 5,
+        next: null,
+      }),
+      changes: async () => ({ items: [], head_seq: 5, next_since: 5 }),
+      openVersion,
+      getBlob,
+    } as unknown as EngineClient,
+    fs,
+    state,
+    options()
+  )
+  expect(begin).not.toHaveBeenCalled()
+  expect(openVersion).not.toHaveBeenCalled()
+  expect(getBlob).not.toHaveBeenCalled()
+  expect(await fs.read('copy.md')).toEqual(bytes)
+  expect(await fs.stat('existing.md')).toMatchObject({ mtime: 1000 })
+})
+
