@@ -348,7 +348,10 @@ export class V2Directories {
     doc.incoming = (doc.incoming ?? []).filter((d) => d.file_id !== fileId)
     if (!old) {
       await this.save(doc)
-      return waiting?.kind === 'directory'
+      return (
+        waiting?.kind === 'directory' ||
+        (doc.tombstones?.some((row) => row.fileId === fileId) ?? false)
+      )
     }
     doc.directories = doc.directories.filter((d) => d.file_id !== fileId)
     if (!keep)

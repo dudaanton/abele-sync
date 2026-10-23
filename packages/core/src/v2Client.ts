@@ -48,6 +48,18 @@ import { MAX_CHUNK_BYTES, type ChunkSource, type ContentIdentity } from './strea
 import { negotiateExternalFiles, checkedExternalVerification } from './externalVerification.js'
 import { isFinalForBatch } from './commitErrors.js'
 import { scanHintEpoch } from './scanHints.js'
+import type { DepartureEvent, DepartureObligation, MembershipEvent } from './departureSettlement.js'
+import { PendingPullWrites } from './pullWrite.js'
+import { pathOccupant } from './pathOccupant.js'
+import { replayAuthority } from './replayAuthority.js'
+import { afterStateCommit, transact } from './stateTransaction.js'
+import { commitAppliedSettlement } from './settlement.js'
+import {
+  AUTHORED_MARK,
+  DEPARTURE_MARK,
+  writeDepartureMark,
+  loadDepartureMarks,
+} from './departureMarks.js'
 
 const NoteCacheSchema = z.object({
   epoch: z.string(),
@@ -76,6 +88,7 @@ export class V2EngineClient implements EngineClient {
   private readonly byteSources = new Map<string, Extract<V2ManifestItem, { sha: string }>>()
   private ports: { fs: FileSystem; state: StateStore } | undefined
   private directories: V2Directories | undefined
+  private departureExcluded: (path: string) => boolean = () => false
   private readonly departed = new Set<string>()
   private readonly localGroupPaths = new Set<string>()
   private readonly authoredDepartures = new Set<string>()
@@ -154,6 +167,7 @@ export class V2EngineClient implements EngineClient {
     if (!state.getMeta || !state.setMeta)
       throw new AbeleError('invalid_request', 'token sync requires durable metadata state ports')
     this.ports = { fs, state }
+    this.departureExcluded = excludeDirectory
     this.http.generation = undefined
     await this.connection(signal)
     const generation = this.http.observedGeneration
@@ -181,6 +195,8 @@ export class V2EngineClient implements EngineClient {
     this.departed.clear()
     for (const path of JSON.parse((await state.getMeta!('v2-departures')) ?? '[]') as string[])
       this.departed.add(path)
+    await loadDepartureMarks(state, AUTHORED_MARK, this.authoredDepartures)
+    await loadDepartureMarks(state, DEPARTURE_MARK, this.departed)
     this.directories = this.directoryState(fs, state, excludeDirectory, signal)
     await this.directories.loadRefusals()
     await this.directories.retireRecreatedDelete()
@@ -360,8 +376,6 @@ export class V2EngineClient implements EngineClient {
       return null
     }
     this.departed.delete(item.path)
-    if (this.ports)
-      await this.ports.state.setMeta!('v2-departures', JSON.stringify([...this.departed]))
     this.files.set(item.path, item)
     this.byteSources.set(item.sha, item)
     return { ...item, seq }
@@ -384,7 +398,12 @@ export class V2EngineClient implements EngineClient {
       const file = await this.fileItem(item, page.cursor)
       if (file) items.push(file)
     }
-    return { items, next: page.next, head_seq: page.cursor }
+    return {
+      items,
+      next: page.next,
+      head_seq: page.cursor,
+      membershipPaths: items.map((item) => item.path),
+    }
   }
   async changes(since: number, limit?: number, signal?: AbortSignal) {
     const page = await this.http.json(V2ChangesSchema, 'GET', '/v2/changes', {
@@ -392,9 +411,19 @@ export class V2EngineClient implements EngineClient {
       signal,
     })
     const items: ChangeItem[] = []
+    const departures: DepartureEvent[] = []
+    const memberships: MembershipEvent[] = []
+    const departing = new Map<string, DepartureEvent>()
     for (const event of page.items) {
       signal?.throwIfAborted()
       if (event.type === 'content') {
+        memberships.push({
+          connection: this.connectionInfo!.token_id,
+          generation: this.http.observedGeneration ?? null,
+          event,
+        })
+        const departure = departing.get(event.file_id)
+        if (departure && departure.event.cursor < event.cursor) departure.supersededBy = event
         if (event.prev_path) this.files.delete(event.prev_path)
         const file = await this.fileItem(event.item, event.cursor)
         if (!file) continue
@@ -406,44 +435,18 @@ export class V2EngineClient implements EngineClient {
           at: event.at,
         })
       } else {
-        const entry = this.ports ? await this.ports.state.byFileId(event.file_id) : null
-        this.files.delete(event.path)
         if (event.type === 'removal') {
-          const retain =
-            this.authoredDepartures.has(event.path) ||
-            ((await this.onRemoval?.(event.file_id, event.path)) ?? false)
-          this.authoredDepartures.delete(event.path)
-          if (this.ports)
-            await this.ports.state.setMeta!(
-              'v2-authored-departures',
-              JSON.stringify([...this.authoredDepartures])
-            )
-          await this.directories?.departed(event.file_id, retain, event.cursor)
-          this.departed.add(event.path)
-          if (this.ports)
-            await this.ports.state.setMeta!('v2-departures', JSON.stringify([...this.departed]))
-          if (entry) {
-            // A host with overlapping connections decides whether the local bytes still
-            // have a covering connection. A departure never becomes a global delete.
-            let removed = false
-            if (!retain) {
-              await this.ports!.state.setMeta!(
-                `pull-base:${entry.path}`,
-                JSON.stringify({ base: entry })
-              )
-              removed =
-                (await this.ports!.fs.conditionalFile?.({
-                  path: entry.path,
-                  expected: entry,
-                  effect: { kind: 'remove' },
-                })) ?? false
-            }
-            // A refused effect means an unpushed save still depends on this base.
-            // Keep it across departures/rejoins rather than adopting that save as clean.
-            if (retain || removed) await this.ports!.state.delete(entry.path)
+          const departure = {
+            connection: this.connectionInfo!.token_id,
+            generation: this.http.observedGeneration ?? null,
+            event,
           }
+          departures.push(departure)
+          departing.set(event.file_id, departure)
           continue
         }
+        const entry = this.ports ? await this.ports.state.byFileId(event.file_id) : null
+        this.files.delete(event.path)
         if (!entry) {
           // Directory departure owns its cleanup; only unknown/file identities
           // need a tombstone in the file feed before their ledger entry exists.
@@ -470,12 +473,114 @@ export class V2EngineClient implements EngineClient {
     }
     return {
       items,
+      departures,
+      memberships,
       head_seq: page.next === null ? page.cursor : Number.MAX_SAFE_INTEGER,
       next_since: page.cursor,
     }
   }
   syncDirectories() {
     return this.directories?.scan() ?? Promise.resolve()
+  }
+  async settleDeparture(row: DepartureObligation, signal?: AbortSignal) {
+    signal?.throwIfAborted()
+    if (
+      !this.ports ||
+      row.connection !== this.connectionInfo?.token_id ||
+      row.generation !== (this.http.observedGeneration ?? null)
+    )
+      return false as const
+    const { state, fs } = this.ports
+    const { event, base } = row
+    if (row.supersededBy) {
+      if (row.supersededBy.file_id !== event.file_id || row.supersededBy.cursor <= event.cursor)
+        throw new Error('invalid departure supersession proof')
+      return async (_tx: StateStore) => true
+    }
+    // Membership changes even when exclusion/retention blocks local cleanup.
+    // Keep the owned obligation; this mark cannot acknowledge its effects.
+    if (!this.departed.has(event.path)) {
+      await commitAppliedSettlement(
+        state,
+        async () => ({ reached: await state.getCursor(), firstUnresolved: null }),
+        async (tx) => {
+          await writeDepartureMark(tx, DEPARTURE_MARK, event.path, true)
+          signal?.throwIfAborted()
+          afterStateCommit(tx, () => this.departed.add(event.path))
+        }
+      )
+    }
+    const allowed = async (tx: StateStore) => {
+      if (base && row.sourceIdentity !== undefined) {
+        const identity = await fs.fileIdentity?.(base.path)
+        if (identity != null && identity !== row.sourceIdentity) return false
+      }
+      const current = await tx.byFileId(event.file_id)
+      if (
+        [event.path, base?.path, base?.wirePath, current?.path, current?.wirePath].some(
+          (path) => path !== undefined && this.departureExcluded(path)
+        )
+      )
+        return false
+      if (
+        await new PendingPullWrites(tx, fs, true, this).refused(event.file_id, [event.path], base)
+      )
+        return false
+      const target = base?.path ?? event.path
+      return (
+        replayAuthority(
+          event.file_id,
+          base,
+          current,
+          await pathOccupant(fs, tx, target, event.file_id)
+        ) &&
+        (base === null || current?.path === base.path)
+      )
+    }
+    if (!(await allowed(state))) return false as const
+    signal?.throwIfAborted()
+    // The manager-approved host contract is an idempotent side effect, not a lock
+    // or permission to bypass a hold. False keeps the captured event pending.
+    if (this.onRemoval && !(await this.onRemoval(event.file_id, event.path))) return false as const
+    signal?.throwIfAborted()
+    if (!(await allowed(state))) return false as const
+    const retain = this.authoredDepartures.has(event.path) || this.onRemoval !== undefined
+    if (await this.directories?.knows(event.file_id)) {
+      signal?.throwIfAborted()
+      if (!(await this.directories!.departed(event.file_id, retain, event.cursor)))
+        return false as const
+    }
+    if (base && !retain) {
+      await transact(state, async (tx) => {
+        if (!(await allowed(tx))) throw new EngineError('conflict', 'departure source changed')
+        await tx.setMeta!(`pull-base:${base.path}`, JSON.stringify({ base }))
+      })
+      signal?.throwIfAborted()
+      if (!(await allowed(state))) return false as const
+      signal?.throwIfAborted()
+      if (
+        !(await fs.conditionalFile?.({
+          path: base.path,
+          expected: { ...base, identity: row.sourceIdentity },
+          effect: { kind: 'remove' },
+        }))
+      )
+        return false as const
+    }
+    return async (tx: StateStore) => {
+      signal?.throwIfAborted()
+      if (!(await allowed(tx))) return false
+      if (this.authoredDepartures.has(event.path))
+        await writeDepartureMark(tx, AUTHORED_MARK, event.path, false)
+      await writeDepartureMark(tx, DEPARTURE_MARK, event.path, true)
+      if (base) await tx.delete(base.path)
+      afterStateCommit(tx, () => {
+        this.authoredDepartures.delete(event.path)
+        this.departed.add(event.path)
+        this.files.delete(event.path)
+      })
+      return true
+    }
   }
   directoryRefusals() {
     return this.directories?.refusals() ?? []
@@ -489,21 +594,27 @@ export class V2EngineClient implements EngineClient {
   finishPull() {
     return this.directories?.finishPull() ?? Promise.resolve()
   }
-  /** True retains local bytes; hosts check other covering connections under their path lock. */
+  /** Replayable host side effect, called only after durable capture. True acknowledges
+   * host handling and retains its local copy; false leaves the obligation pending.
+   * Must be idempotent. Neither result overrides directory or ownership gates. */
   onRemoval?: (fileId: string, path: string) => Promise<boolean>
   async commitRaw(ops: CommitOp[], key: string): Promise<CommitOutcome> {
     // Record before the request, so losing its response cannot delete the author's local
     // note when the accepted group departure is pulled after journal replay/restart.
     if (this.connectionInfo?.scope.kind === 'group' && this.ports) {
+      const authored = new Set<string>()
       for (const op of ops)
         if (op.op === 'modify') {
           const item = [...this.files.values()].find((file) => file.file_id === op.file_id)
-          if (item && !this.localGroupPaths.has(item.path)) this.authoredDepartures.add(item.path)
+          if (item && !this.localGroupPaths.has(item.path)) authored.add(item.path)
         }
-      await this.ports.state.setMeta!(
-        'v2-authored-departures',
-        JSON.stringify([...this.authoredDepartures])
-      )
+      if (authored.size)
+        await transact(this.ports.state, async (tx) => {
+          for (const path of authored) await writeDepartureMark(tx, AUTHORED_MARK, path, true)
+          afterStateCommit(tx, () => {
+            for (const path of authored) this.authoredDepartures.add(path)
+          })
+        })
     }
     const { body, replayed } = await this.sendCommit(ops, key)
     return {

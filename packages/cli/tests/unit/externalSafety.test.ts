@@ -43,6 +43,32 @@ beforeEach(async () => {
   dir = await mkdtemp(join(scratch, 'external-safety-'))
   writeConfig(dir, cfg)
 })
+it('retirement sees a pending connection departure and permits its resolved evidence', () => {
+  const state = SqliteStateStore.open(dbFile())
+  const key = 'settlement-departure:row:00000000000002'
+  const departure = {
+    connection: 'token',
+    generation: null,
+    base: null,
+    event: {
+      type: 'removal',
+      file_id: 'file',
+      path: 'A.md',
+      cursor: 2,
+      at: '2026-01-01T00:00:00.000Z',
+    },
+  }
+  try {
+    state.setMeta(key, JSON.stringify({ ...departure, pending: true }))
+    expect(() => assertLocalSafety(dir, true)).toThrow('unfinished connection departure')
+    state.setMeta(key, JSON.stringify({ ...departure, pending: false }))
+    expect(() => assertLocalSafety(dir, true)).not.toThrow()
+    state.setMeta('settlement-departure:index:', '4')
+    expect(() => assertLocalSafety(dir, true)).toThrow('unfinished connection departure')
+  } finally {
+    state.close()
+  }
+})
 afterEach(async () => {
   vi.restoreAllMocks()
   await rm(dir, { recursive: true, force: true })

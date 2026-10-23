@@ -11,6 +11,8 @@ import { placementRefusal } from './placementRefusal.js'
 import { olderPull, recordPull } from './pullHistory.js'
 import { transact } from './stateTransaction.js'
 import { commitAppliedSettlement } from './settlement.js'
+import { captureDepartures, dispatchDepartures } from './departureSettlement.js'
+import { DEPARTURE_MARK, writeDepartureMark } from './departureMarks.js'
 import { replayAuthority } from './replayAuthority.js'
 import { isFileFailure } from './fileRetry.js'
 import {
@@ -244,6 +246,7 @@ export class Puller {
   }
 
   async run(): Promise<void> {
+    await dispatchDepartures(this.state, this.client, this.opts.signal, 1000, this.opts.retries)
     await importLegacyPullHolds(this.state, this.client)
     this.reached = this.report.cursor
     this.inventoryComplete = this.report.cursor > 0
@@ -441,7 +444,7 @@ export class Puller {
       }
       do {
         checkCancellation(this.opts.signal)
-        const page: ManifestResponse =
+        const page: ManifestResponse & { membershipPaths?: string[] } =
           progress?.page ?? (await this.client.manifest(cursor, MANIFEST_PAGE))
         head ??= progress?.head ?? page.head_seq
         this.manifestHead = head
@@ -463,6 +466,8 @@ export class Puller {
           return tx.setMeta?.(MANIFEST_PROGRESS, progressHeader(checkpoint))
         }
         await this.commit(async (tx) => {
+          for (const path of page.membershipPaths ?? [])
+            await writeDepartureMark(tx, DEPARTURE_MARK, path, false)
           await tx.setMeta?.(MANIFEST_PAGE_DATA, progressPage(checkpoint, page))
           await saveProgress(tx)
         })
@@ -556,6 +561,8 @@ export class Puller {
     const firsts = new Map<string, number>()
     checkCancellation(this.opts.signal)
     const page = await this.client.changes(since, CHANGES_PAGE)
+    await captureDepartures(this.state, page.departures ?? [], this.fs, page.memberships)
+    await dispatchDepartures(this.state, this.client, this.opts.signal, 1000, this.opts.retries)
     for (const change of page.items)
       firsts.set(change.file_id, Math.min(firsts.get(change.file_id) ?? change.seq, change.seq))
     const complete =

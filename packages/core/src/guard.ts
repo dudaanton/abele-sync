@@ -251,6 +251,7 @@ export function stoppableClient(
             'commitRaw',
             'syncDirectories',
             'finishPull',
+            'settleDeparture',
             'retryRefusedDirectories',
             'commit',
             'putBlob',

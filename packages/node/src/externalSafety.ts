@@ -5,6 +5,7 @@ import SqliteDatabase from 'better-sqlite3'
 import {
   decodeExternalDocument,
   decodePullIntent,
+  decodeDeparture,
   EngineError,
   ExternalState,
   ExternalStateError,
@@ -171,6 +172,12 @@ export function assertLocalSafety(
                 hold('foreign external binding')
             }
           }
+          if (row.key.startsWith('daemon:settlement-departure:row:')) {
+            const departure = decodeDeparture(row.value)
+            if (departure.pending) hold('unfinished connection departure')
+          }
+          if (row.key === 'daemon:settlement-departure:index:')
+            hold('unfinished connection departure')
           if (row.key.startsWith('daemon:pull-write:')) {
             const intent = decodePullIntent(row.value, row.key.slice('daemon:pull-write:'.length))
             const live =

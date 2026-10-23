@@ -10,6 +10,7 @@ import type {
 import type { FileSystem } from './fs.js'
 import type { StateStore } from './state.js'
 import type { ChunkSource, ContentIdentity } from './streaming.js'
+import type { DepartureEvent, DepartureObligation, MembershipEvent } from './departureSettlement.js'
 
 export interface CommitOutcome {
   body: CommitResponse
@@ -36,12 +37,29 @@ export interface EngineClient {
     maxChunkBytes?: number
   ): Promise<void>
   state(): Promise<VaultState>
-  manifest(cursor: string | null, limit?: number, signal?: AbortSignal): Promise<ManifestResponse>
+  manifest(
+    cursor: string | null,
+    limit?: number,
+    signal?: AbortSignal
+  ): Promise<ManifestResponse & { membershipPaths?: string[] }>
   /** Restore transport membership/content lookup caches from a durable manifest snapshot. */
   rememberManifest?(
     items: readonly import('@abele/sync-protocol').ManifestItem[]
   ): void | Promise<void>
-  changes(since: number, limit?: number, signal?: AbortSignal): Promise<ChangesResponse>
+  changes(
+    since: number,
+    limit?: number,
+    signal?: AbortSignal
+  ): Promise<
+    ChangesResponse & {
+      departures?: DepartureEvent[]
+      memberships?: MembershipEvent[]
+    }
+  >
+  settleDeparture?(
+    obligation: DepartureObligation,
+    signal?: AbortSignal
+  ): Promise<false | ((tx: StateStore) => Promise<boolean>)>
   commitRaw(ops: CommitOp[], key: string): Promise<CommitOutcome>
   commit(ops: CommitOp[], key: string): Promise<CommitResponse>
   /** Both upload methods perform an authoritative existence check before sending bytes. */

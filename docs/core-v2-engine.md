@@ -20,9 +20,12 @@ const client = new V2EngineClient(encodedToken, {
   WebSocket: hostWebSocket,
 })
 
-// Return true only if another active connection still covers this local identity/path.
-// Take the host's normal path-coordinator lock while deciding and applying changes.
-client.onRemoval = async (serverFileId, path) => otherConnectionsCoverThisPath(path)
+// Called only after durable capture; it can repeat after interruption.
+// Return false to keep the obligation pending and retry with backoff.
+client.onRemoval = async (serverFileId, path) => {
+  await retainSharedCopy(serverFileId, path) // idempotent host operation
+  return true
+}
 
 const engine = new SyncEngine({
   client,
@@ -184,7 +187,7 @@ journal/checkpoint. Missing metadata methods fail explicitly.
 
 Directory commits are journaled before HTTP. An uncertain response is replayed
 with the same key and body; explicit stale-base replies allow a feed refresh.
-Remote directory effects and scope departures can occur while decoding scoped
+Remote directory effects can still occur while decoding scoped
 pages, so the adapter declares `readEffects`. Engine stop drains these calls
 before the host may close the ledger. Filesystem/state effects still use the
 host's ownership/recovery guards.
@@ -198,13 +201,29 @@ selector uses the server's current path, not the encoded display hint.
 Folder scanning is limited to that selector. `.obsidian` is excluded through a
 partial folder connection. Scope departures are not represented as file deletes:
 
-- If another connection covers the file, `onRemoval` returns true and local bytes
-  remain. The departed connection forgets its baseline and suppresses re-upload.
-- Without another covering connection, unchanged shared bytes are removed locally.
-  Locally edited bytes are preserved rather than silently lost.
+- An installed `onRemoval` hook is an idempotent host side effect. True acknowledges
+  that the host has retained what it needs: local bytes remain and core retires its
+  own baseline only under the ordinary source/physical-owner and hold gates.
+- False leaves the exact versionless obligation pending with bounded retry backoff.
+  The callback is not a lock or a covering-connection revision capability.
+- Without a hook, unchanged shared bytes are removed conditionally. Authored
+  departures retain their copy. Local edits and protected sources remain pending.
 - Content returning to scope clears the departure mark and is pulled normally.
 - A real delete goes through the retained puller and reaches other root/covering
   connections as an ordinary local deletion.
+
+Versionless removals are decoded as metadata. The pull dispatcher captures their
+connection, generation, cursor, kind, file identity and original source before
+calling the host. Resolution, ledger retirement and the applied cursor share the
+settlement transaction. A later authoritative content event can supersede a
+departure with a durable reference; a changed baseline alone cannot. Completed
+delivery records deduplicate replay. A fixed-depth radix index finds the oldest
+unresolved sequence without queue enumeration; each dispatch pass admits at most
+1,000 departures. Per-path membership overrides retain legacy-array reads without
+rewriting those arrays for every item. Lifecycle safety sees both pending records
+and their index. Directory content/tombstone decoding and the remaining A7 writer
+inventory are not yet fully routed through this service.
+
 - Revocation/unavailable scope fails connection validation and never deletes local
   files merely because authority ended.
 

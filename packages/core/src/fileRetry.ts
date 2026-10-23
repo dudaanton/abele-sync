@@ -4,7 +4,7 @@ import type { StateStore } from './state.js'
 import { isFinalForBatch } from './commitErrors.js'
 import { afterStateCommit, transact } from './stateTransaction.js'
 
-export type RetryPhase = 'pull' | 'push' | 'scan' | 'recovery'
+export type RetryPhase = 'pull' | 'push' | 'scan' | 'recovery' | 'departure'
 export interface WaitingFile {
   path: string
   phase: RetryPhase
@@ -60,7 +60,7 @@ export class FileRetries {
             typeof row.path !== 'string' ||
             (row.owner !== undefined && typeof row.owner !== 'string') ||
             key(row.path) !== name ||
-            !['pull', 'push', 'scan', 'recovery'].includes(row.phase) ||
+            !['pull', 'push', 'scan', 'recovery', 'departure'].includes(row.phase) ||
             !Number.isSafeInteger(row.attempts) ||
             row.attempts < 1 ||
             !Number.isFinite(row.nextAt) ||
@@ -157,14 +157,15 @@ export class FileRetries {
     for (;;) {
       const row = this.rows.get(path)
       const otherDirection =
-        row?.phase === 'push' &&
-        !row.local &&
-        (phase === 'pull' ||
-          phase === 'scan' ||
-          (path === target &&
-            attempt !== undefined &&
-            row.attempt !== undefined &&
-            attempt !== row.attempt))
+        (row?.phase === 'departure' && phase !== 'departure') ||
+        (row?.phase === 'push' &&
+          !row.local &&
+          (phase === 'pull' ||
+            phase === 'scan' ||
+            (path === target &&
+              attempt !== undefined &&
+              row.attempt !== undefined &&
+              attempt !== row.attempt)))
       if (row && !otherDirection && (row.quarantined || row.nextAt > this.now())) return false
       const at = path.lastIndexOf('/')
       if (at < 0) return true
@@ -196,7 +197,8 @@ export class FileRetries {
   ): Promise<void> {
     // Multiple phases can see the same failed path in one cycle; count one attempt.
     const prior = this.rows.get(path)
-    if (prior?.phase === 'recovery' && phase !== 'recovery') return
+    if ((prior?.phase === 'recovery' || prior?.phase === 'departure') && phase !== prior.phase)
+      return
     const changedAttempt =
       attempt !== undefined && prior?.attempt !== undefined && attempt !== prior.attempt
     if (prior && prior.phase === phase && !changedAttempt && !this.ready(path)) return

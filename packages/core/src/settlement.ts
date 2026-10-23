@@ -1,5 +1,6 @@
 import type { StateStore } from './state.js'
 import { transact } from './stateTransaction.js'
+import { firstSettlementSequence } from './settlementIndex.js'
 
 export interface AppliedFrontier {
   reached: number
@@ -14,13 +15,14 @@ export interface AppliedFrontier {
  * the returned cursor is usable only after durable publication succeeds. */
 export async function commitAppliedSettlement(
   state: StateStore,
-  frontier: () => AppliedFrontier,
+  frontier: () => AppliedFrontier | Promise<AppliedFrontier>,
   publish: (tx: StateStore) => Promise<void>
 ): Promise<number> {
   return transact(state, async (tx) => {
     await publish(tx)
-    const { reached, firstUnresolved } = frontier()
-    const cursor = Math.min(reached, firstUnresolved === null ? reached : firstUnresolved - 1)
+    const { reached, firstUnresolved } = await frontier()
+    const departure = await firstSettlementSequence(tx)
+    const cursor = Math.min(reached, (firstUnresolved ?? Infinity) - 1, (departure ?? Infinity) - 1)
     await tx.setCursor(cursor)
     return cursor
   })

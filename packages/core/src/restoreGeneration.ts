@@ -1,6 +1,7 @@
 import { transact } from './stateTransaction.js'
 import type { StateEntry, StateStore } from './state.js'
 import { readReconciliation, requestReconciliation } from './reconciliation.js'
+import { AUTHORED_MARK, DEPARTURE_MARK, departureMarkKeys } from './departureMarks.js'
 
 export const GENERATION_KEY = 'server-restore-generation'
 export const RECONCILING_KEY = 'server-restore-reconciling'
@@ -81,6 +82,8 @@ export async function reconcileGeneration(state: StateStore, generation: string 
       const localReconciliation = await readReconciliation(tx)
       const metadata: Record<string, string | null> = {}
       const resetKeys = new Set([...RESET_KEYS, ...pullKeys])
+      for (const prefix of [DEPARTURE_MARK, AUTHORED_MARK])
+        for (const key of await departureMarkKeys(tx, prefix)) resetKeys.add(key)
       for (const key of resetKeys) metadata[key] = await tx.getMeta!(key)
       await tx.setMeta!(
         `retired-generation:${old ?? 'legacy'}`,

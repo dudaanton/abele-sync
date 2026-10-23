@@ -1,6 +1,7 @@
 import { encodeAccessToken } from '@abele/sync-protocol'
 import { expect, it, vi } from 'vitest'
 import { MemoryFileSystem, MemoryStateStore, V2EngineClient } from '../../src/index.js'
+import { captureDepartures, dispatchDepartures } from '../../src/departureSettlement.js'
 
 it.each([false, true])(
   'D-205 cleans a departed empty directory only when user-included, across restart (excluded=%s)',
@@ -64,9 +65,10 @@ it.each([false, true])(
               }),
       })
     let client = makeClient()
-    client.onRemoval = async () => false
     await client.prepare(fs, state, () => excluded, undefined, true)
-    await client.changes(1)
+    const page = await client.changes(1)
+    await captureDepartures(state, page.departures)
+    await dispatchDepartures(state, client)
     expect(client.includes(path)).toBe(false)
     // Restart after queuing cleanup but before finishPull, with durable departures.
     client = makeClient()
