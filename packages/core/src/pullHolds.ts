@@ -33,6 +33,10 @@ interface LegacyHeader {
 /** A durable linked index: a changed hold touches at most itself and one neighbor.
  * No metadata enumeration capability is required from the host. */
 export class PullHolds {
+  /** Unacknowledged obligations must be persisted before continuing a page. */
+  get dirty(): boolean {
+    return this.changed.size > 0
+  }
   readonly files = new Map<string, ChangeItem>()
   readonly records = new Map<string, Node>()
   header: Header | null = null

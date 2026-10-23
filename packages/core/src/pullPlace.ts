@@ -1,4 +1,5 @@
 import { pathOccupant } from './pathOccupant.js'
+import { olderPull, pullHistoryKey, recordPull } from './pullHistory.js'
 import { replayAuthority } from './replayAuthority.js'
 import { transact } from './stateTransaction.js'
 import { AbeleError, caseKey, normalisePath, type ChangeItem } from '@abele/sync-protocol'
@@ -57,9 +58,10 @@ export class PullPlacer {
       | 'transferBudget'
       | 'onApplied'
     >,
-    private readonly hash: (bytes: Uint8Array) => Promise<string>
+    private readonly hash: (bytes: Uint8Array) => Promise<string>,
+    private readonly sequenceKnown = true
   ) {
-    this.pending = new PendingPullWrites(state, fs)
+    this.pending = new PendingPullWrites(state, fs, sequenceKnown)
     this.paths = LocalPaths.filePass(fs, state)
     this.budget = opts.transferBudget ?? new TransferBudget()
   }
@@ -248,13 +250,14 @@ export class PullPlacer {
    * the disk would not let go of it — a folder or a link has taken the name — and the change
    * is held for a later pull, rather than the whole sync failing on it every time.
    */
-  async drop(entry: StateEntry): Promise<boolean> {
+  async drop(entry: StateEntry, change?: ChangeItem): Promise<boolean> {
     if ((await LocalPaths.forFile(this.fs, entry.wirePath, this.state)).blocked(entry.wirePath))
       return false
     if (!(await this.clearPath(entry.path, entry))) return false
     this.opts.expected.clear(entry.path)
     await transact(this.state, async (tx) => {
       await tx.delete(entry.path)
+      if (change) await recordPull(tx, change, true)
       await tx.setMeta?.(scanHintKey(entry.path), null)
       await new PendingPullWrites(tx, this.fs).clear(entry.fileId)
     })
@@ -705,6 +708,7 @@ export class PullPlacer {
     const recorded = await transact(this.state, async (tx) => {
       if (!(await new PendingPullWrites(tx, this.fs).authorizes(change, base, target))) return false
       const current = await tx.byFileId(change.file_id)
+      if (this.sequenceKnown && await olderPull(tx, change, current)) return false
       let occupant = await pathOccupant(this.fs, tx, target, change.file_id)
       // Only a fresh authoritative snapshot may replace a verified equal
       // occupant. Saved intents cannot take this branch, even with equal bytes.
@@ -731,6 +735,8 @@ export class PullPlacer {
         size: have.size,
         mtime: have.mtime,
       })
+      if (this.sequenceKnown) await recordPull(tx, change)
+      else await tx.setMeta?.(pullHistoryKey(change.file_id), null)
       await tx.setMeta?.(scanHintKey(target), null)
       await tx.setMeta?.(`pull-base:${target}`, null)
       if (from !== null) await tx.setMeta?.(scanHintKey(from), null)

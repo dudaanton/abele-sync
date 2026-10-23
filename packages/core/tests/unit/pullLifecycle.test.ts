@@ -83,6 +83,55 @@ async function fixture() {
   } as unknown as EngineClient
   return { fs, state, bytes, sha, change, client }
 }
+it.each([undefined, 11])(
+  'recovery orders a receipt by its real sequence, never a synthetic one (seq=%s)',
+  async (seq) => {
+    const f = await fixture()
+    const old = new Uint8Array([1])
+    const base = {
+      path: 'file.bin',
+      wirePath: 'file.bin',
+      fileId: 'file',
+      versionId: 'old',
+      sha: await sha256(old),
+      size: 1,
+      mtime: 1,
+    }
+    await f.fs.writeAtomic('file.bin', old, 1)
+    await f.state.put(base)
+    await f.state.setMeta(
+      'pull-applied:file',
+      JSON.stringify({ generation: null, seq: 10, version: 'old', absent: false })
+    )
+    await f.fs.conditionalFile!({
+      path: 'file.bin',
+      expected: base,
+      effect: { kind: 'write', bytes: f.bytes, mtime: 2, receipt: 'receipt' },
+    })
+    await f.state.setMeta(
+      'pull-write:file',
+      JSON.stringify({
+        ...(seq === undefined ? {} : { seq }),
+        receiptId: 'receipt',
+        fileId: 'file',
+        versionId: 'new',
+        wirePath: 'file.bin',
+        sha: f.sha,
+        size: 1,
+        mtime: 2,
+        target: 'file.bin',
+        from: null,
+        base,
+      })
+    )
+    await recoverPendingPullWrites(f.fs, f.state, ['file'])
+    expect(await f.state.byFileId('file')).toMatchObject({ versionId: 'new' })
+    expect(await f.state.getMeta('pull-write:file')).toBeNull()
+    const proof = await f.state.getMeta('pull-applied:file')
+    if (seq === undefined) expect(proof).toBeNull()
+    else expect(JSON.parse(proof!)).toMatchObject({ seq: 11, version: 'new' })
+  }
+)
 it('D-016 persists pull ownership before stage allocation and keeps its stage id before creation', async () => {
   const f = await fixture()
   f.fs.reopenStage = async () => {
@@ -98,6 +147,7 @@ it('D-016 persists pull ownership before stage allocation and keeps its stage id
   await expect(
     applyStaged(f.client, f.fs, f.state, [f.change], {
       expected: new ExpectedWrites(),
+      prefetchBytes: 0,
       dirty: new Set(),
       filter: { excluded: () => false },
     })
@@ -123,6 +173,7 @@ it('D-016 retains the intent through stage discard after the installed file ledg
   f.fs.reopenStage = async () => stage
   await applyStaged(f.client, f.fs, f.state, [f.change], {
     expected: new ExpectedWrites(),
+    prefetchBytes: 0,
     dirty: new Set(),
     filter: { excluded: () => false },
   })

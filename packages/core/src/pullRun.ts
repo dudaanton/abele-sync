@@ -1,4 +1,5 @@
 import { pathOccupant } from './pathOccupant.js'
+import { olderPull, recordPull } from './pullHistory.js'
 import { transact } from './stateTransaction.js'
 import { replayAuthority } from './replayAuthority.js'
 import { isFileFailure } from './fileRetry.js'
@@ -186,11 +187,13 @@ export class Puller {
   private followedCheckpoint = false
   private latestSnapshot = false
   private stagedReplay = false
+  private lastCompleted: ChangeItem | null = null
   private feedCache: {
     since: number
     items: ChangeItem[]
     head: number
     firsts: Map<string, number>
+    complete: boolean
   } | null = null
   private coverage = new Map<string, number>()
 
@@ -436,7 +439,9 @@ export class Puller {
         const completed = new Set(checkpoint.completed)
         const pending = page.items.map(asCreate)
         for (const item of page.items) this.seen.add(item.file_id)
-        this.latestSnapshot = true
+        // Only the manifest's own head is known when the cached tail is empty.
+        // A later feed page must not acknowledge an intermediate offline edit.
+        this.latestSnapshot = this.feedCache?.complete === true && ahead.length === 0
         await this.page(
           pending.filter((item) => !completed.has(item.file_id) && !laterFiles.has(item.file_id)),
           async (change) => {
@@ -489,41 +494,42 @@ export class Puller {
 
   /** The feed, page after page, until the last one handed out reaches the head. */
   private async follow(): Promise<void> {
-    const page =
-      this.feedCache?.since === this.reached ? this.feedCache : await this.readFeed(this.reached)
-    this.feedCache = null
-    this.latestSnapshot = true
-    this.coverage = page.firsts
-    await this.page(page.items, async (change) => {
-      this.reached = Math.max(this.reached, change.seq)
+    for (;;) {
+      const page =
+        this.feedCache?.since === this.reached ? this.feedCache : await this.readFeed(this.reached)
+      this.feedCache = null
+      this.latestSnapshot = page.complete
+      this.coverage = page.firsts
+      await this.page(page.items, async (change) => {
+        this.reached = Math.max(this.reached, change.seq)
+        await this.save()
+      })
+      this.coverage.clear()
+      this.reached = page.head
       await this.save()
-    })
-    this.coverage.clear()
-    this.reached = page.head
-    await this.save()
+      if (page.complete) return
+    }
   }
 
-  private async readFeed(
-    since: number
-  ): Promise<{ items: ChangeItem[]; head: number; firsts: Map<string, number> }> {
-    const latest = new Map<string, ChangeItem>()
+  private async readFeed(since: number): Promise<{
+    items: ChangeItem[]
+    head: number
+    firsts: Map<string, number>
+    complete: boolean
+  }> {
     const firsts = new Map<string, number>()
-    for (;;) {
-      checkCancellation(this.opts.signal)
-      const previous = since
-      const page = await this.client.changes(since, CHANGES_PAGE)
-      for (const change of page.items) {
-        latest.set(change.file_id, change)
-        firsts.set(change.file_id, Math.min(firsts.get(change.file_id) ?? change.seq, change.seq))
-      }
-      since = page.next_since
-      if (
-        page.next_since >= page.head_seq ||
-        (page.items.length === 0 && page.next_since <= previous)
-      ) {
-        const items = newest([...latest.values()].sort((a, b) => a.seq - b.seq))
-        return { items, head: since, firsts }
-      }
+    checkCancellation(this.opts.signal)
+    const page = await this.client.changes(since, CHANGES_PAGE)
+    for (const change of page.items)
+      firsts.set(change.file_id, Math.min(firsts.get(change.file_id) ?? change.seq, change.seq))
+    const complete =
+      page.next_since >= page.head_seq || (page.items.length === 0 && page.next_since <= since)
+    if (!complete && page.next_since <= since) throw new Error('feed made no progress')
+    return {
+      items: newest([...page.items].sort((a, b) => a.seq - b.seq)),
+      head: page.next_since,
+      firsts,
+      complete,
     }
   }
 
@@ -535,6 +541,22 @@ export class Puller {
    * held at once is bounded by bytes and not by the page's thousand files.
    */
   private async page(
+    changes: ChangeItem[],
+    completed?: (change: ChangeItem) => Promise<void>
+  ): Promise<void> {
+    this.lastCompleted = null
+    try {
+      await this.pageItems(changes, completed)
+    } catch (error) {
+      // Cancellation acknowledges the just-finished file, not the remaining page.
+      // A crashed/revoked process has no signal permission to publish here.
+      if (this.opts.signal?.aborted && this.lastCompleted !== null)
+        await completed?.(this.lastCompleted)
+      throw error
+    }
+  }
+
+  private async pageItems(
     changes: ChangeItem[],
     completed?: (change: ChangeItem) => Promise<void>
   ): Promise<void> {
@@ -561,7 +583,11 @@ export class Puller {
       pending.delete(change.file_id)
       while (next < ordered.length && !pending.has(ordered[next]!.file_id)) next++
       this.pendingSeq = firstSequence()
-      await completed?.(change)
+      this.lastCompleted = change
+      // Clean writes already have a durable ledger entry. A crash may replay
+      // this cached page, but skips those versions without another download.
+      // Holds/refusals are not inferable from the ledger: acknowledge them now.
+      if (this.holds.dirty || this.refused.dirty) await completed?.(change)
     }
     // Staged before anything is fetched: a staged change wants no bytes yet.
     const taking: ChangeItem[] = []
@@ -718,12 +744,18 @@ export class Puller {
     await this.holds.persist(
       this.walking
         ? Math.min(this.manifestHead ?? this.reached, this.heldHead ?? Infinity)
-        : this.reached,
+        : this.coveredHead,
       this.inventoryComplete,
       tx
     )
-    await this.refused.persist(this.reached, this.inventoryComplete, tx)
+    await this.refused.persist(this.coveredHead, this.inventoryComplete, tx)
     await tx.setCursor(this.report.cursor)
+  }
+
+  /** A checkpoint is another resume position: it cannot skip unrepresented work
+   * any more than the public cursor can. Durable holds may lie below this head. */
+  private get coveredHead(): number {
+    return Math.min(this.reached, this.pendingSeq === null ? this.reached : this.pendingSeq - 1)
   }
 
   private async save(): Promise<void> {
@@ -733,7 +765,7 @@ export class Puller {
       if (this.heldFiles.size && this.bootstrapContext !== null) {
         const progress = this.bootstrapContext
         Object.assign(progress, {
-          head: this.reached,
+          head: this.coveredHead,
           firstHeld: null,
           completed: [],
           heldChanges: [],
@@ -743,7 +775,7 @@ export class Puller {
         await tx.setMeta?.(MANIFEST_PROGRESS, progressHeader(progress))
         await tx.setMeta?.(
           MANIFEST_PAGE_DATA,
-          progressPage(progress, { items: [], next: null, head_seq: this.reached })
+          progressPage(progress, { items: [], next: null, head_seq: this.coveredHead })
         )
       } else {
         await tx.setMeta?.(MANIFEST_PROGRESS, null)
@@ -767,6 +799,10 @@ export class Puller {
     local: Map<string, StateEntry>
   ): Promise<void> {
     const entry = await this.state.byFileId(change.file_id)
+    if (await olderPull(this.state, change, entry)) {
+      this.report.skipped++
+      return
+    }
     if (this.stagedReplay && change.op !== 'delete') {
       let target: string
       try {
@@ -794,11 +830,29 @@ export class Puller {
     }
     // Already here: a change re-read on the way back to the head, or one this device made.
     if (
+      change.op !== 'delete' &&
+      change.sha !== null &&
       entry?.versionId === change.version_id &&
       !(this.opts.recheck?.has(entry.fileId) && (await this.fs.stat(entry.path)) === null)
     ) {
       await this.placer.settled(change)
       this.report.skipped++
+      return
+    }
+    // A recorded installation can settle even on an intermediate page. Check
+    // its provenance before treating equal untracked bytes as an offline edit.
+    if (await this.placer.adopt(change, entry)) {
+      this.report.applied++
+      return
+    }
+    if (
+      !this.latestSnapshot &&
+      entry === null &&
+      (await this.placer.matchesTarget(change, entry))
+    ) {
+      // An untracked equal file may be an offline edit. Only the actual head can
+      // acknowledge it; an intermediate page cannot establish its clean base.
+      this.hold(change)
       return
     }
     if (await this.placer.adoptExisting(change, entry, this.latestSnapshot)) {
@@ -809,10 +863,6 @@ export class Puller {
       // An earlier equality probe permits metadata adoption only, never a later disk write.
       if (await this.placer.adoptExisting(change, entry, this.latestSnapshot)) this.report.applied++
       else await this.stageAll([stageFrom(change, entry)])
-      return
-    }
-    if (await this.placer.adopt(change, entry)) {
-      this.report.applied++
       return
     }
     if (this.isDirty(change, entry)) {
@@ -839,7 +889,7 @@ export class Puller {
       // A delete of a file this device never had is nothing to do, not something done.
       if (entry === null) this.report.skipped++
       else if (await this.placer.edited(entry)) this.hold(change)
-      else if (await this.placer.drop(entry)) this.report.applied++
+      else if (await this.placer.drop(entry, change)) this.report.applied++
       else this.hold(change)
       return
     }
@@ -875,7 +925,7 @@ export class Puller {
       this.hold(change)
       return
     }
-    if (await this.placer.drop(entry)) this.report.applied++
+    if (await this.placer.drop(entry, change)) this.report.applied++
     else this.hold(change)
   }
 
@@ -916,7 +966,10 @@ export class Puller {
     if (entry === null || !this.isNoted(change, entry)) return false
     if ((await this.fs.stat(entry.path)) !== null) return false
     this.opts.expected.clear(entry.path)
-    await this.state.delete(entry.path)
+    await transact(this.state, async (tx) => {
+      await tx.delete(entry.path)
+      await recordPull(tx, change, true)
+    })
     this.report.settled = [...(this.report.settled ?? []), entry.fileId]
     this.opts.log?.(`pull: ${entry.path} was deleted elsewhere too; its held delete is settled`)
     return true

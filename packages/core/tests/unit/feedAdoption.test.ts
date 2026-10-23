@@ -106,13 +106,15 @@ async function fixture(local: number, inventory = false) {
 }
 
 it.each([false, true])(
-  'never places an intermediate version across feed pages (inventory=%s)',
+  'applies page versions in order, skipping inventory versions already superseded by the cached tail (inventory=%s)',
   async (inventory) => {
     const f = await fixture(0, inventory)
     await f.run()
     expect(await f.fs.read('a.bin')).toEqual(f.bytes[2])
-    expect(f.getBlob.mock.calls.map(([sha]) => sha)).toEqual([f.hashes[2]])
-    expect(f.effects).toHaveBeenCalledTimes(1)
+    expect(f.getBlob.mock.calls.map(([sha]) => sha)).toEqual(
+      inventory ? [f.hashes[2]] : [f.hashes[1], f.hashes[2]]
+    )
+    expect(f.effects).toHaveBeenCalledTimes(inventory ? 1 : 2)
   }
 )
 
@@ -127,20 +129,20 @@ it.each([false, true])(
   }
 )
 
-it('coalesces a rename chain before touching either intermediate destination', async () => {
+it('finishes each page of a rename chain before moving on to the next destination', async () => {
   const f = await fixture(0)
   f.changes[0] = { ...f.changes[0]!, op: 'move', path: 'middle.bin', prev_path: 'a.bin' }
   f.changes[1] = { ...f.changes[1]!, op: 'move', path: 'last.bin', prev_path: 'middle.bin' }
   await f.run()
   expect(await f.fs.stat('middle.bin')).toBeNull()
   expect(await f.fs.read('last.bin')).toEqual(f.bytes[2])
-  expect(f.getBlob.mock.calls.map(([sha]) => sha)).toEqual([f.hashes[2]])
+  expect(f.getBlob.mock.calls.map(([sha]) => sha)).toEqual([f.hashes[1], f.hashes[2]])
   expect(
     f.effects.mock.calls.some(
       ([op]) =>
         op.path === 'middle.bin' || (op.effect.kind === 'move' && op.effect.to === 'middle.bin')
     )
-  ).toBe(false)
+  ).toBe(true)
 })
 
 it.each(['held', 'refused'])(
@@ -164,8 +166,8 @@ it.each(['held', 'refused'])(
     expect(await f.state.byFileId('f')).toBeNull()
     expect(await f.state.get('a.bin')).toMatchObject({ fileId: 'replacement', versionId: 'v2' })
     expect(await f.fs.read('a.bin')).toEqual(f.bytes[0])
-    expect(f.effects).not.toHaveBeenCalled()
-    expect(f.getBlob).not.toHaveBeenCalled()
+    expect(f.effects.mock.calls.map(([op]) => op.effect.kind)).toEqual(['write', 'remove', 'write'])
+    expect(f.getBlob.mock.calls.map(([sha]) => sha)).toEqual([f.hashes[1], f.hashes[0]])
   }
 )
 

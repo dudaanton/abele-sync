@@ -7,6 +7,7 @@ import type { FileSystem } from './fs.js'
 
 /** Intent saved before a pull touches the disk, retired atomically with its ledger update. */
 interface PendingPullWrite {
+  seq?: number
   receiptId?: string
   stageId?: string
   owner?: string
@@ -30,7 +31,8 @@ const sameEntry = (a: StateEntry | null, b: StateEntry | null): boolean =>
 export class PendingPullWrites {
   constructor(
     private readonly state: StateStore,
-    private readonly fs?: FileSystem
+    private readonly fs?: FileSystem,
+    private readonly sequenceKnown = true
   ) {}
 
   async prepare(
@@ -44,6 +46,7 @@ export class PendingPullWrites {
     if (this.state.getMeta === undefined || this.state.setMeta === undefined) return
     const owner = this.state.effectOwner?.()
     const pending: PendingPullWrite = {
+      ...(this.sequenceKnown ? { seq: change.seq } : {}),
       ...(receiptId === undefined ? {} : { receiptId }),
       ...(stageId === undefined ? {} : { stageId }),
       ...(owner === undefined ? {} : { owner }),

@@ -211,7 +211,10 @@ it('every crash boundary preserves accepted, refused, held and staged versions i
             if (change.op === 'delete') expect(await fs.stat(change.path)).toBeNull()
             else {
               expect(await fs.read(change.path)).toEqual(bytes)
-              expect((await state.byFileId(change.file_id))?.versionId).toBe(change.version_id)
+              expect(
+                (await state.byFileId(change.file_id))?.versionId,
+                `cut ${cut}, inventory ${inventory}, file ${change.file_id}, history ${await state.getMeta('pull-applied:' + change.file_id)}, approvals ${JSON.stringify(await approvals.list())}`
+              ).toBe(change.version_id)
             }
           }
           return boundaries

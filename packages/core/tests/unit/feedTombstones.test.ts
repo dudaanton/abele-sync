@@ -76,7 +76,7 @@ it.each(['installed', 'incoming'] as const)(
   }
 )
 
-it('coalesces creation followed by an untracked tombstone on a later V2 page', async () => {
+it('applies creation before requesting its tombstone on a later V2 page', async () => {
   const fs = new MemoryFileSystem(),
     state = new MemoryStateStore()
   await state.setCursor(1)
@@ -104,6 +104,10 @@ it('coalesces creation followed by an untracked tombstone on a later V2 page', a
       })
     if (address.pathname === '/v2/changes') {
       const since = Number(address.searchParams.get('since'))
+      if (since === 2) {
+        expect(await fs.read('a.bin')).toEqual(new Uint8Array([1]))
+        expect(await state.byFileId('file')).toMatchObject({ versionId: 'created' })
+      }
       return Response.json({
         items:
           since === 1
@@ -149,5 +153,5 @@ it('coalesces creation followed by an untracked tombstone on a later V2 page', a
   expect(await fs.stat('a.bin')).toBeNull()
   expect(await state.byFileId('file')).toBeNull()
   expect(await state.getCursor()).toBe(3)
-  expect(fetcher.mock.calls.every(([url]) => !String(url).includes('/content'))).toBe(true)
+  expect(fetcher.mock.calls.filter(([url]) => String(url).includes('/content'))).toHaveLength(1)
 })

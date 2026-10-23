@@ -11,6 +11,7 @@ import { discardPullStage, stageMissing } from './pullStages.js'
 import { isFileFailure, type FileRetries } from './fileRetry.js'
 
 interface Intent {
+  seq?: number
   receiptId?: string
   stageId?: string
   owner?: string
@@ -28,6 +29,8 @@ interface Intent {
 export function decodePullIntent(raw: string, fileId: string): Intent {
   try {
     const value = JSON.parse(raw) as Intent
+    if (value?.seq !== undefined && (!Number.isSafeInteger(value.seq) || value.seq < 0))
+      throw new Error('invalid feed sequence')
     if (
       value?.stageId !== undefined &&
       (typeof value.stageId !== 'string' ||
@@ -95,22 +98,24 @@ export async function recoverPendingPullWrites(
   client?: Pick<EngineClient, 'getBlob' | 'openVersion'>,
   opts: { signal?: AbortSignal; expected?: ExpectedWrites; retries?: FileRetries } = {}
 ): Promise<void> {
-  const placer = new PullPlacer(
-    client ?? {
-      getBlob: async () => {
-        throw new ExternalStateError('recovery-required')
+  const placerFor = (sequenceKnown: boolean) =>
+    new PullPlacer(
+      client ?? {
+        getBlob: async () => {
+          throw new ExternalStateError('recovery-required')
+        },
       },
-    },
-    fs,
-    state,
-    {
-      signal: opts.signal,
-      expected: opts.expected ?? new ExpectedWrites(),
-      dirty: new Set(),
-      filter: { excluded: () => false },
-    },
-    sha256
-  )
+      fs,
+      state,
+      {
+        signal: opts.signal,
+        expected: opts.expected ?? new ExpectedWrites(),
+        dirty: new Set(),
+        filter: { excluded: () => false },
+      },
+      sha256,
+      sequenceKnown
+    )
   for (const fileId of fileIds) {
     checkCancellation(opts.signal)
     const raw = await state.getMeta?.(`pull-write:${fileId}`)
@@ -123,11 +128,12 @@ export async function recoverPendingPullWrites(
     const protectedPaths = new Set(entry ? [entry.wirePath] : [])
     try {
       const intent = decodePullIntent(raw, fileId)
+      const placer = placerFor(intent.seq !== undefined)
       path = intent.wirePath
       protectedPaths.add(path)
       if (opts.retries && !opts.retries.ready(path)) continue
       const change: ChangeItem = {
-        seq: 1,
+        seq: intent.seq ?? 1,
         file_id: fileId,
         version_id: intent.versionId,
         path: intent.wirePath,
