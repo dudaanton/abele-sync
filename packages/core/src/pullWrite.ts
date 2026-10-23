@@ -9,6 +9,7 @@ import { DEFERRED_KEY, parse, type Filed } from './deferredFile.js'
 import { transact } from './stateTransaction.js'
 import { pathRefusal } from './placementRefusal.js'
 import type { EngineClient } from './engineClient.js'
+import { hasStoredDirectoryRefusals } from './v2Directories.js'
 
 /** Intent saved before a pull touches the disk, retired atomically with its ledger update. */
 interface PendingPullWrite {
@@ -51,6 +52,9 @@ export class PendingPullWrites {
     extra: Array<string | null | undefined> = [],
     base?: StateEntry | null
   ) {
+    // Most runs have no directory refusals. Revalidate that durable image once
+    // per boundary before loading intent/ledger/decision names unnecessarily.
+    if (!this.client.pathRefusal && !(await hasStoredDirectoryRefusals(this.state))) return
     const pending = await this.read(fileId)
     const current = await this.state.byFileId(fileId)
     const paths = [

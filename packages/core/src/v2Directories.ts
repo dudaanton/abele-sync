@@ -121,7 +121,7 @@ const placementRefusals = new WeakMap<
 >()
 /** Recovery can run before a client's directory cache is prepared. Cache by the
  * exact durable image, never by a run's age or a prior successful placement. */
-export async function storedDirectoryRefusal(state: StateStore, paths: Iterable<string>) {
+async function directoryRefusals(state: StateStore) {
   const raw = (await state.getMeta?.(KEY)) ?? null
   let cached = placementRefusals.get(state)
   if (!cached || cached.raw !== raw) {
@@ -129,10 +129,19 @@ export async function storedDirectoryRefusal(state: StateStore, paths: Iterable<
     cached = { raw, paths: new Map(rows.map((row) => [row.path, row])) }
     placementRefusals.set(state, cached)
   }
+  return cached.paths
+}
+
+export async function hasStoredDirectoryRefusals(state: StateStore): Promise<boolean> {
+  return (await directoryRefusals(state)).size > 0
+}
+
+export async function storedDirectoryRefusal(state: StateStore, paths: Iterable<string>) {
+  const refused = await directoryRefusals(state)
   for (const path of paths) {
     let parent = wirePath(path)
     for (;;) {
-      const refusal = cached.paths.get(parent)
+      const refusal = refused.get(parent)
       if (refusal) return refusal
       const slash = parent.lastIndexOf('/')
       if (slash < 0) break
