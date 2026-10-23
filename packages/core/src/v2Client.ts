@@ -561,7 +561,7 @@ export class V2EngineClient implements EngineClient {
       if (
         !(await fs.conditionalFile?.({
           path: base.path,
-          expected: { ...base, identity: row.sourceIdentity },
+          expected: row.sourceIdentity === null ? null : { ...base, identity: row.sourceIdentity },
           effect: { kind: 'remove' },
         }))
       )

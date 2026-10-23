@@ -18,7 +18,8 @@ export interface DepartureEvent {
 export interface DepartureObligation extends DepartureEvent {
   base: StateEntry | null
   pending: boolean
-  sourceIdentity?: string
+  /** null is observed absence; undefined means the host has no identity port. */
+  sourceIdentity?: string | null
 }
 export type MembershipEvent = Omit<DepartureEvent, 'event' | 'supersededBy'> & {
   event: Extract<V2Change, { type: 'content' }>
@@ -57,7 +58,9 @@ export function decodeDeparture(raw: string): DepartureObligation {
     typeof row.connection !== 'string' ||
     !(row.generation === null || typeof row.generation === 'string') ||
     V2ChangeSchema.parse(row.event).type !== 'removal' ||
-    (row.sourceIdentity !== undefined && typeof row.sourceIdentity !== 'string') ||
+    (row.sourceIdentity !== undefined &&
+      row.sourceIdentity !== null &&
+      typeof row.sourceIdentity !== 'string') ||
     (row.base !== null &&
       (!row.base ||
         row.base.fileId !== row.event.file_id ||
@@ -88,12 +91,12 @@ export async function captureDepartures(
   if (!state.setMeta || !state.getMeta) throw new Error('departure settlement requires metadata')
   const observations = new Map<
     DepartureEvent,
-    { base: StateEntry | null; sourceIdentity?: string }
+    { base: StateEntry | null; sourceIdentity?: string | null }
   >()
   for (const item of events) {
     const base = await state.byFileId(item.event.file_id)
     const sourceIdentity = base ? await fs?.fileIdentity?.(base.path) : undefined
-    observations.set(item, { base, ...(sourceIdentity == null ? {} : { sourceIdentity }) })
+    observations.set(item, { base, ...(sourceIdentity === undefined ? {} : { sourceIdentity }) })
   }
   await commitAppliedSettlement(
     state,

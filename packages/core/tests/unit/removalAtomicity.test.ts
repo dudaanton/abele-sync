@@ -122,6 +122,37 @@ it('pause after an issued host callback retains its obligation without ledger pu
   expect(await fs.read(base.path)).toEqual(original)
 })
 
+it('preserves a file recreated after capturing an absent departure source, even with equal bytes', async () => {
+  const { fs, state, client, base, original } = await fixture()
+  await fs.remove(base.path)
+  const page = await client.changes(1)
+  await captureDepartures(state, page.departures, fs)
+  await fs.writeAtomic(base.path, original, base.mtime)
+  const host = vi.fn(async () => true)
+  client.onRemoval = host
+  await dispatchDepartures(state, client)
+  expect(host).not.toHaveBeenCalled()
+  expect(await firstSettlementSequence(state)).toBe(2)
+  expect(await state.get(base.path)).toEqual(base)
+  expect(await fs.read(base.path)).toEqual(original)
+})
+
+it('conditions removal on observed absence when recreation races the effect', async () => {
+  const { fs, state, client, base, original } = await fixture()
+  await fs.remove(base.path)
+  const page = await client.changes(1)
+  await captureDepartures(state, page.departures, fs)
+  const conditional = fs.conditionalFile.bind(fs)
+  fs.conditionalFile = async (op) => {
+    await fs.writeAtomic(base.path, original, base.mtime)
+    return conditional(op)
+  }
+  await dispatchDepartures(state, client)
+  expect(await firstSettlementSequence(state)).toBe(2)
+  expect(await state.get(base.path)).toEqual(base)
+  expect(await fs.read(base.path)).toEqual(original)
+})
+
 it('preserves malformed departure evidence without invoking the host', async () => {
   const { fs, state, client } = await fixture()
   const page = await client.changes(1)
