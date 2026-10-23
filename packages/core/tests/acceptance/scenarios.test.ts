@@ -49,16 +49,28 @@ for (const dialect of process.env.ABELE_TEST_PG_URL
               facetEngineOptions(scenario.number),
               { connectRoots: scenario.number !== 99 }
             )
-            if (stage1ServerFacets.has(scenario.number)) await serverFacet(scenario.number, fixture)
-            else if (stage2ServerFacets.has(scenario.number))
-              await stage2ServerFacet(scenario.number, fixture)
-            else if (groupServerFacets.has(scenario.number))
-              await groupServerFacet(scenario.number, fixture)
-            else if (externalServerFacets.has(scenario.number))
-              await externalServerFacet(scenario.number, fixture)
-            else if (conflictServerFacets.has(scenario.number))
-              await conflictServerFacet(scenario.number, fixture)
-            else await remainingServerFacet(scenario.number, fixture)
+            const owned = fixture
+            try {
+              if (stage1ServerFacets.has(scenario.number)) await serverFacet(scenario.number, owned)
+              else if (stage2ServerFacets.has(scenario.number))
+                await stage2ServerFacet(scenario.number, owned)
+              else if (groupServerFacets.has(scenario.number))
+                await groupServerFacet(scenario.number, owned)
+              else if (externalServerFacets.has(scenario.number))
+                await externalServerFacet(scenario.number, owned)
+              else if (conflictServerFacets.has(scenario.number))
+                await conflictServerFacet(scenario.number, owned)
+              else await remainingServerFacet(scenario.number, owned)
+            } finally {
+              if (scenario.number === 107) {
+                // The 1,005-note workload includes closing its six ledgers,
+                // two populated blob stores and three local trees. Await the
+                // complete teardown inside its existing work budget, rather
+                // than giving it the empty-fixture hook's independent 10 s.
+                await owned.close()
+                if (fixture === owned) fixture = undefined
+              }
+            }
           },
           // 091 provisions two servers and six ledgers. Its condition-driven
           // convergence must not share the ordinary 20s infrastructure budget

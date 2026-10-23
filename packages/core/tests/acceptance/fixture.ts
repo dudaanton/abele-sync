@@ -257,15 +257,19 @@ export async function acceptanceFixture(
         await device.paste(issued.token, `server-${index + 1}`)
       }
     }
+    let closing: Promise<void> | undefined
     return {
       dir,
       servers,
       roots,
       devices,
-      async close() {
-        for (const device of devices) await device.close()
-        for (const server of servers) await server.close()
-        await rm(dir, { recursive: true, force: true })
+      close() {
+        closing ??= (async () => {
+          for (const device of devices) await device.close()
+          for (const server of servers) await server.close()
+          await rm(dir, { recursive: true, force: true })
+        })()
+        return closing
       },
     }
   } catch (error) {
