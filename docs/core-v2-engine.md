@@ -91,6 +91,16 @@ hosts without this capability hold a resumed distinct-path source. Old intents
 without identity remain held when the source exists. This preserves bytes and
 intent rather than assigning the recreated file to the remote move.
 
+Verified refused stages belong to their exact pending decision. Replacing or
+dropping a deferred decision (including exclusion, explicit discard and host
+connection teardown) must use filesystem-aware `StagedChanges`: it writes a
+durable retirement marker, discards owned bytes and only then forgets the
+decision. Metadata-only callers cannot abandon held bytes. An interrupted
+retirement retries idempotent cleanup; it never reinstalls the retired version.
+On restart, a ledger entry already recording the exact installation takes
+precedence over `heldOrder`: recovery cleans the resolved stage or its dangling
+id before considering whether an unresolved refusal should remain retained.
+
 - `mkdir(path)` preserves existing content and refuses file/symlink obstacles.
 - `moveDirectory(from, to)` preserves local directory identity and contents,
   refusing an occupied target. It is used for remote directory moves where safe.

@@ -907,14 +907,17 @@ export class Puller {
    * and its entry goes with it, or the next scan would push it straight back at its old path.
    */
   private async passOver(change: ChangeItem, entry: StateEntry | null): Promise<void> {
+    if (deferredSource(this.opts.defer, change, entry)) {
+      await this.stageAll([stageFrom(change, entry)])
+      return
+    }
+    // Exclusion also ends an ordinary held pull, which has no deferred record
+    // for Staging.tidy to drop. Keep only a still-deferred source's decision.
+    await this.placer.pending.discardHeld(change)
     // A move the entry already stands at is this device's own coming back — a copy kept here
     // under a head over the cap, moved here — not a file leaving the synced set.
     if (entry === null || entry.wirePath === change.path) {
       this.report.skipped++
-      return
-    }
-    if (deferredSource(this.opts.defer, change, entry)) {
-      await this.stageAll([stageFrom(change, entry)])
       return
     }
     // Not over a local edit, though: that is the engine's to push and settle first.

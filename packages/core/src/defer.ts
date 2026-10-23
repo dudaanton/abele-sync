@@ -1,5 +1,7 @@
 import type { ChangeItem } from '@abele/sync-protocol'
 import type { StateEntry, StateStore } from './state.js'
+import type { FileSystem } from './fs.js'
+import { PendingPullWrites } from './pullWrite.js'
 
 /**
  * Staged changes: the server's changes to files a host would rather
@@ -115,6 +117,8 @@ export async function readStaged(state: StateStore): Promise<ChangeItem[]> {
 /**
  * The engine's staged changes, read once per engine and written through on every change.
  * Only the engine's own run queue writes them, so the copy here is never behind the state.
+ * A mutating caller must supply its filesystem when decisions can own held pull stages;
+ * replacing or dropping a decision retires those bytes before forgetting their owner.
  */
 export class StagedChanges {
   private filed: Filed | null = null
@@ -124,7 +128,10 @@ export class StagedChanges {
     this.filed = null
   }
 
-  constructor(private readonly state: StateStore) {}
+  constructor(
+    private readonly state: StateStore,
+    private readonly fs?: FileSystem
+  ) {}
 
   private async load(): Promise<Filed> {
     if (this.filed === null) {
@@ -174,6 +181,10 @@ export class StagedChanges {
         byId.set(item.change.file_id, { ...before, ...item, change: before.change })
         continue
       }
+      // Ownership ends before the decision is replaced. A crash leaves either
+      // the old decision or its durable retirement marker, never orphaned bytes.
+      if (before !== undefined)
+        await new PendingPullWrites(this.state, this.fs).discardHeld(before.change)
       const same =
         before !== undefined &&
         before.change.sha !== null &&
@@ -191,11 +202,14 @@ export class StagedChanges {
     return fresh
   }
 
-  /** Forget the staged changes of these files. */
+  /** Retire held bytes, then forget the staged changes of these files. */
   async drop(fileIds: Iterable<string>): Promise<void> {
     const gone = new Set(fileIds)
     if (gone.size === 0) return
     const filed = await this.load()
+    for (const one of filed.staged)
+      if (gone.has(one.change.file_id))
+        await new PendingPullWrites(this.state, this.fs).discardHeld(one.change)
     const staged = filed.staged.filter((one) => !gone.has(one.change.file_id))
     if (staged.length === filed.staged.length) return
     await this.save({ ...filed, staged })

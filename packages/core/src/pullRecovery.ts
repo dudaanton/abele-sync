@@ -171,14 +171,6 @@ export async function recoverPendingPullWrites(
       }
       await placer.pending.superseded(change)
       if (intent.retiring) continue
-      // A known refusal owns received bytes, not the local file. Let normal
-      // scan/push classify local edits and the feed resolve or supersede it.
-      if (intent.heldOrder !== undefined) {
-        await placer.pending.retain(fileId, undefined, opts.log)
-        for (const name of [...protectedPaths, `pull-write:${fileId}`])
-          await opts.retries?.succeeded(name, 'recovery')
-        continue
-      }
       if (
         entry?.versionId === intent.versionId &&
         entry.wirePath === intent.wirePath &&
@@ -190,6 +182,14 @@ export async function recoverPendingPullWrites(
         await opts.retries?.succeeded(path, 'recovery')
         await opts.retries?.succeeded(`pull-write:${fileId}`, 'recovery')
         for (const name of protectedPaths) await opts.retries?.succeeded(name, 'recovery')
+        continue
+      }
+      // Installation may have committed the ledger before retiring a formerly
+      // held stage. Only unresolved refusals remain available to scan/push.
+      if (intent.heldOrder !== undefined) {
+        await placer.pending.retain(fileId, undefined, opts.log)
+        for (const name of [...protectedPaths, `pull-write:${fileId}`])
+          await opts.retries?.succeeded(name, 'recovery')
         continue
       }
       if ((await placer.pending.matching(change, entry)) === null)

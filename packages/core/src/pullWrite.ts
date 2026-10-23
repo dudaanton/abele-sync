@@ -127,7 +127,8 @@ export class PendingPullWrites {
   /** Retire bytes before their ownership record. An interrupted retirement is
    * resumed, never interpreted as permission to install or fetch the old stage. */
   private async retire(pending: PendingPullWrite): Promise<void> {
-    if (!this.fs) return
+    if (!this.fs)
+      throw new EngineError('io', 'host cannot retire a held pull stage without its filesystem')
     await this.state.setMeta?.(
       keyFor(pending.fileId),
       JSON.stringify({ ...pending, retiring: true })

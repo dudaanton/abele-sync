@@ -248,7 +248,7 @@ function openConfiguredReplica(
           expected: new ExpectedWrites(),
           filter: vault.filter,
           ...(defer ? { defer } : {}),
-          onDefer: (items) => new StagedChanges(state).stage(items),
+          onDefer: (items) => new StagedChanges(state, disk).stage(items),
           onCommitted: (ops, tx) =>
             holds.tally(
               Date.now(),
