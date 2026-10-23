@@ -355,3 +355,64 @@ it.each(['same path', 'case alias', 'ancestor', 'identity', 'move', 'implicit mo
     if (kind.includes('move')) expect(waves.find((wave) => wave.includes(b))).toEqual([b])
   }
 )
+
+it.each(['valid', 'hash', 'identity'] as const)(
+  'reads an available small source once before direct placement (%s)',
+  async (mode) => {
+    const fs = new MemoryStreamingFS(new SimScheduler(61)),
+      state = new MemoryStateStore()
+    const bytes = new Uint8Array([1, 2, 3]),
+      sha = await sha256(bytes)
+    await fs.writeAtomic('source.bin', bytes, 1)
+    await state.put({
+      path: 'source.bin',
+      wirePath: 'source.bin',
+      fileId: 'source',
+      versionId: 'v1',
+      sha,
+      size: 3,
+      mtime: 1,
+    })
+    Object.assign(fs, { fingerprint: undefined })
+    const open = fs.openRead.bind(fs)
+    let reads = 0,
+      validations = 0
+    fs.openRead = async (path) => {
+      const source = await open(path),
+        read = source.read.bind(source),
+        validate = source.assertUnchanged.bind(source)
+      return {
+        ...source,
+        read: async (at, length, signal) => {
+          if (path === 'source.bin') reads++
+          return mode === 'hash' ? new Uint8Array(length).fill(9) : read(at, length, signal)
+        },
+        assertUnchanged: async () => {
+          validations++
+          if (mode === 'identity') throw new Error('source changed')
+          await validate()
+        },
+      }
+    }
+    const f = await fixture(1),
+      change = { ...f.changes[0]!, sha, size: 3 }
+    const remote = vi.fn(async () => {
+      throw new Error('local bytes need no transfer')
+    })
+    const client = { ...f.client, openVersion: remote, getBlob: remote }
+    const run = applyStaged(client, fs, state, [change], f.options)
+    if (mode !== 'valid') {
+      await expect(run).rejects.toThrow('local bytes need no transfer')
+      expect(await fs.stat(change.path)).toBeNull()
+      expect(await state.byFileId(change.file_id)).toBeNull()
+      expect(reads).toBe(1)
+      return
+    }
+    const result = await run
+    expect(result.applied).toBe(1)
+    expect(await fs.read(change.path)).toEqual(bytes)
+    expect(remote).not.toHaveBeenCalled()
+    expect(validations).toBeGreaterThan(0)
+    expect(reads).toBe(1)
+  }
+)

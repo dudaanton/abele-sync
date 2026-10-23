@@ -777,6 +777,18 @@ export class PullPlacer {
   ): Promise<Uint8Array | null> {
     const entry = local.get(sha)
     if (!entry || this.bufferedLimit === 0 || entry.size > this.bufferedLimit) return null
+    if (this.fs.openRead) {
+      try {
+        // These bounded bytes are the publication buffer itself. smallBytes
+        // verifies their hash and the opened source's identity before closing;
+        // a separate fingerprint pass would read the same source twice.
+        return await this.smallBytes(await this.fs.openRead(entry.path), sha, entry.size)
+      } catch (error) {
+        checkCancellation(this.opts.signal)
+        if (error instanceof EngineError && error.code === 'lost') throw error
+        return null
+      }
+    }
     const source = await this.localSource(sha, local)
     if (source === null) return null
     return this.smallBytes(source, sha, entry.size)
