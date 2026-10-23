@@ -68,11 +68,12 @@ async function fixture() {
   return { fs, state, bytes, hashes, base, client, change, run }
 }
 
-it.each([1, 2, 3, 4, 5, 6])(
-  'retains a same-stat save during ordered adoption read %i',
-  async (cut) => {
+it.each([1, 2, 3, 4, 5, 6].flatMap((cut) => [true, false].map((tracked) => ({ cut, tracked }))))(
+  'retains a same-stat save during ordered adoption read $cut (tracked=$tracked)',
+  async ({ cut, tracked }) => {
     const f = await fixture(),
       read = f.fs.read.bind(f.fs)
+    if (!tracked) await f.state.delete('old.md')
     let reads = 0,
       injected = false
     f.fs.read = async (path) => {
@@ -115,7 +116,29 @@ it.each([false, true])(
     expect(await f.fs.read('Moved/new.md')).toEqual(f.bytes[0])
     expect(await f.state.byFileId('sample')).toEqual(f.base)
     expect(result.held.map((c) => c.file_id)).toContain('sample')
-    const found = await scan(f.fs, f.state, { excluded: () => false })
+    expect(
+      (await scan(f.fs, f.state, { excluded: () => false }, { pairMoves: false })).ops
+    ).toEqual([])
+    await f.fs.writeAtomic('Moved/new.md', f.bytes[2]!, 1000)
+    expect((await scan(f.fs, f.state, { excluded: () => false })).ops).toEqual([])
+    await f.fs.writeAtomic('Moved/new.md', f.bytes[0]!, 1000)
+    const found = await scan(
+      f.fs,
+      f.state,
+      { excluded: () => false },
+      {
+        known: {
+          // Earlier scan snapshots with the same stat cannot classify the recreation.
+          hashes: new Map([
+            ['old.md', f.hashes[0]!],
+            ['Moved/new.md', f.hashes[2]!],
+          ]),
+          infos: new Map(
+            ['old.md', 'Moved/new.md'].map((path) => [path, { path, size: 8, mtime: 1000 }])
+          ),
+        },
+      }
+    )
     expect(found.ops).toEqual([
       { op: 'move', file_id: 'sample', base_version_id: 'a', to_path: 'Moved/new.md' },
       { op: 'create', path: 'old.md', sha: f.hashes[1], size: 8, mtime: 1000 },
