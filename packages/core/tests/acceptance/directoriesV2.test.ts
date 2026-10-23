@@ -71,7 +71,10 @@ it('preserves file and directory IDs through case-only renames', async () => {
     const after = (await server.manifest()).items
     expect(after.find((item) => item.path === 'й')?.file_id).toBe(directory.file_id)
     expect(after.find((item) => item.path === 'й/note.md')?.file_id).toBe(note.file_id)
-    expect(after.find((item) => item.path === 'й-empty')?.file_id).toBe(empty.file_id)
+    // An empty inode-only rename has no descendant witness. Preserve the remote
+    // identity at its original name rather than infer a recursive tree operation.
+    expect(after.find((item) => item.path === 'Й-empty')?.file_id).toBe(empty.file_id)
+    expect(after.some((item) => item.path === 'й-empty')).toBe(false)
     expect(after).toHaveLength(3)
     expect(await a!.text(raw + '/note.md')).toBe('case rename bytes\n')
     expect(await b!.text('й/note.md')).toBe('case rename bytes\n')

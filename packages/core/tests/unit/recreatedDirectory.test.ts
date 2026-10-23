@@ -50,8 +50,10 @@ it.each(['local-rename', 'cafe\u0301'])(
       })
     )
     await new V2Directories(fs, state, () => true, commit).scan()
-    expect(commit).toHaveBeenCalledTimes(1)
-    expect(JSON.parse((await state.getMeta('v2-directories'))!).directories).toEqual([target])
+    // Inode reuse and replacement of an empty destination are ambiguous. Neither
+    // a move nor a recursive delete may be inferred from this observation.
+    expect(commit).not.toHaveBeenCalled()
+    expect(JSON.parse((await state.getMeta('v2-directories'))!).directories).toEqual([old, target])
     expect(await fs.read(name + '/main.js')).toEqual(new Uint8Array([1]))
   }
 )

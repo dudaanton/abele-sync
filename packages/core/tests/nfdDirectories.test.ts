@@ -4,6 +4,7 @@ import { MemoryFileSystem } from '../src/fs.js'
 import { MemoryStateStore } from '../src/state.js'
 import { validatePath, type V2CommitOp } from '@abele/sync-protocol'
 import { refreshLocalPaths } from '../src/localPaths.js'
+import { sha256 } from '../src/hash.js'
 
 class DirectoryFs extends MemoryFileSystem {
   dirs = new Map<string, string>()
@@ -67,6 +68,16 @@ it('keeps a case-only directory rename as a move of the existing identity', asyn
   await dirs.receive({ kind: 'directory', path: 'Й', file_id: 'dir', version_id: 'v1', mtime: 1 })
   fs.dirs.delete('Й')
   fs.dirs.set('й'.normalize('NFD'), 'original')
+  await fs.writeAtomic('й'.normalize('NFD') + '/child', new Uint8Array([1]), 1)
+  await state.put({
+    path: 'Й/child',
+    wirePath: 'Й/child',
+    fileId: 'child',
+    versionId: 'v1',
+    sha: await sha256(new Uint8Array([1])),
+    size: 1,
+    mtime: 1,
+  })
   await dirs.scan()
   expect(sent).toEqual([
     { op: 'move_directory', file_id: 'dir', base_version_id: 'v1', to_path: 'й' },
@@ -450,6 +461,16 @@ it('retires a rejected old raw-NFD move before sending a normalized move with a 
     state = new MemoryStateStore()
   const raw = 'ё-moved'.normalize('NFD')
   fs.dirs.set(raw, 'stable')
+  await fs.writeAtomic(raw + '/child', new Uint8Array([1]), 1)
+  await state.put({
+    path: 'Old/child',
+    wirePath: 'Old/child',
+    fileId: 'child',
+    versionId: 'v1',
+    sha: await sha256(new Uint8Array([1])),
+    size: 1,
+    mtime: 1,
+  })
   const original = { op: 'move_directory', file_id: 'dir', base_version_id: 'v1', to_path: raw }
   await state.setMeta(
     'v2-directories',

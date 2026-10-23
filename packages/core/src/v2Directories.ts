@@ -16,6 +16,8 @@ import { z } from 'zod'
 import type { FileSystem } from './fs.js'
 import type { StateEntry, StateStore } from './state.js'
 import { LocalPaths, wirePath } from './localPaths.js'
+import { fingerprintFile } from './fs.js'
+import { sha256 } from './hash.js'
 
 const KEY = 'v2-directories'
 const DocumentSchema = z
@@ -447,15 +449,33 @@ export class V2Directories {
     )
     for (const old of roots.sort((a, b) => a.path.length - b.path.length)) {
       this.signal?.throwIfAborted()
-      // A physical inode can be reused after a directory is removed. A path
-      // already owned by another remote directory is not a rename of this one,
-      // even when its current physical identity matches the missing source.
+      // Inode equality only nominates candidates. A replacement rename and
+      // inode recycling are indistinguishable without descendant evidence.
       const foreignPaths = new Set(
         doc.directories.filter((d) => d.file_id !== old.file_id).map((d) => d.path)
       )
-      const moved = local.find(
-        (l) => l.identity === old.identity && !foreignPaths.has(wirePath(l.path))
-      )
+      const candidates = local.filter((l) => l.identity === old.identity)
+      let moved: (typeof local)[number] | undefined
+      if (candidates.length === 1 && !foreignPaths.has(wirePath(candidates[0]!.path))) {
+        const candidate = candidates[0]!
+        for await (const child of this.state.all()) {
+          if (!child.wirePath.startsWith(old.path + '/')) continue
+          const target = wirePath(candidate.path) + child.wirePath.slice(old.path.length)
+          if (inventory.blocked(target)) continue
+          const path = inventory.resolve(target, 'file')
+          const here = await this.fs.stat(path)
+          if (!here || here.size !== child.size) continue
+          const found = await fingerprintFile(this.fs, path, sha256)
+          const after = await this.fs.stat(path)
+          if (found.sha === child.sha && after?.size === here.size && after.mtime === here.mtime) {
+            moved = candidate
+            break
+          }
+        }
+      }
+      // Never reinterpret an ambiguous move as recursive deletion. In
+      // particular, replacement of an occupied remote identity needs resolution.
+      if (candidates.length && !moved) continue
       if (this.refusalFor(old.path) || (moved && this.refusalFor(moved.path))) continue
       // A widened/reset scope needs its snapshot before absence is a deletion.
       // The next ordinary cycle can delete missing folders on a known baseline.
