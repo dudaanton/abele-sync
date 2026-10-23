@@ -67,6 +67,7 @@ const NoteCacheSchema = z.object({
 /** One production transport for root, folder and group token connections.
  * Wire authority is always v2. Engine-local file/version shapes are not v1 routes. */
 export class V2EngineClient implements EngineClient {
+  readonly checksBlobBeforeUpload = true as const
   readonly reportSizeRefusals = true
   readonly readEffects = true as const
   private readonly http: Http

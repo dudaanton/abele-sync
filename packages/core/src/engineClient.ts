@@ -44,6 +44,8 @@ export interface EngineClient {
   changes(since: number, limit?: number, signal?: AbortSignal): Promise<ChangesResponse>
   commitRaw(ops: CommitOp[], key: string): Promise<CommitOutcome>
   commit(ops: CommitOp[], key: string): Promise<CommitResponse>
+  /** Both upload methods perform an authoritative existence check before sending bytes. */
+  readonly checksBlobBeforeUpload?: true
   hasBlob(sha: string): Promise<boolean>
   getBlob(sha: string, signal?: AbortSignal): Promise<Uint8Array>
   putBlob(sha: string, bytes: Uint8Array, signal?: AbortSignal): Promise<void>

@@ -23,6 +23,7 @@ export async function ownsBlob(db: Kysely<Database>, principal: TokenPrincipal, 
         )
         .select('versions.id')
         .where('scope_versions.scope_id', '=', principal.scope.id)
+        .where('versions.vault_id', '=', principal.space.id)
         .where('versions.blob_sha', '=', sha)
         .executeTakeFirst()
 

@@ -928,7 +928,7 @@ class Pusher {
   /** One blob onto the server, unless it is there already or refused for good. */
   private async uploadOne(sha: string, sources: Sources): Promise<void> {
     checkCancellation(this.opts.signal)
-    if (await this.client.hasBlob(sha)) return
+    if (!this.client.checksBlobBeforeUpload && (await this.client.hasBlob(sha))) return
     try {
       const upload = async () => {
         checkCancellation(this.opts.signal)

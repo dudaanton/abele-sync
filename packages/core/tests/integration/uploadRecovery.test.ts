@@ -1,6 +1,7 @@
 import { V2SyncClient } from '@abele/sync-server/tests/helpers/v2SyncClient.js'
 import { afterEach, expect, it, vi } from 'vitest'
-import { createUser } from '@abele/sync-server/src/access/tokens.js'
+import { ownsBlob } from '@abele/sync-server/src/access/blobAuthority.js'
+import { authenticateToken, createUser } from '@abele/sync-server/src/access/tokens.js'
 import { v2Server, type V2Server } from '@abele/sync-server/tests/helpers/v2Server.js'
 import { V2EngineClient } from '../../src/v2Client.js'
 import { sha256 } from '../../src/hash.js'
@@ -179,4 +180,25 @@ it('D-199 existence checks preserve token and current-scope byte authority', asy
   await expect(original.putBlob(sha, new Uint8Array([9]))).rejects.toMatchObject({
     code: 'hash_mismatch',
   })
+})
+
+it('D-199 absent SHA probes use the vault/digest index rather than scanning scope history', async () => {
+  server = await v2Server()
+  const root = await createUser(
+    { db: server.db, pepper: server.config.tokenPepper },
+    'Owner',
+    server.address
+  )
+  const principal = await authenticateToken(
+    { db: server.db, pepper: server.config.tokenPepper },
+    new V2SyncClient(root.token).key
+  )
+  const spy = vi.spyOn(server.db.getExecutor(), 'executeQuery')
+  await ownsBlob(server.db, principal, '0'.repeat(64))
+  const query = spy.mock.calls.find(([q]) => q.sql.includes('scope_versions'))![0]
+  spy.mockRestore()
+  const plan = await server.db.executeQuery({ ...query, sql: 'EXPLAIN QUERY PLAN ' + query.sql })
+  expect(plan.rows.map((row) => (row as { detail: string }).detail).join('\n')).toContain(
+    'versions_vault_sha'
+  )
 })
