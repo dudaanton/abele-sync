@@ -320,3 +320,19 @@ provided through `NodeFileSystemOptions.pathKey`. The plugin must report its hos
 policy and forward this port through wrappers. No persisted-state migration is
 needed. Unknown policies can cause extra holds, but cannot authorize replacement
 of a differently spelled foreign file.
+
+### Unobservable directory evidence
+
+An unresolved directory hold remains durable until positive evidence resolves it.
+Normalization collisions, scope filtering, or disappearance of the candidate's name,
+inode and child spelling never prove deletion. Such a hold cannot emit a recursive
+delete. Previous source/candidate barriers remain; when all nomination hints vanish,
+untracked possible destinations are held as well. A corroborated move replaces the
+hold atomically with its pending operation. Removal can be inferred only on a later
+unheld baseline, or through explicit user resolution.
+
+Directory scans index canonical paths, object identities, ancestors, tracked children
+and relative child names once per inventory. Lookup cost follows path components and
+actual candidate relationships rather than every folder times every local path.
+Enumeration and index construction yield macrotasks in bounded chunks so a host can
+paint and process input while large scans run.

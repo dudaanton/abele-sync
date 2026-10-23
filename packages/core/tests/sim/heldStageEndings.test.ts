@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import type { ChangeItem } from '@abele/sync-protocol'
 import {
   applyStaged,
@@ -319,9 +319,9 @@ it('a metadata-only caller cannot abandon bytes it has no filesystem authority t
 
 // Each seed permutes terminal decisions on independent files. Every boundary
 // in both the decision and recovery is replayed with a fresh process epoch.
-it.each([187, 188, 189, 190])(
+describe.each([187, 188, 189, 190])(
   'retained bytes never outlive random decision endings (seed %s)',
-  async (seed) => {
+  (seed) => {
     const random = new SimScheduler(seed),
       endings = [
         'apply',
@@ -467,9 +467,18 @@ it.each([187, 188, 189, 190])(
       expect(f.removals.get(teardownStage)).toBe(1)
       return points
     }
-    const points = await execute()
-    console.info(`held-stage endings seed ${seed}: ${points.length} crash cuts`)
-    for (const cut of points) await execute(cut)
-  },
-  20000
+    let points: string[] | undefined
+    it.each(Array.from({ length: 32 }, (_, n) => n))(
+      'cuts shard %i (at most 64)',
+      async (shard) => {
+        if (!points) {
+          points = await execute()
+          console.info(`heldStageEndings seed ${seed}: ${points.length} crash cuts`)
+        }
+        expect(points.length).toBeLessThanOrEqual(32 * 64)
+        for (const cut of points.slice(shard * 64, (shard + 1) * 64)) await execute(cut)
+      },
+      20000
+    )
+  }
 )

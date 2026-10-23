@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import type { ChangeItem, CommitOpResult, V2CommitOp } from '@abele/sync-protocol'
 import { ExpectedWrites, pull, scan, sha256, type EngineClient } from '../../src/index.js'
 import { V2Directories } from '../../src/v2Directories.js'
@@ -6,9 +6,9 @@ import { DurableStateStore } from './durableState.js'
 import { MemoryStreamingFS } from './streamingMemoryFs.js'
 import { EpochError, SimScheduler } from './scheduler.js'
 
-it.each([191, 192, 193, 194])(
+describe.each([191, 192, 193, 194])(
   'directory evidence model survives every scan cut (seed %i)',
-  async (seed) => {
+  (seed) => {
     const random = new SimScheduler(seed)
     const names = Array.from({ length: 3 }, (_, n) =>
       random.random() < 0.5 ? `Renamed${n}` : `renamed${n}`
@@ -158,6 +158,27 @@ it.each([191, 192, 193, 194])(
           expect(directories.refusalFor(local + '/child.md')).toBeDefined()
         } else if (!deleted) expect(remote).toBe(local)
       }
+      // Visibility is not deletion evidence: neither a normalization collision
+      // nor simultaneous loss of name, inode and relative child name ends a hold.
+      await fs.moveDirectory(local, 'café')
+      origins.delete(local)
+      local = 'café'
+      origins.set(local, 'original')
+      await fs.writeAtomic(local + '/child.md', new Uint8Array([9, 8, 7]), 2)
+      await observe(true)
+      await fs.mkdir('cafe\u0301')
+      await observe(true)
+      await fs.removeDirectory('cafe\u0301')
+      await fs.moveDirectory(local, 'invisible')
+      origins.delete(local)
+      local = 'invisible'
+      origins.set(local, 'original')
+      identities.set(local, 'unobserved-object')
+      await fs.move(local + '/child.md', local + '/renamed.md')
+      await observe(true)
+      await fs.move(local + '/renamed.md', local + '/child.md')
+      await fs.writeAtomic(local + '/child.md', bytes, 4)
+      await observe(false)
       for (const name of names) {
         const from = local
         if (identities.has(from)) {
@@ -249,14 +270,36 @@ it.each([191, 192, 193, 194])(
       await fs.remove(local + '/child.md')
       await fs.removeDirectory(local)
       origins.delete(local)
+      await observe(true)
+      expect(remoteDeleted).toBe(false)
+      // Absence cannot resolve this hold. Restore the original tracked tree
+      // as positive evidence, settle its move, then observe an actual deletion.
+      local = 'restored'
+      origins.set(local, 'original')
+      await fs.writeAtomic(local + '/child.md', bytes, 6)
+      deleted = false
+      await observe(false)
+      await fs.remove(local + '/child.md')
+      await fs.removeDirectory(local)
+      origins.delete(local)
+      deleted = true
       await observe(false)
       expect(remoteDeleted).toBe(true)
       if (cut) expect(scheduler.epoch, cut).toBe(1)
       return points
     }
-    const points = await execute()
-    console.info(`directory model seed ${seed}: ${points.length} crash cuts`)
-    for (const cut of points) await execute(cut)
-  },
-  20000
+    let points: string[] | undefined
+    it.each(Array.from({ length: 32 }, (_, n) => n))(
+      'cuts shard %i (at most 64)',
+      async (shard) => {
+        if (!points) {
+          points = await execute()
+          console.info(`directoryEvidence seed ${seed}: ${points.length} crash cuts`)
+        }
+        expect(points.length).toBeLessThanOrEqual(32 * 64)
+        for (const cut of points.slice(shard * 64, (shard + 1) * 64)) await execute(cut)
+      },
+      20000
+    )
+  }
 )

@@ -1,3 +1,4 @@
+import { ScanWork, parents } from './scanWork.js'
 import { replayAuthority } from './replayAuthority.js'
 import { transact } from './stateTransaction.js'
 import {
@@ -446,9 +447,11 @@ export class V2Directories {
       !(pending.op.op === 'mkdir' && this.refusalFor(pending.op.path))
     )
       return
+    const work = new ScanWork()
     const local: Array<{ path: string; identity: string; mtime: number }> = []
     const inventory = beforeReplay
     for await (const dir of this.fs.listDirectories()) {
+      await work.step()
       const path = wirePath(dir.path)
       if (this.includes(path) && !inventory.blocked(path)) {
         inventory.resolve(path, 'directory')
@@ -458,100 +461,119 @@ export class V2Directories {
     // Occupancy owns the wire identity. A host may replace a directory inode while
     // retaining its contents; that is not authority to recursively delete the server tree.
     // Identity is only rename evidence when the canonical source path is absent.
-    const entries: StateEntry[] = []
-    for await (const entry of this.state.all()) entries.push(entry)
-    const previousEvidence = (doc.refused ?? []).filter((row) => row.evidence)
-    const previousCandidates = new Map<string, Set<string>>()
-    for (const row of doc.refused ?? []) {
-      if (!row.evidence || !row.source || row.path === row.source) continue
-      const candidates = previousCandidates.get(row.source) ?? new Set<string>()
-      candidates.add(row.path)
-      previousCandidates.set(row.source, candidates)
+    const localByPath = new Map<string, (typeof local)[number]>()
+    const localByIdentity = new Map<string, Array<(typeof local)[number]>>()
+    for (const dir of local) {
+      localByPath.set(wirePath(dir.path), dir)
+      const group = localByIdentity.get(dir.identity) ?? []
+      group.push(dir)
+      localByIdentity.set(dir.identity, group)
+      await work.step()
     }
-    const wasCandidate = (source: string, dir: (typeof local)[number]) =>
-      previousCandidates.get(source)?.has(wirePath(dir.path)) ||
-      previousEvidence.some(
-        (row) => row.source === source && row.candidateIdentity === dir.identity
-      )
-    // Losing both a candidate name and its inode is not deletion evidence.
-    // Relative child paths can nominate a replacement, but only the content
-    // check below can authorize it. Known unchanged foreign directories cannot.
-    for (const old of doc.directories) {
-      if (
-        local.some((dir) => wirePath(dir.path) === old.path) &&
-        !previousEvidence.some((row) => row.source === old.path)
-      )
-        continue
-      if (
-        local.some(
-          (dir) =>
-            wirePath(dir.path) !== old.path &&
-            (dir.identity === old.identity || wasCandidate(old.path, dir))
-        )
-      )
-        continue
-      const children = entries.filter((entry) => entry.wirePath.startsWith(old.path + '/'))
-      for (const dir of local) {
-        const path = wirePath(dir.path)
-        if (path === old.path) continue
-        if (doc.directories.some((other) => other.path === path && other.identity === dir.identity))
-          continue
-        for (const child of children) {
-          const target = path + child.wirePath.slice(old.path.length)
-          if (!(await this.fs.stat(inventory.resolve(target, 'file')))) continue
-          const candidates = previousCandidates.get(old.path) ?? new Set<string>()
-          candidates.add(path)
-          previousCandidates.set(old.path, candidates)
-          break
-        }
+    const trackedByPath = new Map(doc.directories.map((dir) => [dir.path, dir]))
+    const directoryParents = new Set<string>()
+    for (const dir of doc.directories) {
+      for (const parent of parents(dir.path)) directoryParents.add(parent)
+      await work.step()
+    }
+    const childrenByParent = new Map<string, StateEntry[]>()
+    for await (const entry of this.state.all()) {
+      for (const parent of parents(entry.wirePath)) {
+        const children = childrenByParent.get(parent) ?? []
+        children.push(entry)
+        childrenByParent.set(parent, children)
       }
+      await work.step()
     }
-    const hasPreviousCandidate = (source: string) =>
-      local.some((dir) => wirePath(dir.path) !== source && wasCandidate(source, dir))
+    const previousEvidence = (doc.refused ?? []).filter((row) => row.evidence)
+    const evidenceBySource = new Map<string, DirectoryRefusal[]>()
+    for (const row of previousEvidence) {
+      const source = row.source ?? row.path
+      const rows = evidenceBySource.get(source) ?? []
+      rows.push(row)
+      evidenceBySource.set(source, rows)
+    }
+    // Index relative child names once. A suffix only nominates a candidate;
+    // content must still corroborate it before any move is authorized.
+    const suffixParents = new Map<string, Set<string>>()
+    for (const path of inventory.filePaths()) {
+      for (const parent of parents(path)) {
+        if (!localByPath.has(parent)) continue
+        const suffix = path.slice(parent.length)
+        const found = suffixParents.get(suffix) ?? new Set<string>()
+        found.add(parent)
+        suffixParents.set(suffix, found)
+      }
+      await work.step()
+    }
+    const candidatesBySource = new Map<string, Array<(typeof local)[number]>>()
     for (const old of doc.directories) {
-      const current = local.find((l) => wirePath(l.path) === old.path)
-      if (current) {
-        // A newly recreated source name cannot erase evidence of the original
-        // object still waiting at its candidate path.
-        if (hasPreviousCandidate(old.path)) continue
+      await work.step()
+      const evidence = evidenceBySource.get(old.path)
+      const current = localByPath.get(old.path)
+      if (current && !evidence) {
         old.localPath = current.path
         old.identity = current.identity
+        continue
       }
+      const nominated = new Set(localByIdentity.get(old.identity) ?? [])
+      for (const row of evidence ?? []) {
+        const candidate = localByPath.get(row.path)
+        if (candidate && row.path !== old.path) nominated.add(candidate)
+        for (const match of localByIdentity.get(row.candidateIdentity ?? '') ?? [])
+          nominated.add(match)
+      }
+      if (current) nominated.delete(current)
+      if (!nominated.size) {
+        for (const child of childrenByParent.get(old.path) ?? []) {
+          for (const path of suffixParents.get(child.wirePath.slice(old.path.length)) ?? []) {
+            const dir = localByPath.get(path)!
+            if (path !== old.path && trackedByPath.get(path)?.identity !== dir.identity)
+              nominated.add(dir)
+            await work.step()
+          }
+        }
+      }
+      // With all hints lost we cannot identify which untracked subtree owns
+      // these bytes. Protect possible destinations too, without claiming them.
+      if (!nominated.size && evidence) {
+        for (const [path, dir] of localByPath) {
+          if (path !== old.path && trackedByPath.get(path)?.identity !== dir.identity)
+            nominated.add(dir)
+          await work.step()
+        }
+      }
+      candidatesBySource.set(old.path, [...nominated])
     }
+    // Unresolved evidence survives absent/excluded/colliding candidates. Only a
+    // corroborated replacement journal may retire it.
     doc.refused = doc.refused?.filter(
-      (item) =>
-        !item.evidence &&
-        (item.direction === 'pull' || local.some((dir) => wirePath(dir.path) === item.path))
+      (item) => item.evidence || item.direction === 'pull' || localByPath.has(item.path)
     )
     const missing = doc.directories.filter(
       (d) =>
         this.includes(d.path) &&
         !inventory.blocked(d.path) &&
-        (!local.some((l) => wirePath(l.path) === d.path) || hasPreviousCandidate(d.path))
+        (!localByPath.has(d.path) || evidenceBySource.has(d.path))
     )
-    // Parents first: a server tree operation updates the identities of descendants.
-    const roots = missing.filter(
-      (old) => !missing.some((parent) => parent !== old && old.path.startsWith(parent.path + '/'))
+    const missingPaths = new Set(missing.map((dir) => dir.path))
+    const roots = missing.filter((old) => {
+      for (const parent of parents(old.path)) if (missingPaths.has(parent)) return false
+      return true
+    })
+    const evidenceRows = new Map(
+      previousEvidence.map((row) => [JSON.stringify([row.source, row.path]), row])
     )
     const plans: Array<{ old: LocalDirectory; moved?: (typeof local)[number]; empty: boolean }> = []
     for (const old of roots.sort((a, b) => a.path.length - b.path.length)) {
       this.signal?.throwIfAborted()
       // Inode equality only nominates candidates. A replacement rename and
       // inode recycling are indistinguishable without descendant evidence.
-      const foreignPaths = new Set(
-        doc.directories.filter((d) => d.file_id !== old.file_id).map((d) => d.path)
-      )
-      const candidates = local.filter(
-        (l) =>
-          wirePath(l.path) !== old.path &&
-          (l.identity === old.identity || wasCandidate(old.path, l))
-      )
-      const children = entries.filter((child) => child.wirePath.startsWith(old.path + '/'))
-      const empty =
-        children.length === 0 &&
-        !doc.directories.some((child) => child.path.startsWith(old.path + '/'))
+      const candidates = candidatesBySource.get(old.path) ?? []
+      const children = childrenByParent.get(old.path) ?? []
+      const empty = children.length === 0 && !directoryParents.has(old.path)
       let moved: (typeof local)[number] | undefined
-      if (candidates.length === 1 && !foreignPaths.has(wirePath(candidates[0]!.path))) {
+      if (candidates.length === 1 && !trackedByPath.has(wirePath(candidates[0]!.path))) {
         const candidate = candidates[0]!
         if (empty) moved = candidate
         for (const child of children) {
@@ -570,31 +592,27 @@ export class V2Directories {
       }
       // Never reinterpret an ambiguous move as recursive deletion. In
       // particular, replacement of an occupied remote identity needs resolution.
-      if (candidates.length && !moved && !empty) {
-        for (const path of [old.path, ...candidates.map((dir) => wirePath(dir.path))])
-          doc.refused = [
-            ...(doc.refused ?? []).filter(
-              (row) => row.path !== path || !row.evidence || row.source !== old.path
-            ),
-            {
-              path,
-              source: old.path,
-              candidateIdentity: candidates.find((dir) => wirePath(dir.path) === path)?.identity,
-              code: 'conflict',
-              message: 'directory move evidence is ambiguous; old and candidate subtrees are held',
-              direction: 'push',
-              evidence: true,
-            },
-          ]
+      if (!moved && ((candidates.length > 0 && !empty) || evidenceBySource.has(old.path))) {
+        for (const [path, candidateIdentity] of [
+          [old.path, undefined],
+          ...candidates.map((dir) => [wirePath(dir.path), dir.identity]),
+        ] as Array<[string, string | undefined]>) {
+          evidenceRows.set(JSON.stringify([old.path, path]), {
+            path,
+            source: old.path,
+            candidateIdentity,
+            code: 'conflict',
+            message: 'directory move evidence is ambiguous; old and candidate subtrees are held',
+            direction: 'push',
+            evidence: true,
+          })
+          await work.step()
+        }
         continue
       }
-      if (moved)
-        doc.refused = [
-          ...(doc.refused ?? []),
-          ...previousEvidence.filter((row) => row.source === old.path),
-        ]
       plans.push({ old, moved, empty })
     }
+    doc.refused = [...(doc.refused ?? []).filter((row) => !row.evidence), ...evidenceRows.values()]
     // Keep resolved candidate evidence durable until the replacement move journal
     // is saved: a crash between clearing the hold and saving that journal must
     // not forget a candidate whose inode has since changed.
@@ -605,7 +623,7 @@ export class V2Directories {
       this.refusalFor(path) ||
       doc.refused?.some((row) => row.evidence && row.path.startsWith(wirePath(path) + '/'))
     for (const { old, moved, empty } of plans) {
-      const retained = doc.refused
+      const retained: DirectoryRefusal[] | undefined = doc.refused
       if (moved) {
         doc.refused = doc.refused?.filter((row) => !row.evidence || row.source !== old.path)
         this.indexRefusals(doc.refused ?? [])
@@ -648,10 +666,13 @@ export class V2Directories {
       } else doc.directories = doc.directories.filter((d) => !d.path.startsWith(old.path + '/'))
       await this.save(doc)
     }
+    const published = new Set(doc.directories.map((dir) => dir.path))
     for (const dir of local.sort((a, b) => a.path.length - b.path.length)) {
       this.signal?.throwIfAborted()
       if (this.refusalFor(dir.path)) continue
-      if (doc.directories.some((d) => d.path === wirePath(dir.path))) continue
+      await work.step()
+      const path = wirePath(dir.path)
+      if (published.has(path)) continue
       doc.pending = {
         key: crypto.randomUUID(),
         op: { op: 'mkdir', path: wirePath(dir.path), mtime: dir.mtime },
@@ -660,6 +681,7 @@ export class V2Directories {
       }
       await this.save(doc)
       await record(doc.pending)
+      if (doc.directories.some((entry) => entry.path === path)) published.add(path)
     }
   }
 

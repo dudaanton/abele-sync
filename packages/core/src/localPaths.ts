@@ -1,3 +1,4 @@
+import { ScanWork } from './scanWork.js'
 import { transact } from './stateTransaction.js'
 import { AbeleError, caseKey, validatePath } from '@abele/sync-protocol'
 import type { FileSystem } from './fs.js'
@@ -133,6 +134,10 @@ export class LocalPaths {
     if (state) await result.loadDirectoryHolds(state)
     return result
   }
+  *filePaths(): Iterable<string> {
+    for (const [path, candidates] of this.entries)
+      if (candidates.some((entry) => entry.kind === 'file')) yield path
+  }
   directory(path: string): Candidate | undefined {
     return this.entries
       .get(path.normalize('NFC'))
@@ -151,6 +156,7 @@ export class LocalPaths {
   }
   static async read(fs: FileSystem, state?: StateStore): Promise<LocalPaths> {
     const result = new LocalPaths()
+    const work = new ScanWork()
     const parents = (path: string) => {
       const segments = path.split('/')
       for (let n = 1; n < segments.length; n++)
@@ -160,10 +166,12 @@ export class LocalPaths {
       for await (const dir of fs.listDirectories()) {
         result.add({ ...dir, kind: 'directory' })
         parents(dir.path)
+        await work.step()
       }
     for await (const file of fs.list()) {
       result.add({ path: file.path, kind: 'file' })
       parents(file.path)
+      await work.step()
     }
     if (state) await result.loadDirectoryHolds(state)
     return result
