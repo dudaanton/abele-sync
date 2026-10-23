@@ -150,18 +150,19 @@ describe('daemon plugin code approval', () => {
 
   for (const action of ['delete', 'rename'] as const) {
     it(`holds the whole plugin group if it was locally ${action}d after staging`, async () => {
+      const { a, b } = await vaultPair(server, `Local ${action} after staging`)
       const id = `local-${action}`
       await write(a, code(id), `${id}Before()`)
       await syncOnce(a)
       await syncOnce(b)
-      expect((await decide(id)).code).toBe(0)
+      expect((await decide(id, '--approve', b)).code).toBe(0)
       await write(a, code(id), `${id}After()`)
       // New companion files must not recreate a folder whose installed main.js was moved/deleted.
       await write(a, code(id, 'manifest.json'), JSON.stringify({ id, version: '2.0.0' }))
       await write(a, code(id, 'styles.css'), 'body {}')
       await syncOnce(a)
       await syncOnce(b)
-      const fingerprint = await listed(id)
+      const fingerprint = await listed(id, b)
       const localFolder = join(b, '.obsidian/plugins', id)
       if (action === 'delete') await rm(localFolder, { recursive: true })
       else await rename(localFolder, join(b, '.obsidian/plugins', `${id}-kept`))
@@ -170,7 +171,7 @@ describe('daemon plugin code approval', () => {
         expect(approval.code, approval.all).toBe(1)
         expect(approval.all).toContain('still held')
         expect(existsSync(localFolder)).toBe(false)
-        expect(await listed(id)).toBe(fingerprint)
+        expect(await listed(id, b)).toBe(fingerprint)
       }
       if (action === 'rename') expect(await read(b, code(`${id}-kept`))).toBe(`${id}Before()`)
     })

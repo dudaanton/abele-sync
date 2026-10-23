@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { existsSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EngineError } from '@abele/sync-core'
 import { runCli } from '../../src/cli.js'
 import { NodeFileSystem } from '@abele/sync-node'
@@ -28,6 +28,10 @@ let a: string, b: string
 const code = (id: string, file = 'main.js') => `.obsidian/plugins/${id}/${file}`
 beforeAll(async () => {
   server = await spawnServer()
+}, SETUP_MS)
+beforeEach(async () => {
+  // Each case leaves its intentional edits/deletions and durable holds intact.
+  // A later case must not inherit those barriers through Linux inode reuse.
   ;({ a, b } = await vaultPair(server, 'Grouped code approval'))
 }, SETUP_MS)
 afterAll(async () => {
