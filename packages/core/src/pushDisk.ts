@@ -5,6 +5,7 @@ import { fingerprintFile, type FileSystem, type ConditionalFileOperation } from 
 import type { ResumeOptions } from './pusher.js'
 import type { StateEntry, StateStore } from './state.js'
 import { resolveLocalFile } from './localPaths.js'
+import { sourceRecreation, sourceRecreationKey } from './sourceRecreation.js'
 
 /**
  * The pusher's view of this disk while it takes a commit's verdicts: where a file lies now,
@@ -107,6 +108,21 @@ export class PushDisk {
     retainOldCopy = false
   ): Promise<boolean> {
     if (previous === null || previous.path === target) return true
+    const recreated = await sourceRecreation(this.state, previous)
+    if (recreated?.target === target) {
+      // The scan paired the original identity with its offline move target.
+      // The recreated source is a separate create, even if its bytes changed
+      // again after scanning. Never remove it while settling that move.
+      const there = await this.fs.stat(target)
+      if (
+        there === null ||
+        (await fingerprintFile(this.fs, target, this.hash)).sha !== previous.sha
+      )
+        return false
+      await this.state.delete(previous.path)
+      await this.state.setMeta?.(sourceRecreationKey(previous.fileId), null)
+      return true
+    }
     const old = await this.fs.stat(previous.path)
     if (old !== null) {
       try {

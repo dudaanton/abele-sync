@@ -10,6 +10,7 @@ import { LocalPaths, rememberedCollisions, wirePath as localToWire } from './loc
 import { checkCancellation } from './cancellation.js'
 import { scanHintEpoch, readScanHint, writeScanHint } from './scanHints.js'
 import { isFileFailure } from './fileRetry.js'
+import { sourceRecreation, type SourceRecreation } from './sourceRecreation.js'
 
 /**
  * The scanner: what is on disk against what was last synced, as the ops a push commits.
@@ -342,6 +343,19 @@ export async function scan(
 
   const present = new Set<string>()
   const entries = await readState(state)
+  const recreated = new Map<string, SourceRecreation>()
+  const recreationKeys = state.metadataKeys
+    ? await state.metadataKeys('pull-source-recreated:')
+    : [...entries.values()].map((entry) => `pull-source-recreated:${entry.fileId}`)
+  for (const key of recreationKeys) {
+    const id = key.slice('pull-source-recreated:'.length)
+    const entry = await state.byFileId(id)
+    const record = entry && (await sourceRecreation(state, entry))
+    if (record) recreated.set(entry!.wirePath, record)
+  }
+  const recreatedPaths = new Set(
+    [...recreated].flatMap(([path, record]) => [path, record.target.normalize('NFC')])
+  )
   const inventory = await LocalPaths.read(fs, state)
   if (!opts.readOnly) await inventory.rememberDirectories(state)
   const collisions: CaseCollision[] = inventory.directoryCollisions()
@@ -364,7 +378,8 @@ export async function scan(
   // so a case-only rename on a case-sensitive disk is still paired into a move below.
   const synced = new Map<string, string>()
   for (const entry of entries.values()) {
-    if (present.has(entry.wirePath)) synced.set(caseKey(entry.wirePath), entry.wirePath)
+    if (present.has(entry.wirePath) && !recreated.has(entry.wirePath))
+      synced.set(caseKey(entry.wirePath), entry.wirePath)
   }
 
   const revalidate = opts.revalidate
@@ -383,7 +398,7 @@ export async function scan(
   let unreadCandidate = false
   for (const [wirePath, info] of files) {
     checkCancellation(opts.signal)
-    const entry = entries.get(wirePath)
+    const entry = recreated.has(wirePath) ? undefined : entries.get(wirePath)
     if (opts.retries && !opts.retries.ready(wirePath, 'scan')) {
       if (entry === undefined) unreadCandidate = true
       skip(info.path, 'waiting for file retry')
@@ -391,6 +406,7 @@ export async function scan(
     }
     const observed = opts.known?.infos.get(wirePath)
     const known =
+      !recreatedPaths.has(wirePath) &&
       opts.revalidate !== 'all' &&
       !opts.verifyPaths?.has(wirePath) &&
       observed?.path === info.path &&
@@ -420,6 +436,7 @@ export async function scan(
     let sha: string
     try {
       const hint =
+        !recreatedPaths.has(wirePath) &&
         opts.persistHints &&
         !opts.retries?.has(wirePath, 'scan') &&
         opts.revalidate !== 'all' &&
@@ -472,43 +489,74 @@ export async function scan(
 
   // An entry this device no longer syncs is left where it is: excluded files are not deleted
   // from the vault on the strength of a setting.
+  // Absence/recreation evidence binds this identity to the observed move target.
+  // If that target changed, leave both paths for review rather than guessing a move.
+  const classified = new Map<string, string>()
+  const freshPaths = new Set(fresh)
+  for (const [wirePath, record] of recreated) {
+    const target = record.target.normalize('NFC')
+    if (
+      opts.pairMoves !== false &&
+      freshPaths.has(target) &&
+      hashes.get(target) === record.base.sha
+    ) {
+      classified.set(wirePath, target)
+    } else {
+      for (const path of [wirePath, target]) {
+        const index = fresh.indexOf(path)
+        if (index !== -1) fresh.splice(index, 1)
+        skip(path, 'recreated source awaits move classification')
+      }
+    }
+  }
   const missing = [...entries.values()].filter(
     (entry) =>
       !inventory.blocked(entry.wirePath) &&
       (!opts.retries || opts.retries.ready(entry.wirePath, 'scan')) &&
-      !present.has(entry.wirePath) &&
+      (!present.has(entry.wirePath) || classified.has(entry.wirePath)) &&
       !filter.excluded(entry.wirePath, entry.size)
   )
   fresh.sort(byPath)
   missing.sort((a, b) => byPath(a.wirePath, b.wirePath))
+  const classifiedTargets = new Set(classified.values())
   const moves =
     opts.pairMoves === false
       ? new Map<string, string>()
-      : await pairRenames(missing, fresh, hashes, async (lost, found) => {
-          const path = diskPaths.get(found)
-          if (
-            opts.previous === undefined ||
-            path === undefined ||
-            !comparable(found) ||
-            lost.size > MAX_TEXT_BYTES ||
-            (infos.get(found)?.size ?? Infinity) > MAX_TEXT_BYTES
-          )
-            return false
-          const before = await opts.previous(lost)
-          try {
-            return before !== null && alike(before, await fs.read(path))
-          } catch (error) {
-            checkCancellation(opts.signal)
-            if (!opts.retries || !isFileFailure(error)) throw error
-            await opts.retries.failed(found, 'scan', error)
-            unreadCandidate = true
-            skip(path, reasonOf(error))
-            return false
+      : await pairRenames(
+          missing.filter((entry) => !classified.has(entry.wirePath)),
+          fresh.filter((path) => !classified.has(path) && !classifiedTargets.has(path)),
+          hashes,
+          async (lost, found) => {
+            const path = diskPaths.get(found)
+            if (
+              opts.previous === undefined ||
+              path === undefined ||
+              !comparable(found) ||
+              lost.size > MAX_TEXT_BYTES ||
+              (infos.get(found)?.size ?? Infinity) > MAX_TEXT_BYTES
+            )
+              return false
+            const before = await opts.previous(lost)
+            try {
+              return before !== null && alike(before, await fs.read(path))
+            } catch (error) {
+              checkCancellation(opts.signal)
+              if (!opts.retries || !isFileFailure(error)) throw error
+              await opts.retries.failed(found, 'scan', error)
+              unreadCandidate = true
+              skip(path, reasonOf(error))
+              return false
+            }
           }
-        })
+        )
 
+  for (const [from, to] of classified) moves.set(from, to)
   const ops: CommitOp[] = []
   const dirty = new Set<string>()
+  for (const [path, record] of recreated) {
+    dirty.add(path)
+    dirty.add(record.target.normalize('NFC'))
+  }
   for (const entry of missing) {
     if (moves.has(entry.wirePath)) continue
     if (unreadCandidate) {

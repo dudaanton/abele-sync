@@ -25,6 +25,7 @@ import { checkCancellation } from './cancellation.js'
 import { discardPullStage, stageMissing } from './pullStages.js'
 import { evictionKey } from './pullEvictions.js'
 import { scanHintKey } from './scanHints.js'
+import { sourceRecreation, sourceRecreationKey } from './sourceRecreation.js'
 
 /**
  * A change put onto this disk: its file carried to where the change says, its bytes written or
@@ -101,7 +102,15 @@ export class PullPlacer {
     if (have.size !== entry.size || have.mtime !== entry.mtime) return true
     // Metadata can be preserved by an editor (or rounded by a filesystem).
     // Never overwrite a target on that evidence alone.
-    return (await fingerprintFile(this.fs, path, this.hash)).sha !== entry.sha
+    if ((await fingerprintFile(this.fs, path, this.hash)).sha !== entry.sha) return true
+    if (path !== entry.path && (await this.fs.stat(entry.path)) !== null) {
+      await this.state.setMeta?.(
+        sourceRecreationKey(entry.fileId),
+        JSON.stringify({ base: entry, target: path })
+      )
+      return true
+    }
+    return false
   }
   async settled(change: ChangeItem): Promise<void> {
     const receipt = await this.pending.receiptId(change)
@@ -171,6 +180,7 @@ export class PullPlacer {
     newest = false
   ): Promise<boolean | 'held'> {
     if (change.op === 'delete' || change.sha === null) return false
+    if (entry && (await sourceRecreation(this.state, entry))) return 'held'
     // Arbitrary/staged changes may be historical and still require the old base.
     // A fully collected remote snapshot can acknowledge fresh equal bytes directly.
     let target: string
@@ -211,6 +221,15 @@ export class PullPlacer {
     )
       return false
     if (!sameStat(before, await this.fs.stat(target))) return false
+    // Absence observed before hashing is not authority to retire the old row:
+    // a save can recreate the source while that observation is returning.
+    if (from !== null && (await this.fs.stat(from)) !== null) {
+      await this.state.setMeta?.(
+        sourceRecreationKey(entry!.fileId),
+        JSON.stringify({ base: entry, target })
+      )
+      return 'held'
+    }
     // Equality on an intermediate page does not authorize making an untracked
     // offline edit the clean base for a later page. Reuse this probe, rather
     // than resolving and reading the target a second time in the caller.
@@ -408,6 +427,10 @@ export class PullPlacer {
     }
 
     if (typeof state === 'object' && 'have' in state) {
+      // edited() observed the old base earlier. If clear() now sees different
+      // bytes equal to this feed version, a save landed between the probes.
+      // It must not become an intermediate clean base for the next page.
+      if (entry === null || entry.sha !== sha) return false
       // An unsynced local file at the target already holds these bytes — a device syncing
       // over a copy of the vault it was given. Adopt it rather than write it again, as it
       // lies: its own size and mtime, the stat its bytes were just hashed under, so filing it
