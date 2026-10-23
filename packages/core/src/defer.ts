@@ -2,6 +2,7 @@ import type { ChangeItem } from '@abele/sync-protocol'
 import type { StateEntry, StateStore } from './state.js'
 import type { FileSystem } from './fs.js'
 import { PendingPullWrites } from './pullWrite.js'
+import { EngineError } from './errors.js'
 import { DEFERRED_KEY, parse, type Filed } from './deferredFile.js'
 
 /**
@@ -124,8 +125,13 @@ export class StagedChanges {
    * host's discarded/replacement decision from memory. */
   private async transition(next: Filed, retired: ChangeItem[]): Promise<void> {
     if (!this.state.getMeta || !this.state.setMeta || retired.length === 0) return this.save(next)
-    await new PendingPullWrites(this.state, this.fs).retireDecisions(retired, next)
-    this.filed = next
+    const result = await new PendingPullWrites(this.state, this.fs).retireDecisions(retired, next)
+    this.filed = null
+    if (result.held.length)
+      throw new EngineError(
+        'conflict',
+        `deferred decisions held: ${result.held.map((one) => one.file_id).join(', ')}`
+      )
   }
 
   /** Every staged change with its base, oldest seq first. */

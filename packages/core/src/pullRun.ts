@@ -1020,7 +1020,7 @@ export class Puller {
     // Exclusion ends both ordinary held pulls and exact deferred decisions.
     // Publish that revocation before cleanup; staging.tidy may never run after a crash.
     // Keep only a still-deferred source's decision.
-    await this.placer.pending.retireDecision(change)
+    if ((await this.placer.pending.retireDecision(change)).held.length) return true
     // A move the entry already stands at is this device's own coming back — a copy kept here
     // under a head over the cap, moved here — not a file leaving the synced set.
     if (entry === null || entry.wirePath === change.path) {

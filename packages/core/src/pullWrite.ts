@@ -36,6 +36,11 @@ const ENTRY_FIELDS = ['path', 'wirePath', 'fileId', 'versionId', 'sha', 'size', 
 const sameEntry = (a: StateEntry | null, b: StateEntry | null): boolean =>
   a === null || b === null ? a === b : ENTRY_FIELDS.every((key) => a[key] === b[key])
 
+type Decision = Pick<ChangeItem, 'file_id' | 'version_id'>
+export interface DecisionRetirement {
+  held: Decision[]
+}
+
 /** A store without durable metadata cannot prove a previous process's write; never infer it. */
 export class PendingPullWrites {
   private decisionIndex?: { image: string | null; versions: Set<string> }
@@ -69,7 +74,7 @@ export class PendingPullWrites {
       pending?.base?.path,
       pending?.base?.wirePath,
     ]
-    if (!pending && !current && !base) {
+    {
       const filed = parse((await this.state.getMeta?.(DEFERRED_KEY)) ?? null)
       for (const item of filed.staged)
         if (item.change.file_id === fileId) paths.push(item.change.path, item.change.prev_path)
@@ -204,7 +209,8 @@ export class PendingPullWrites {
   private async prepareRetirement(
     change: Pick<ChangeItem, 'file_id' | 'version_id'>
   ): Promise<void> {
-    if (await this.refused(change.file_id)) return
+    if (await this.refused(change.file_id))
+      throw new EngineError('conflict', `decision retirement held: ${change.file_id}`)
     const pending = await this.read(change.file_id)
     if (pending?.versionId !== change.version_id) return
     if (!this.fs)
@@ -222,35 +228,49 @@ export class PendingPullWrites {
   async retireDecisions(
     changes: readonly Pick<ChangeItem, 'file_id' | 'version_id'>[],
     replacement?: Filed
-  ): Promise<void> {
-    // A replacement and its retirement markers are one atomic owner transition.
-    // Keep the entire document if any affected decision is protected.
-    for (const change of changes) if (await this.refused(change.file_id)) return
-    for (const item of replacement?.staged ?? [])
-      if (await this.refused(item.change.file_id, [item.change.path, item.change.prev_path])) return
-    if (!this.state.getMeta || !this.state.setMeta) return
+  ): Promise<DecisionRetirement> {
+    const result: DecisionRetirement = { held: [] }
+    if (!this.state.getMeta || !this.state.setMeta) return result
     const identity = (change: Pick<ChangeItem, 'file_id' | 'version_id'>) =>
       JSON.stringify([change.file_id, change.version_id])
     const kept = new Set(replacement?.staged.map((one) => identity(one.change)))
-    const ended = changes.filter((change) => !kept.has(identity(change)))
+    const ended: Decision[] = []
+    for (const change of changes.filter((change) => !kept.has(identity(change)))) {
+      if (await this.refused(change.file_id)) result.held.push(change)
+      else ended.push(change)
+    }
+    if (!replacement && !ended.length) return result
     await transact(this.state, async (tx) => {
       const pending = new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client)
       for (const change of ended) await pending.prepareRetirement(change)
-      const filed = replacement ?? parse(await tx.getMeta!(DEFERRED_KEY))
+      const filed = parse(await tx.getMeta!(DEFERRED_KEY))
       const gone = new Set(ended.map(identity))
-      const staged =
+      let staged =
         replacement?.staged ?? filed.staged.filter((one) => !gone.has(identity(one.change)))
+      if (replacement && result.held.length) {
+        const blocked = new Set(result.held.map((one) => one.file_id))
+        const previous = new Map(filed.staged.map((one) => [one.change.file_id, one]))
+        staged = staged.map((one) =>
+          blocked.has(one.change.file_id) ? (previous.get(one.change.file_id) ?? one) : one
+        )
+        const present = new Set(staged.map((one) => one.change.file_id))
+        for (const one of filed.staged)
+          if (blocked.has(one.change.file_id) && !present.has(one.change.file_id)) staged.push(one)
+      }
       if (replacement || staged.length !== filed.staged.length)
         await tx.setMeta!(DEFERRED_KEY, staged.length ? JSON.stringify({ staged }) : null)
     })
     for (const change of ended) await this.finishRetirement(change)
+    return result
   }
 
   /** Pull can end a decision before staging.tidy; skip absent owners without
    * creating an empty transaction for every ordinary excluded feed item. */
-  async retireDecision(change: Pick<ChangeItem, 'file_id' | 'version_id'>): Promise<void> {
-    if (await this.refused(change.file_id)) return
-    if (!this.state.getMeta || !this.state.setMeta) return
+  async retireDecision(
+    change: Pick<ChangeItem, 'file_id' | 'version_id'>
+  ): Promise<DecisionRetirement> {
+    if (await this.refused(change.file_id)) return { held: [change] }
+    if (!this.state.getMeta || !this.state.setMeta) return { held: [] }
     const pending = await this.read(change.file_id)
     if (pending?.versionId !== change.version_id) {
       const image = await this.state.getMeta(DEFERRED_KEY)
@@ -264,9 +284,9 @@ export class PendingPullWrites {
           ),
         }
       if (!this.decisionIndex.versions.has(JSON.stringify([change.file_id, change.version_id])))
-        return
+        return { held: [] }
     }
-    await this.retireDecisions([change])
+    return this.retireDecisions([change])
   }
 
   /** Cleanup may only finish a retirement whose atomic publication already landed. */

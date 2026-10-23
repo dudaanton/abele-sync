@@ -382,7 +382,13 @@ names. `PendingPullWrites` guards preparation, settlement, clearing, supersessio
 decision retirement and retention/eviction. Pending-write and eviction recovery
 preserve held intents. The guard includes current, supplied and recorded source
 and destination names; it checks both client refusals and durable evidence.
-Atomic decision replacement is deferred in full if an affected decision is held.
+Decision replacement preserves each refused retirement while saving unrelated
+updates and additions. Unchanged held rows do not veto a batch. Retirement returns
+the refused identities; staged replacement/drop reports a conflict after saving
+permitted changes, so a caller cannot acknowledge a skipped update as successful.
+Retirement checks deferred source/destination names even when a current ledger
+entry or pending intent exists. A refusal discovered during transaction preparation
+aborts that transaction explicitly instead of silently skipping its marker.
 `placementEntryHolds.test.ts` enumerates these public effect boundaries and checks
 zero effects for durable and client-provided holds; its typed method inventory
 requires new public methods to be classified. Read-only probes and the in-memory
