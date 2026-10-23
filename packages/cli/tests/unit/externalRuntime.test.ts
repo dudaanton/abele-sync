@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -85,6 +86,40 @@ describe('owned CLI effects after long awaits', () => {
       lock()
     }
   })
+  it.each(['HEAD', 'begin', '0', 'complete'])(
+    'rejects a changed binding during upload response %s',
+    async (phase) => {
+      const lock = await acquireLock(dir)
+      const requests: string[] = []
+      const fetch: typeof globalThis.fetch = async (input, init) => {
+        const step = init?.method === 'HEAD' ? 'HEAD' : String(input).split('/').at(-1)!
+        requests.push(step)
+        if (step === phase)
+          writeConfig(dir, { ...cfg, deviceToken: tokenFor(cfg.serverUrl, 'b'.repeat(43)) })
+        if (step === 'HEAD') return new Response(null, { status: 404 })
+        if (step === 'begin')
+          return Response.json({
+            upload_id: 'upload',
+            part_size: 8 * 1024 * 1024,
+            parts: 2,
+            received: [],
+          })
+        return new Response(null, { status: 201 })
+      }
+      const vault = openVault(dir, ctx(fetch), lock.held)
+      try {
+        await recoverVault(vault, lock.held)
+        const bytes = new Uint8Array(8 * 1024 * 1024 + 1)
+        const sha = createHash('sha256').update(bytes).digest('hex')
+        await expect(vault.client.putBlob(sha, bytes)).rejects.toMatchObject({ code: 'lost' })
+        expect(requests.at(-1)).toBe(phase)
+        expect(requests).toEqual(['HEAD', 'begin', '0', '1', 'complete'].slice(0, requests.length))
+      } finally {
+        vault.close()
+        lock()
+      }
+    }
+  )
   for (const operation of ['write', 'move', 'remove'] as const)
     it(`BUG: ${operation} rechecks the claim immediately before its native file mutation`, async () => {
       writeFileSync(join(dir, 'original.bin'), 'original')

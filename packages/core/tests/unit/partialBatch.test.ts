@@ -53,6 +53,8 @@ it('D-019 records successful parts when a later restored group asset is refused'
             { error: { code: 'invalid_request', message: 'asset refused' } },
             { status: 400 }
           )
+        if (init?.method === 'HEAD' && path.startsWith('/v2/uploads/'))
+          return new Response(null, { status: 404 })
         if (init?.method === 'PUT') return new Response(null, { status: 201 })
         throw new Error(`unexpected ${path}`)
       },

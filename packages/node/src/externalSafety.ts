@@ -350,7 +350,13 @@ export class EffectFence {
   fetch(fetch: typeof globalThis.fetch): typeof globalThis.fetch {
     return (input, init) => {
       this.assertReady()
-      return this.track(() => fetch(input, init))
+      return this.track(async () => {
+        const response = await fetch(input, init)
+        // A completed request is not evidence for a successor binding. Check
+        // before its response can drive validation or acknowledge publication.
+        this.assertOwner()
+        return response
+      })
     }
   }
   async settlePredecessors(): Promise<void> {
