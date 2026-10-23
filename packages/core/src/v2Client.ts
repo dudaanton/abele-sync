@@ -116,6 +116,33 @@ export class V2EngineClient implements EngineClient {
       ((path === scope.path || path.startsWith(scope.path + '/')) && !path.startsWith('.obsidian/'))
     )
   }
+  private directoryState(
+    fs: FileSystem,
+    state: StateStore,
+    excludeDirectory: (path: string) => boolean = () => false,
+    signal?: AbortSignal
+  ) {
+    return new V2Directories(
+      fs,
+      state,
+      (path) => this.includes(path) && !excludeDirectory(path),
+      async (ops, key) => {
+        const response = await this.http.send('POST', '/v2/commit', {
+          json: { ops },
+          ...idempotency(key),
+        })
+        return (await this.http.decode(V2CommitResponseSchema, response, 'POST', '/v2/commit'))
+          .results
+      },
+      signal
+    )
+  }
+
+  async loadPathRefusals(fs: FileSystem, state: StateStore): Promise<void> {
+    this.directories = this.directoryState(fs, state)
+    await this.directories.loadRefusals()
+  }
+
   async prepare(
     fs: FileSystem,
     state: StateStore,
@@ -153,20 +180,7 @@ export class V2EngineClient implements EngineClient {
     this.departed.clear()
     for (const path of JSON.parse((await state.getMeta!('v2-departures')) ?? '[]') as string[])
       this.departed.add(path)
-    this.directories = new V2Directories(
-      fs,
-      state,
-      (path) => this.includes(path) && !excludeDirectory(path),
-      async (ops, key) => {
-        const response = await this.http.send('POST', '/v2/commit', {
-          json: { ops },
-          ...idempotency(key),
-        })
-        return (await this.http.decode(V2CommitResponseSchema, response, 'POST', '/v2/commit'))
-          .results
-      },
-      signal
-    )
+    this.directories = this.directoryState(fs, state, excludeDirectory, signal)
     await this.directories.loadRefusals()
     await this.directories.retireRecreatedDelete()
     const members = JSON.parse((await state.getMeta(MEMBERS_KEY)) ?? '[]') as StateEntry[]

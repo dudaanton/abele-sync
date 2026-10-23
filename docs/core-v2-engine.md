@@ -367,3 +367,6 @@ deferred metadata remains reviewable. Stage it before testing placement refusals
 including when replaying an older refusal after deferral is enabled. An approval
 that meets the hold remains a deferred decision; it must not be reported as applied
 or dropped merely because no bytes were written.
+Standalone approval reloads these durable barriers even in a fresh client that has
+not run a sync cycle. Loading them is local metadata work, without a server request
+or a directory scan over the approval draft.

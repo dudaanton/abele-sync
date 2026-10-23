@@ -369,6 +369,7 @@ export class SyncEngine implements ExclusiveOperationPort {
    */
   applyDeferred(versionIds?: readonly string[]): Promise<DeferredApplied> {
     return this.exclusive(async () => {
+      await this.opts.client.loadPathRefusals?.(this.opts.fs, this.opts.state)
       await this.watch.examine()
       const dirty = new Set([
         ...this.cycle.kept,

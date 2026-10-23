@@ -92,6 +92,65 @@ class DirectoryFs extends MemoryFileSystem {
   }
 }
 
+it('a fresh V2 engine loads durable directory holds before approving staged code', async () => {
+  const fs = new MemoryFileSystem(),
+    state = new MemoryStateStore()
+  const bytes = new Uint8Array([1]),
+    sha = await sha256(bytes)
+  const change: ChangeItem = {
+    seq: 2,
+    file_id: 'code',
+    version_id: 'v2',
+    path: 'blocked/main.js',
+    prev_path: null,
+    kind: 'attachment',
+    op: 'create',
+    sha,
+    size: 1,
+    mtime: 1,
+    actor: { kind: 'system', id: 'test', name: 'test' },
+    at: '',
+  }
+  await new StagedChanges(state, fs).stage([{ change, base: null }])
+  await state.setMeta(
+    'v2-directories',
+    JSON.stringify({
+      directories: [],
+      removals: [],
+      refused: [
+        {
+          path: 'blocked',
+          source: 'old',
+          code: 'conflict',
+          message: 'ambiguous',
+          direction: 'push',
+          evidence: true,
+        },
+      ],
+    })
+  )
+  const fetch = vi.fn(async () => new Response(bytes))
+  const client = new V2EngineClient(
+    encodeAccessToken({
+      v: 1,
+      address: 'https://synthetic.example.test',
+      key: 'k'.repeat(43),
+      scope: { kind: 'folder', id: 'root', path: '/' },
+    }),
+    { fetch }
+  )
+  const engine = new SyncEngine({ fs, state, client, selective: selectiveDefaults() })
+  try {
+    const result = await engine.applyDeferred(['v2'])
+    expect(result).toEqual({ applied: [], skipped: ['blocked/main.js'], unshown: [] })
+    expect(await readStaged(state)).toEqual([change])
+    expect(await fs.stat(change.path)).toBeNull()
+    expect(fetch).not.toHaveBeenCalled()
+  } finally {
+    await engine.stop()
+  }
+})
+
 it('D-136 never publishes a refused event past queued accepted work', async () => {
   const fs = new MemoryFileSystem(),
     state = new MemoryStateStore()

@@ -74,6 +74,8 @@ export interface EngineClient {
   /** Durable per-directory refusals suppress requests for the entire subtree until
    * an explicit rescan, disappearance, remote satisfaction, or generation reset. */
   directoryRefusals?(): readonly import('./v2Directories.js').DirectoryRefusal[]
+  /** Load durable placement barriers for a standalone decision, without syncing. */
+  loadPathRefusals?(fs: FileSystem, state: StateStore): Promise<void>
   pathRefusal?(path: string): import('./pusher.js').Refusal | undefined
   /** Clear refusals after prepare and a durable manifest rewind. Engine rescan orders this. */
   retryRefusedDirectories?(paths?: readonly string[]): Promise<void>
