@@ -454,7 +454,13 @@ export class SyncEngine implements ExclusiveOperationPort {
     this.opts.recovery?.assertReady()
     while (this.running !== null) await this.running.then(noop, noop)
     this.opts.recovery?.assertReady()
-    return this.occupy(job())
+    return this.occupy(
+      (async () => {
+        await this.cycle.scopeRecorded()
+        this.opts.recovery?.assertReady()
+        return job()
+      })()
+    )
   }
 
   private async run(): Promise<SyncReport> {

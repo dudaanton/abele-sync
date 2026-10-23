@@ -108,8 +108,10 @@ does not exempt a move from this check. This preserves bytes and intent rather t
 Verified refused stages belong to their exact pending decision. Replacing or
 dropping a deferred decision (including exclusion, explicit discard and host
 connection teardown) must use filesystem-aware `StagedChanges`: it writes a
-durable retirement marker, discards owned bytes and only then forgets the
-decision. Metadata-only callers cannot abandon held bytes. An interrupted
+durable retirement marker and removes or replaces the exact deferred decision
+in one metadata transaction, then discards owned bytes. A newer remote head
+uses the same atomic revocation of its old deferred version. Byte-limit eviction
+only retires the cached stage; its unresolved decision remains retryable. Metadata-only callers cannot abandon held bytes. An interrupted decision
 retirement retries idempotent cleanup; it never reinstalls the retired version.
 On restart, a ledger entry already recording the exact installation takes
 precedence over `heldOrder`: recovery cleans the resolved stage or its dangling

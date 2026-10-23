@@ -188,6 +188,14 @@ export class SyncCycle {
     return marking
   }
 
+  /** Host decisions share state with constructor/start scope publication. */
+  async scopeRecorded(): Promise<void> {
+    const marked = this.marked
+    // Scope failures are already reported; this barrier drains its writes.
+    await marked.catch(() => {})
+    if (marked !== this.marked) await this.scopeRecorded()
+  }
+
   /**
    * The hold as filed, onto the status, asking the server nothing: an engine built over a hold
    * an earlier process filed says so before a run reaches the delete check, which a paused or

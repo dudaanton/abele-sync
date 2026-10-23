@@ -5,6 +5,8 @@ import { replayAuthority } from './replayAuthority.js'
 import { pathOccupant } from './pathOccupant.js'
 import type { FileSystem } from './fs.js'
 import { discardPullStage } from './pullStages.js'
+import { DEFERRED_KEY, parse } from './deferredFile.js'
+import { transact } from './stateTransaction.js'
 
 /** Intent saved before a pull touches the disk, retired atomically with its ledger update. */
 interface PendingPullWrite {
@@ -126,13 +128,25 @@ export class PendingPullWrites {
 
   /** Retire bytes before their ownership record. An interrupted retirement is
    * resumed, never interpreted as permission to install or fetch the old stage. */
-  private async retire(pending: PendingPullWrite): Promise<void> {
+  private async retire(pending: PendingPullWrite, superseded = false): Promise<void> {
     if (!this.fs)
       throw new EngineError('io', 'host cannot retire a held pull stage without its filesystem')
-    await this.state.setMeta?.(
-      keyFor(pending.fileId),
-      JSON.stringify({ ...pending, retiring: true })
-    )
+    if (superseded) {
+      await transact(this.state, async (tx) => {
+        const filed = parse(await tx.getMeta!(DEFERRED_KEY))
+        const staged = filed.staged.filter(
+          (one) =>
+            one.change.file_id !== pending.fileId || one.change.version_id !== pending.versionId
+        )
+        if (staged.length !== filed.staged.length)
+          await tx.setMeta!(DEFERRED_KEY, staged.length ? JSON.stringify({ staged }) : null)
+        await tx.setMeta!(keyFor(pending.fileId), JSON.stringify({ ...pending, retiring: true }))
+      })
+    } else if (!pending.retiring)
+      await this.state.setMeta?.(
+        keyFor(pending.fileId),
+        JSON.stringify({ ...pending, retiring: true })
+      )
     if (pending.stageId) await discardPullStage(this.fs, pending.stageId)
     if (pending.receiptId) await this.fs.discardInstallation?.(pending.receiptId)
     await this.clear(pending.fileId)
@@ -140,14 +154,29 @@ export class PendingPullWrites {
 
   async superseded(change: ChangeItem): Promise<void> {
     const pending = await this.read(change.file_id)
+    if (!pending) return
+    const newer =
+      pending.versionId !== change.version_id &&
+      pending.seq !== undefined &&
+      change.seq > pending.seq
+    if (pending.retiring || newer) await this.retire(pending, newer)
+  }
+
+  /** Called inside the same transaction that removes/replaces the exact
+   * deferred owner. Publishing the marker must revoke the old decision too. */
+  async prepareDiscardHeld(change: ChangeItem): Promise<void> {
+    const pending = await this.read(change.file_id)
     if (
-      pending &&
-      (pending.retiring ||
-        (pending.versionId !== change.version_id &&
-          pending.seq !== undefined &&
-          change.seq > pending.seq))
+      pending?.versionId !== change.version_id ||
+      (pending.heldOrder === undefined && !pending.retiring)
     )
-      await this.retire(pending)
+      return
+    if (!this.fs)
+      throw new EngineError('io', 'host cannot retire a held pull stage without its filesystem')
+    await this.state.setMeta!(
+      keyFor(pending.fileId),
+      JSON.stringify({ ...pending, retiring: true })
+    )
   }
 
   /** An explicit staging decision resolves only the version the user was shown. */

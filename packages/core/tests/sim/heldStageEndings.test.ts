@@ -13,6 +13,7 @@ import {
 import { DurableStateStore } from './durableState.js'
 import { MemoryStreamingFS } from './streamingMemoryFs.js'
 import { EpochError, SimScheduler } from './scheduler.js'
+import { PendingPullWrites } from '../../src/pullWrite.js'
 
 async function fixture(seed: number) {
   const scheduler = new SimScheduler(seed)
@@ -23,13 +24,17 @@ async function fixture(seed: number) {
   const bytes = new TextEncoder().encode('incoming'),
     sha = await sha256(bytes),
     removals = new Map<string, number>()
+  const downloads: string[] = []
   const client = {
-    openVersion: async () => ({
-      size: bytes.length,
-      read: async (at: number, length: number) => bytes.slice(at, at + length),
-      assertUnchanged: async () => {},
-      close: async () => {},
-    }),
+    openVersion: async (_fileId: string, versionId: string) => {
+      downloads.push(versionId)
+      return {
+        size: bytes.length,
+        read: async (at: number, length: number) => bytes.slice(at, at + length),
+        assertUnchanged: async () => {},
+        close: async () => {},
+      }
+    },
   } as unknown as EngineClient
   const instrument = () => {
     const begin = fs.beginAtomicWrite.bind(fs),
@@ -68,14 +73,14 @@ async function fixture(seed: number) {
     actor: { kind: 'system', id: 's', name: 's' },
     at: '',
   })
-  const staging = () =>
+  const staging = (deferred = true) =>
     new Staging({
       client,
       fs,
       state,
       filter: { excluded: (path) => excluded(path) },
       expected: new ExpectedWrites(),
-      defer: () => true,
+      defer: deferred ? () => true : undefined,
       log: () => {},
     })
   const run = (item: ChangeItem, respectScope = false) =>
@@ -122,6 +127,7 @@ async function fixture(seed: number) {
       return state
     },
     removals,
+    downloads,
     bytes,
     sha,
     change,
@@ -224,6 +230,78 @@ it.each(['fs.stage.discard#1', 'stage.discarded#1'])(
     for (const recoveryCut of await execute()) await execute(recoveryCut)
   }
 )
+
+it.each(['drop', 'replace', 'exclude', 'new-head'] as const)(
+  'a retired decision cannot return after a disk-only restart (%s)',
+  async (mode) => {
+    async function execute(recoveryCut?: string) {
+      const f = await fixture(192),
+        id = await f.retain('a')
+      f.scheduler.cut = 'stage.discarded#1'
+      const operation =
+        mode === 'replace'
+          ? f.staging().stage([{ change: f.change('a', 2), base: null }])
+          : mode === 'exclude'
+            ? (f.exclude(), f.staging().tidy(new Set()))
+            : mode === 'new-head'
+              ? f.run(f.change('a', 2))
+              : f.staging().records.drop(['a'])
+      await expect(operation).rejects.toBeInstanceOf(EpochError)
+      f.reopen()
+      f.allow()
+      const start = f.scheduler.points.length
+      f.scheduler.cut = recoveryCut
+      try {
+        await f.recover()
+      } catch (error) {
+        if (!(error instanceof EpochError) || !recoveryCut) throw error
+      }
+      const points = f.scheduler.points.slice(start)
+      if (recoveryCut) {
+        expect(f.scheduler.epoch, recoveryCut).toBe(2)
+        f.reopen()
+        await f.recover()
+      }
+      expect(f.fs.stages.has(id)).toBe(false)
+      expect(await f.state.getMeta('pull-write:a')).toBeNull()
+      expect(await f.staging().list()).toEqual(mode === 'replace' ? [f.change('a', 2)] : [])
+      const before = f.fs.snapshot(),
+        downloads = f.downloads.length
+      expect((await f.staging().apply(new Set(), new Set(['a-1']))).applied).toEqual([])
+      expect(f.fs.snapshot()).toEqual(before)
+      await f.staging(false).tidy(new Set())
+      expect(f.downloads.slice(downloads)).not.toContain('a-1')
+      expect(f.removals.get(id)).toBe(1)
+      return points
+    }
+    for (const recoveryCut of await execute()) await execute(recoveryCut)
+  }
+)
+
+it('a live staged reader observes revocation by a newer remote head', async () => {
+  const f = await fixture(192),
+    id = await f.retain('a'),
+    staging = f.staging()
+  expect(await staging.list()).toEqual([f.change('a')])
+  await f.run(f.change('a', 2))
+  expect(f.fs.stages.has(id)).toBe(false)
+  expect(await staging.list()).toEqual([])
+  await staging.stage([{ change: f.change('a', 2), base: null }])
+  await staging.records.drop(['a'])
+})
+
+it('byte-limit eviction keeps the unresolved decision retryable', async () => {
+  const f = await fixture(192),
+    id = await f.retain('a')
+  await new PendingPullWrites(f.state, f.fs).retain('a', { count: 0, bytes: 0 })
+  expect(f.fs.stages.has(id)).toBe(false)
+  expect(await f.staging().list()).toEqual([f.change('a')])
+  f.reopen()
+  f.allow()
+  await f.recover()
+  expect((await f.staging().apply(new Set())).applied).toEqual(['a.bin'])
+  expect(f.fs.snapshot().get('a.bin')).toEqual(f.bytes)
+})
 
 it('a metadata-only caller cannot abandon bytes it has no filesystem authority to retire', async () => {
   const f = await fixture(187),
@@ -340,9 +418,8 @@ it.each([187, 188, 189, 190])(
       }
       const start = f.scheduler.points.length
       f.scheduler.cut = cut
-      let next = 0
       try {
-        for (; next < endings.length; next++) await finish(next)
+        for (let n = 0; n < endings.length; n++) await finish(n)
         // Host connection teardown releases its remaining deferred decisions
         // through the same filesystem-aware ownership boundary, before state removal.
         await f.staging().records.drop((await f.staging().list()).map((item) => item.file_id))
@@ -360,7 +437,27 @@ it.each([187, 188, 189, 190])(
           const pending = JSON.parse((await f.state.getMeta(key))!)
           expect((await f.state.byFileId(pending.fileId))?.versionId).not.toBe(pending.versionId)
         }
-        for (; next < endings.length; next++) await finish(next)
+        await f.staging().afterPull()
+        // Restart from durable state only. Never replay the interrupted host
+        // decision using a remembered next index or finish(next).
+        const decisions = await f.staging().list()
+        const retired = new Set<string>()
+        for (const [fileId, stageId] of originals) {
+          if (f.fs.stages.has(stageId)) continue
+          retired.add(fileId + '-1')
+          expect(decisions.find((item) => item.file_id === fileId)?.version_id).not.toBe(
+            fileId + '-1'
+          )
+        }
+        await assertOwnership()
+        f.allow()
+        const before = f.fs.snapshot(),
+          downloads = f.downloads.length
+        expect((await f.staging().apply(new Set(), retired)).applied).toEqual([])
+        expect(f.fs.snapshot()).toEqual(before)
+        expect(f.downloads.slice(downloads).some((version) => retired.has(version))).toBe(false)
+        // A new, explicit teardown decision operates only on records read back
+        // from disk; it cannot hide resurrection checked above.
         await f.staging().records.drop((await f.staging().list()).map((item) => item.file_id))
       }
       await f.recover()

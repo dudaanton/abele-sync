@@ -2,6 +2,8 @@ import type { ChangeItem } from '@abele/sync-protocol'
 import type { StateEntry, StateStore } from './state.js'
 import type { FileSystem } from './fs.js'
 import { PendingPullWrites } from './pullWrite.js'
+import { transact } from './stateTransaction.js'
+import { DEFERRED_KEY, parse, type Filed } from './deferredFile.js'
 
 /**
  * Staged changes: the server's changes to files a host would rather
@@ -49,8 +51,7 @@ export function deferredSource(
   return entry !== null && entry.wirePath !== change.path && touchesDeferred(defer, entry.wirePath)
 }
 
-/** Where the staged changes are filed. */
-export const DEFERRED_KEY = 'deferred-changes'
+export { DEFERRED_KEY } from './deferredFile.js'
 
 /** One staged change, and the version its file's entry had when it was staged. */
 export interface Staged {
@@ -76,38 +77,6 @@ export function stageFrom(change: ChangeItem, entry: StateEntry | null): Staged 
   }
 }
 
-interface Filed {
-  staged: Staged[]
-}
-
-/**
- * The records as filed. An older build also filed `keptDeletes` — deletes it let past the
- * delete guard — and those are read as nothing: such a delete, if the scan still finds it, is
- * then judged by the guard like any other.
- */
-function parse(raw: string | null): Filed {
-  if (raw === null) return { staged: [] }
-  try {
-    const value = JSON.parse(raw) as Partial<Filed> | null
-    if (value === null || typeof value !== 'object') return { staged: [] }
-    const staged = Array.isArray(value.staged)
-      ? value.staged.filter(
-          (one): one is Staged =>
-            typeof one === 'object' &&
-            one !== null &&
-            typeof one.change === 'object' &&
-            one.change !== null &&
-            typeof one.change.file_id === 'string' &&
-            typeof one.change.path === 'string' &&
-            (one.base === null || typeof one.base === 'string')
-        )
-      : []
-    return { staged }
-  } catch {
-    return { staged: [] }
-  }
-}
-
 /** The staged changes as the state holds them, oldest seq first; none for a store without meta. */
 export async function readStaged(state: StateStore): Promise<ChangeItem[]> {
   const filed = parse(state.getMeta ? await state.getMeta(DEFERRED_KEY) : null)
@@ -115,10 +84,11 @@ export async function readStaged(state: StateStore): Promise<ChangeItem[]> {
 }
 
 /**
- * The engine's staged changes, read once per engine and written through on every change.
- * Only the engine's own run queue writes them, so the copy here is never behind the state.
+ * The engine's staged changes, refreshed from durable metadata on each operation.
+ * Pending-pull supersession can retire a decision before the next staged operation.
  * A mutating caller must supply its filesystem when decisions can own held pull stages;
- * replacing or dropping a decision retires those bytes before forgetting their owner.
+ * replacing or dropping a decision publishes retirement with its next durable
+ * decision before discarding the owned bytes.
  */
 export class StagedChanges {
   private filed: Filed | null = null
@@ -134,7 +104,7 @@ export class StagedChanges {
   ) {}
 
   private async load(): Promise<Filed> {
-    if (this.filed === null) {
+    if (this.filed === null || (this.state.getMeta && this.state.setMeta)) {
       this.filed = parse(this.state.getMeta ? await this.state.getMeta(DEFERRED_KEY) : null)
     }
     return this.filed
@@ -148,6 +118,24 @@ export class StagedChanges {
       )
     }
     this.filed = next
+  }
+
+  /** Publish the owner's next decision and stage retirement as one durable
+   * transition. Physical cleanup may finish in recovery, without replaying the
+   * host's discarded/replacement decision from memory. */
+  private async transition(next: Filed, retired: ChangeItem[]): Promise<void> {
+    if (!this.state.setMeta || retired.length === 0) return this.save(next)
+    await transact(this.state, async (tx) => {
+      const pending = new PendingPullWrites(tx, this.fs)
+      for (const change of retired) await pending.prepareDiscardHeld(change)
+      await tx.setMeta!(
+        DEFERRED_KEY,
+        next.staged.length === 0 ? null : JSON.stringify({ staged: next.staged })
+      )
+    })
+    this.filed = next
+    const pending = new PendingPullWrites(this.state, this.fs)
+    for (const change of retired) await pending.discardHeld(change)
   }
 
   /** Every staged change with its base, oldest seq first. */
@@ -175,16 +163,14 @@ export class StagedChanges {
     const filed = await this.load()
     const byId = new Map(filed.staged.map((one) => [one.change.file_id, one]))
     let fresh = 0
+    const retired: ChangeItem[] = []
     for (const item of items) {
       const before = byId.get(item.change.file_id)
       if (before !== undefined && before.change.version_id === item.change.version_id) {
         byId.set(item.change.file_id, { ...before, ...item, change: before.change })
         continue
       }
-      // Ownership ends before the decision is replaced. A crash leaves either
-      // the old decision or its durable retirement marker, never orphaned bytes.
-      if (before !== undefined)
-        await new PendingPullWrites(this.state, this.fs).discardHeld(before.change)
+      if (before !== undefined) retired.push(before.change)
       const same =
         before !== undefined &&
         before.change.sha !== null &&
@@ -198,20 +184,20 @@ export class StagedChanges {
           : {}),
       })
     }
-    await this.save({ ...filed, staged: [...byId.values()] })
+    await this.transition({ ...filed, staged: [...byId.values()] }, retired)
     return fresh
   }
 
-  /** Retire held bytes, then forget the staged changes of these files. */
+  /** Durably end these decisions before retiring their held bytes. */
   async drop(fileIds: Iterable<string>): Promise<void> {
     const gone = new Set(fileIds)
     if (gone.size === 0) return
     const filed = await this.load()
-    for (const one of filed.staged)
-      if (gone.has(one.change.file_id))
-        await new PendingPullWrites(this.state, this.fs).discardHeld(one.change)
     const staged = filed.staged.filter((one) => !gone.has(one.change.file_id))
     if (staged.length === filed.staged.length) return
-    await this.save({ ...filed, staged })
+    await this.transition(
+      { ...filed, staged },
+      filed.staged.filter((one) => gone.has(one.change.file_id)).map((one) => one.change)
+    )
   }
 }
