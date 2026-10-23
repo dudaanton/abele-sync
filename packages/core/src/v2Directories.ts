@@ -267,10 +267,11 @@ export class V2Directories {
   async departed(fileId: string, keep = false) {
     const doc = await this.read()
     const waiting = doc.incoming?.find((item) => item.file_id === fileId)
+    const old = doc.directories.find((d) => d.file_id === fileId)
+    if ((waiting && !this.includes(waiting.path)) || (old && !this.includes(old.path))) return false
     if (waiting?.kind === 'directory')
       doc.refused = doc.refused?.filter((item) => item.path !== waiting.path)
     doc.incoming = (doc.incoming ?? []).filter((d) => d.file_id !== fileId)
-    const old = doc.directories.find((d) => d.file_id === fileId)
     if (!old) {
       await this.save(doc)
       return waiting?.kind === 'directory'
@@ -295,6 +296,8 @@ export class V2Directories {
     )) {
       this.signal?.throwIfAborted()
       const path = localPath(removal)
+      if (!this.includes(path) || (typeof removal !== 'string' && !this.includes(removal.path)))
+        continue
       // Legacy cleanup lacks identity evidence. Preserve it for review rather than
       // deleting whatever now occupies the spelling after an upgrade.
       if (typeof removal === 'string') continue

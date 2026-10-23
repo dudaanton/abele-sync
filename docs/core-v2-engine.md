@@ -59,6 +59,19 @@ path coordinator or claim simultaneous live-host verification.
 
 ## Filesystem and state ports
 
+Startup inventory uses cooperative task checkpoints, including cached scope,
+scanner and reconciliation loops: at most 256 paths or approximately 8 ms per
+checkpoint. Hosts may supply `EngineOptions.yieldTask` (also available on scan
+options); it must yield a host task, not just resolve a promise. The default uses
+`setTimeout(0)`. Cancellation is checked after yielding and before new effects;
+an issued scheduler task is awaited before cancellation returns. This changes
+neither path order nor transfer concurrency. Cached content fingerprints remain
+valid inputs; yielding does not request extra content reads.
+
+Small local sources used for direct incoming placement are read into the bounded
+publication buffer once. That same buffer is hashed, and the opened source is
+validated before closing. Large streaming copies retain their verification path.
+
 `PullOptions.placementConcurrency` (also exposed on `EngineOptions`) bounds
 independent filesystem preparations to 1–32; the default is 1. It applies to
 ordinary pulls and staged approval, independently of download concurrency.
@@ -356,6 +369,9 @@ of a differently spelled foreign file.
 ### Unobservable directory evidence
 
 An unresolved directory hold remains durable until positive evidence resolves it.
+Directory departures and queued empty-directory cleanup respect the current
+exclusion predicate. An excluded directory stays on disk and is not reported as
+departed; its existing ledger/removal evidence remains available if scope widens.
 Normalization collisions, scope filtering, or disappearance of the candidate's name,
 inode and child spelling never prove deletion. Such a hold cannot emit a recursive
 delete. Previous source/candidate barriers remain; when all nomination hints vanish,

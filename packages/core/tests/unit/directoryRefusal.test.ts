@@ -905,3 +905,36 @@ it.each(['tracked', 'previous'] as const)(
     expect(await fs.read(change.path)).toEqual(bytes)
   }
 )
+
+it.each([false, true])('D-008 preserves excluded empty directories (queued=%s)', async (queued) => {
+  const fs = new DirectoryFs(),
+    state = new MemoryStateStore()
+  fs.dirs.set('excluded', 'identity')
+  const remove = vi.fn(async (path: string) => {
+    fs.dirs.delete(path)
+  })
+  Object.assign(fs, { removeDirectory: remove })
+  const directory = {
+    kind: 'directory',
+    path: 'excluded',
+    localPath: 'excluded',
+    identity: 'identity',
+    file_id: 'dir',
+    version_id: 'v1',
+    mtime: 1,
+  }
+  await state.setMeta(
+    'v2-directories',
+    JSON.stringify({
+      directories: queued ? [] : [directory],
+      removals: queued ? [{ path: 'excluded', localPath: 'excluded', identity: 'identity' }] : [],
+    })
+  )
+  const dirs = new V2Directories(fs, state, () => false, vi.fn())
+  if (!queued) expect(await dirs.departed('dir')).toBe(false)
+  await dirs.finishPull()
+  expect(remove).not.toHaveBeenCalled()
+  expect(fs.dirs.get('excluded')).toBe('identity')
+  if (!queued)
+    expect(JSON.parse((await state.getMeta('v2-directories'))!).directories).toEqual([directory])
+})
