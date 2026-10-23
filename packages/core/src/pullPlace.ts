@@ -427,7 +427,9 @@ export class PullPlacer {
       this.fs.reopenStage &&
       this.client.openVersion &&
       change.size !== null
-    let bytes = streaming ? await this.smallLocalBytes(sha, local) : null
+    // Local bytes still need a safe publisher. Stage-only hosts must keep the
+    // stage path even when a small copy can be read without a remote transfer.
+    let bytes = streaming && this.fs.conditionalFile ? await this.smallLocalBytes(sha, local) : null
     // Hosts with conditional buffered publication do not need a recoverable stage
     // for a body bounded to one chunk. Read immutable versions through the same
     // bounded source API; never turn this into an unbounded getBlob call.

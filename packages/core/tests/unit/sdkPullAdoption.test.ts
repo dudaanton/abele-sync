@@ -315,3 +315,72 @@ it.each([false, true])(
     for (const version of versions) expect(await fs.read(version.path)).toEqual(version.bytes)
   }
 )
+
+it.each([undefined, 0])(
+  'installs a small known local copy through stages on a host without buffered publication (prefetch=%s)',
+  async (prefetchBytes) => {
+    const host = new MemoryStreamingFS(new SimScheduler(175))
+    const fs: FileSystem = host,
+      state = new MemoryStateStore()
+    fs.conditionalFile = undefined
+    const bytes = new Uint8Array([7]),
+      sha = await sha256(bytes)
+    await fs.writeAtomic('existing.bin', bytes, 1)
+    const original = {
+      path: 'existing.bin',
+      wirePath: 'existing.bin',
+      fileId: 'existing',
+      versionId: 'base',
+      sha,
+      size: 1,
+      mtime: 1,
+    }
+    await state.put(original)
+    const begin = vi.spyOn(host, 'beginAtomicWrite')
+    const openVersion = vi.fn(async () => {
+      throw new Error('unexpected remote transfer')
+    })
+    const report = await pull(
+      {
+        manifest: async () => ({
+          items: [
+            {
+              file_id: 'copy',
+              version_id: 'copied',
+              path: 'copy.bin',
+              sha,
+              size: 1,
+              mtime: 2,
+              seq: 5,
+              kind: 'attachment',
+            },
+          ],
+          head_seq: 5,
+          next: null,
+        }),
+        changes: async () => ({ items: [], head_seq: 5, next_since: 5 }),
+        openVersion,
+        getBlob: async () => {
+          throw new Error('unexpected blob download')
+        },
+      } as unknown as EngineClient,
+      fs,
+      state,
+      { ...options(), ...(prefetchBytes === undefined ? {} : { prefetchBytes }) }
+    )
+    expect(report.held).toEqual([])
+    expect(report.applied).toBe(1)
+    expect(begin).toHaveBeenCalledTimes(1)
+    expect(openVersion).not.toHaveBeenCalled()
+    expect(await fs.read('copy.bin')).toEqual(bytes)
+    expect(await state.byFileId('copy')).toMatchObject({
+      path: 'copy.bin',
+      versionId: 'copied',
+      sha,
+    })
+    expect(await state.byFileId('existing')).toEqual(original)
+    expect(await state.getCursor()).toBe(5)
+    expect(await state.getMeta('pull-write:copy')).toBeNull()
+    expect(host.stages.size).toBe(0)
+  }
+)
