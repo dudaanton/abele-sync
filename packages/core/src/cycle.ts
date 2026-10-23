@@ -265,7 +265,7 @@ export class SyncCycle {
           .map((row) => row.path)
       )
     await fs.recoverConditionalFiles?.()
-    await recoverPullEvictions(fs, state, this.ctx.signal?.(), this.retries)
+    await recoverPullEvictions(fs, state, this.ctx.signal?.(), this.retries, client)
     const pendingFiles = new Set(
       ((await state.metadataKeys?.('pull-write:')) ?? []).map((key) =>
         key.slice('pull-write:'.length)

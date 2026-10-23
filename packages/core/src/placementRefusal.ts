@@ -7,7 +7,7 @@ import { storedDirectoryRefusal } from './v2Directories.js'
 export async function placementRefusal(
   client: Pick<EngineClient, 'pathRefusal'>,
   state: StateStore,
-  change: ChangeItem,
+  change: Pick<ChangeItem, 'path' | 'prev_path'>,
   entry: StateEntry | null
 ) {
   const paths = new Set(
@@ -15,9 +15,18 @@ export async function placementRefusal(
       (path): path is string => path != null
     )
   )
-  for (const path of paths) {
+  return pathRefusal(client, state, paths)
+}
+
+export async function pathRefusal(
+  client: Pick<EngineClient, 'pathRefusal'>,
+  state: StateStore,
+  paths: Iterable<string>
+) {
+  const names = [...paths]
+  for (const path of names) {
     const refusal = client.pathRefusal?.(path)
     if (refusal) return refusal
   }
-  return storedDirectoryRefusal(state, paths)
+  return storedDirectoryRefusal(state, names)
 }

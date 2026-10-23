@@ -1,5 +1,4 @@
 import { pathOccupant } from './pathOccupant.js'
-import { placementRefusal } from './placementRefusal.js'
 import { olderPull, pullHistoryKey, recordPull } from './pullHistory.js'
 import { replayAuthority } from './replayAuthority.js'
 import { transact } from './stateTransaction.js'
@@ -75,7 +74,7 @@ export class PullPlacer {
     shared?: PullPlacer,
     private readonly drainCompletedSerial = true
   ) {
-    this.pending = shared?.pending ?? new PendingPullWrites(state, fs, sequenceKnown)
+    this.pending = shared?.pending ?? new PendingPullWrites(state, fs, sequenceKnown, client)
     this.paths = shared?.paths ?? LocalPaths.filePass(fs, state)
     this.budget = shared?.budget ?? opts.transferBudget ?? new TransferBudget()
     this.lying = shared?.lying ?? new Set<string>()
@@ -96,6 +95,7 @@ export class PullPlacer {
    * push repairs the entry's mtime, and the pull after that writes through.
    */
   async edited(entry: StateEntry, target = entry.path): Promise<boolean> {
+    if (await this.pending.refused(entry.fileId, [target], entry)) return true
     let path = entry.path
     let have = await this.fs.stat(path)
     // A missing source can be an offline rename. Its untracked destination must
@@ -119,6 +119,7 @@ export class PullPlacer {
     return false
   }
   async settled(change: ChangeItem): Promise<void> {
+    if (await this.refusal(change, await this.state.byFileId(change.file_id))) return
     const receipt = await this.pending.receiptId(change)
     if (receipt !== undefined) await this.fs.discardInstallation?.(receipt)
     await this.pending.settled(change, (id) => discardPullStage(this.fs, id))
@@ -186,6 +187,7 @@ export class PullPlacer {
     entry: StateEntry | null,
     newest = false
   ): Promise<boolean | 'held'> {
+    if (await this.refusal(change, entry)) return 'held'
     if (change.op === 'delete' || change.sha === null) return false
     if (entry && (await sourceRecreation(this.state, entry)))
       return (await this.pending.stageId(change)) ? false : 'held'
@@ -291,6 +293,8 @@ export class PullPlacer {
    * is held for a later pull, rather than the whole sync failing on it every time.
    */
   async drop(entry: StateEntry, change?: ChangeItem): Promise<boolean> {
+    if (await this.pending.refused(entry.fileId, [change?.path, change?.prev_path], entry))
+      return false
     await this.settlement()
     if ((await LocalPaths.forFile(this.fs, entry.wirePath, this.state)).blocked(entry.wirePath))
       return false
@@ -301,7 +305,7 @@ export class PullPlacer {
       await tx.delete(entry.path)
       if (change) await recordPull(tx, change, true)
       await tx.setMeta?.(scanHintKey(entry.path), null)
-      await new PendingPullWrites(tx, this.fs).clear(entry.fileId)
+      await new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client).clear(entry.fileId)
       if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
     })
     if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
@@ -515,7 +519,7 @@ export class PullPlacer {
     if (from === null) {
       await transact(this.state, async (tx) => {
         await tx.setMeta?.(`pull-base:${target}`, JSON.stringify({ base: entry }))
-        await new PendingPullWrites(tx, this.fs, this.sequenceKnown).prepare(
+        await new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client).prepare(
           change,
           entry,
           target,
@@ -802,7 +806,11 @@ export class PullPlacer {
   }
 
   async refusal(change: ChangeItem, entry: StateEntry | null) {
-    const refusal = await placementRefusal(this.client, this.state, change, entry)
+    const refusal = await this.pending.refused(
+      change.file_id,
+      [change.path, change.prev_path],
+      entry
+    )
     if (refusal) this.opts.log?.(`pull: holding ${change.path}: ${refusal.message}`)
     return refusal
   }
@@ -912,6 +920,7 @@ export class PullPlacer {
       // Unknown hosts use conservative name equivalence. An alias may therefore
       // be a distinct public file: never evict it as an exact-path replacement.
       if (occupant.path !== target) return 'held'
+      if (await this.pending.refused(occupant.fileId, [target], occupant)) return 'held'
       if (this.opts.dirty.has(occupant.wirePath) || (await this.edited(occupant))) {
         return 'held'
       }
@@ -979,7 +988,14 @@ export class PullPlacer {
     const stageId = await this.pending.stageId(change)
     const receiptId = await this.pending.receiptId(change)
     const recorded = await transact(this.state, async (tx) => {
-      if (!(await new PendingPullWrites(tx, this.fs).authorizes(change, base, target))) return false
+      if (
+        !(await new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client).authorizes(
+          change,
+          base,
+          target
+        ))
+      )
+        return false
       const current = await tx.byFileId(change.file_id)
       if (this.sequenceKnown && (await olderPull(tx, change, current))) return false
       let occupant = await pathOccupant(this.fs, tx, target, change.file_id)
@@ -1013,7 +1029,10 @@ export class PullPlacer {
       await tx.setMeta?.(scanHintKey(target), null)
       await tx.setMeta?.(`pull-base:${target}`, null)
       if (from !== null) await tx.setMeta?.(scanHintKey(from), null)
-      if (stageId === undefined) await new PendingPullWrites(tx, this.fs).clear(change.file_id)
+      if (stageId === undefined)
+        await new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client).clear(
+          change.file_id
+        )
       if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
       return true
     })

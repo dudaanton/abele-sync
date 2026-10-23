@@ -7,13 +7,16 @@ import type { StateEntry, StateStore } from './state.js'
 import { EngineError } from './errors.js'
 import { checkCancellation } from './cancellation.js'
 import { isFileFailure, type FileRetries } from './fileRetry.js'
+import { pathRefusal } from './placementRefusal.js'
+import type { EngineClient } from './engineClient.js'
 
 export const evictionKey = (fileId: string) => `pull-evict:${fileId}`
 export async function recoverPullEvictions(
   fs: FileSystem,
   state: StateStore,
   signal?: AbortSignal,
-  retries?: FileRetries
+  retries?: FileRetries,
+  client: Pick<EngineClient, 'pathRefusal'> = {}
 ): Promise<void> {
   const keys = (await state.metadataKeys?.('pull-evict:')) ?? []
   if (!state.metadataKeys)
@@ -36,6 +39,7 @@ export async function recoverPullEvictions(
       throw new EngineError('io', 'invalid pull eviction intent', error)
     }
     if (retries && !retries.ready(base.wirePath)) continue
+    if (await pathRefusal(client, state, [base.path, base.wirePath])) continue
     try {
       const absent = (await fs.stat(base.path)) === null
       await transact(state, async (tx) => {

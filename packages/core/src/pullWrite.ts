@@ -7,6 +7,8 @@ import type { FileSystem } from './fs.js'
 import { discardPullStage } from './pullStages.js'
 import { DEFERRED_KEY, parse, type Filed } from './deferredFile.js'
 import { transact } from './stateTransaction.js'
+import { pathRefusal } from './placementRefusal.js'
+import type { EngineClient } from './engineClient.js'
 
 /** Intent saved before a pull touches the disk, retired atomically with its ledger update. */
 interface PendingPullWrite {
@@ -39,8 +41,41 @@ export class PendingPullWrites {
   constructor(
     private readonly state: StateStore,
     private readonly fs?: FileSystem,
-    private readonly sequenceKnown = true
+    private readonly sequenceKnown = true,
+    private readonly client: Pick<EngineClient, 'pathRefusal'> = {}
   ) {}
+
+  /** Include durable intent names even when the caller no longer has its old base. */
+  async refused(
+    fileId: string,
+    extra: Array<string | null | undefined> = [],
+    base?: StateEntry | null
+  ) {
+    const pending = await this.read(fileId)
+    const current = await this.state.byFileId(fileId)
+    const paths = [
+      ...extra,
+      base?.path,
+      base?.wirePath,
+      current?.path,
+      current?.wirePath,
+      pending?.wirePath,
+      pending?.target,
+      pending?.from,
+      pending?.base?.path,
+      pending?.base?.wirePath,
+    ]
+    if (!pending && !current && !base) {
+      const filed = parse((await this.state.getMeta?.(DEFERRED_KEY)) ?? null)
+      for (const item of filed.staged)
+        if (item.change.file_id === fileId) paths.push(item.change.path, item.change.prev_path)
+    }
+    return pathRefusal(
+      this.client,
+      this.state,
+      new Set(paths.filter((path): path is string => path != null))
+    )
+  }
 
   async prepare(
     change: ChangeItem,
@@ -51,6 +86,8 @@ export class PendingPullWrites {
     receiptId?: string,
     sourceIdentity?: string
   ): Promise<void> {
+    if (await this.refused(change.file_id, [change.path, change.prev_path, target, from], base))
+      return
     if (this.state.getMeta === undefined || this.state.setMeta === undefined) return
     const owner = this.state.effectOwner?.()
     const pending: PendingPullWrite = {
@@ -116,6 +153,7 @@ export class PendingPullWrites {
     return pending?.versionId === change.version_id ? pending.receiptId : undefined
   }
   async settled(change: ChangeItem, discard?: (id: string) => Promise<void>): Promise<void> {
+    if (await this.refused(change.file_id, [change.path, change.prev_path])) return
     const pending = await this.read(change.file_id)
     if (pending?.versionId === change.version_id) {
       if (pending.stageId !== undefined && discard) await discard(pending.stageId)
@@ -124,6 +162,7 @@ export class PendingPullWrites {
   }
 
   async clear(fileId: string): Promise<void> {
+    if (await this.refused(fileId)) return
     await this.state.setMeta?.(keyFor(fileId), null)
   }
 
@@ -131,6 +170,7 @@ export class PendingPullWrites {
    * Retire bytes before their ownership record. An interrupted retirement is
    * resumed, never interpreted as permission to install or fetch the old stage. */
   private async retire(pending: PendingPullWrite): Promise<void> {
+    if (await this.refused(pending.fileId)) return
     if (!this.fs)
       throw new EngineError('io', 'host cannot retire a held pull stage without its filesystem')
     if (!pending.retiring)
@@ -144,6 +184,7 @@ export class PendingPullWrites {
   }
 
   async superseded(change: ChangeItem): Promise<void> {
+    if (await this.refused(change.file_id, [change.path, change.prev_path])) return
     const pending = await this.read(change.file_id)
     if (!pending) return
     const newer =
@@ -159,6 +200,7 @@ export class PendingPullWrites {
   private async prepareRetirement(
     change: Pick<ChangeItem, 'file_id' | 'version_id'>
   ): Promise<void> {
+    if (await this.refused(change.file_id)) return
     const pending = await this.read(change.file_id)
     if (pending?.versionId !== change.version_id) return
     if (!this.fs)
@@ -177,13 +219,18 @@ export class PendingPullWrites {
     changes: readonly Pick<ChangeItem, 'file_id' | 'version_id'>[],
     replacement?: Filed
   ): Promise<void> {
+    // A replacement and its retirement markers are one atomic owner transition.
+    // Keep the entire document if any affected decision is protected.
+    for (const change of changes) if (await this.refused(change.file_id)) return
+    for (const item of replacement?.staged ?? [])
+      if (await this.refused(item.change.file_id, [item.change.path, item.change.prev_path])) return
     if (!this.state.getMeta || !this.state.setMeta) return
     const identity = (change: Pick<ChangeItem, 'file_id' | 'version_id'>) =>
       JSON.stringify([change.file_id, change.version_id])
     const kept = new Set(replacement?.staged.map((one) => identity(one.change)))
     const ended = changes.filter((change) => !kept.has(identity(change)))
     await transact(this.state, async (tx) => {
-      const pending = new PendingPullWrites(tx, this.fs)
+      const pending = new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client)
       for (const change of ended) await pending.prepareRetirement(change)
       const filed = replacement ?? parse(await tx.getMeta!(DEFERRED_KEY))
       const gone = new Set(ended.map(identity))
@@ -198,6 +245,7 @@ export class PendingPullWrites {
   /** Pull can end a decision before staging.tidy; skip absent owners without
    * creating an empty transaction for every ordinary excluded feed item. */
   async retireDecision(change: Pick<ChangeItem, 'file_id' | 'version_id'>): Promise<void> {
+    if (await this.refused(change.file_id)) return
     if (!this.state.getMeta || !this.state.setMeta) return
     const pending = await this.read(change.file_id)
     if (pending?.versionId !== change.version_id) {
@@ -219,6 +267,7 @@ export class PendingPullWrites {
 
   /** Cleanup may only finish a retirement whose atomic publication already landed. */
   async finishRetirement(change: Pick<ChangeItem, 'file_id' | 'version_id'>): Promise<void> {
+    if (await this.refused(change.file_id)) return
     const pending = await this.read(change.file_id)
     if (pending?.versionId === change.version_id && pending.retiring) await this.retire(pending)
   }
@@ -228,6 +277,7 @@ export class PendingPullWrites {
     limits?: { count: number; bytes: number },
     log?: (message: string) => void
   ): Promise<boolean> {
+    if (await this.refused(fileId)) return true
     const pending = await this.read(fileId)
     if (!pending?.stageId) return false
     const held: PendingPullWrite[] = []

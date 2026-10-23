@@ -375,6 +375,20 @@ of a differently spelled foreign file.
 
 ### Unobservable directory evidence
 
+Directory refusals are enforced at placement effect boundaries, including direct
+calls: `PullPlacer.place`, `drop`, `adopt`, `adoptExisting`, `settled`, and the
+source-recreation write in `edited`. Occupant eviction also checks the occupant's
+names. `PendingPullWrites` guards preparation, settlement, clearing, supersession,
+decision retirement and retention/eviction. Pending-write and eviction recovery
+preserve held intents. The guard includes current, supplied and recorded source
+and destination names; it checks both client refusals and durable evidence.
+Atomic decision replacement is deferred in full if an affected decision is held.
+`placementEntryHolds.test.ts` enumerates these public effect boundaries and checks
+zero effects for durable and client-provided holds; its typed method inventory
+requires new public methods to be classified. Read-only probes and the in-memory
+bad-hash diagnostic are not placement effects. Scope recheck reports held changes
+without deleting their file or ledger baseline.
+
 An unresolved directory hold remains durable until positive evidence resolves it.
 Directory departures and queued empty-directory cleanup respect the current
 user exclusion predicate independently of connection membership or durable departure

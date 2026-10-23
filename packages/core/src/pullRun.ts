@@ -325,6 +325,11 @@ export class Puller {
       if (isEngineOwn(entry.wirePath) || this.opts.filter.excluded(entry.wirePath, entry.size)) {
         continue
       }
+      const gone = goneFrom(entry, this.reached)
+      if (await this.placer.refusal(gone, entry)) {
+        this.holds.put({ change: gone, base: entry.versionId, firstSeq: gone.seq })
+        continue
+      }
       if (this.opts.dirty.has(entry.wirePath) || (await this.placer.edited(entry))) {
         this.opts.log?.(
           `pull: ${entry.path} was deleted elsewhere while this device did not sync it; ` +
@@ -341,7 +346,7 @@ export class Puller {
         this.opts.log?.(
           `pull: ${entry.path} was deleted elsewhere while this device did not sync it`
         )
-      }
+      } else this.holds.put({ change: gone, base: entry.versionId, firstSeq: gone.seq })
     }
   }
 
