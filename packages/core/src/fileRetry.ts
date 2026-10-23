@@ -227,10 +227,16 @@ export class FileRetries {
     if (state === this.state) await transact(state, persist)
     else await persist(state)
   }
-  async succeeded(path: string, phase?: RetryPhase, state = this.state): Promise<void> {
+  async succeeded(
+    path: string,
+    phase?: RetryPhase,
+    state = this.state,
+    owner?: string
+  ): Promise<void> {
     const row = this.rows.get(path)
     if (
       !row ||
+      (owner !== undefined && row.owner !== owner) ||
       (phase && row.phase !== phase && !(phase === 'pull' && row.phase === 'push' && !row.local))
     )
       return

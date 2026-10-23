@@ -1,5 +1,5 @@
 import { pathOccupant } from './pathOccupant.js'
-import { transact } from './stateTransaction.js'
+import { commitAppliedSettlement } from './settlement.js'
 import { replayAuthority } from './replayAuthority.js'
 import { normalisePath, validatePath } from '@abele/sync-protocol'
 import type { FileSystem } from './fs.js'
@@ -41,20 +41,29 @@ export async function recoverPullEvictions(
     if (retries && !retries.ready(base.wirePath)) continue
     if (await pathRefusal(client, state, [base.path, base.wirePath])) continue
     try {
-      const absent = (await fs.stat(base.path)) === null
-      await transact(state, async (tx) => {
-        const entry = await pathOccupant(fs, tx, base.path, base.fileId)
-        const same =
-          replayAuthority(base.fileId, base, await tx.byFileId(base.fileId), entry) &&
-          entry !== null &&
-          (['path', 'wirePath', 'fileId', 'versionId', 'sha', 'size', 'mtime'] as const).every(
-            (field) => entry[field] === base[field]
-          )
-        if (same && absent) await tx.delete(base.path)
-        await tx.setMeta?.(key, null)
-      })
-      await retries?.succeeded(base.wirePath, 'recovery')
-      await retries?.succeeded(key, 'recovery')
+      await commitAppliedSettlement(
+        state,
+        async () => ({ reached: await state.getCursor(), firstUnresolved: null }),
+        async (tx) => {
+          // A different intent or baseline is not proof that this eviction settled.
+          if ((await tx.getMeta?.(key)) !== raw) return
+          if (await pathRefusal(client, tx, [base.path, base.wirePath])) return
+          const entry = await pathOccupant(fs, tx, base.path, base.fileId)
+          const same =
+            replayAuthority(base.fileId, base, await tx.byFileId(base.fileId), entry) &&
+            entry !== null &&
+            (['path', 'wirePath', 'fileId', 'versionId', 'sha', 'size', 'mtime'] as const).every(
+              (field) => entry[field] === base[field]
+            )
+          if (!same || (await fs.stat(base.path)) !== null) return
+          checkCancellation(signal)
+          await tx.delete(base.path)
+          await tx.setMeta?.(key, null)
+          await retries?.succeeded(base.wirePath, 'recovery', tx, key)
+          await retries?.succeeded(key, 'recovery', tx, key)
+          checkCancellation(signal)
+        }
+      )
     } catch (error) {
       checkCancellation(signal)
       if (!retries || !isFileFailure(error)) throw error
