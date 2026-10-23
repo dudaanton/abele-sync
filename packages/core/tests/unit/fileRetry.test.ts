@@ -18,6 +18,9 @@ it('tags native fingerprint and wrapped read errors but preserves state callback
   fs.fingerprint = async () => {
     throw io
   }
+  fs.fileIdentity = async () => {
+    throw io
+  }
   fs.beginAtomicWrite = async (_path, _mtime, _base, beforeCreate) => {
     await beforeCreate?.('stage')
     throw new Error('unreachable')
@@ -25,6 +28,7 @@ it('tags native fingerprint and wrapped read errors but preserves state callback
   const wrapped = fileErrors(fs)
   await expect(wrapped.read('file.bin')).rejects.toBeInstanceOf(FileOperationError)
   await expect(wrapped.fingerprint!('file.bin')).rejects.toBeInstanceOf(FileOperationError)
+  await expect(wrapped.fileIdentity!('file.bin')).rejects.toBeInstanceOf(FileOperationError)
   await expect(
     wrapped.beginAtomicWrite!('file.bin', 1, null, async () => {
       throw io

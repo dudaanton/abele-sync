@@ -39,6 +39,8 @@ it('forwards conditional publication and installation evidence through settling'
   expect(fs.discardInstallation).toBeTypeOf('function')
   expect(fs.recoverConditionalFiles).toBeTypeOf('function')
   expect(fs.discardStage).toBeTypeOf('function')
+  expect(fs.fileIdentity).toBeTypeOf('function')
+  expect(await fs.fileIdentity?.('file')).toBe(await disk.fileIdentity('file'))
 })
 
 beforeEach(async () => {

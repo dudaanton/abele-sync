@@ -257,6 +257,7 @@ export function fileErrors(fs: FileSystem): FileSystem {
     'remove',
     'openRead',
     'fingerprint',
+    'fileIdentity',
     'beginAtomicWrite',
     'reopenStage',
     'installedFile',

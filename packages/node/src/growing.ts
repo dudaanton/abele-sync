@@ -50,6 +50,7 @@ export class SettlingFileSystem implements FileSystem, PathMatcher {
   readonly pathKey?: FileSystem['pathKey']
   readonly openRead?: FileSystem['openRead']
   readonly fingerprint?: FileSystem['fingerprint']
+  readonly fileIdentity?: FileSystem['fileIdentity']
   readonly beginAtomicWrite?: FileSystem['beginAtomicWrite']
   readonly reopenStage?: FileSystem['reopenStage']
   readonly conditionalFile?: FileSystem['conditionalFile']
@@ -69,6 +70,7 @@ export class SettlingFileSystem implements FileSystem, PathMatcher {
     if (watch) this.watch = (cb) => watch.call(disk, cb)
     if (disk.openRead) this.openRead = disk.openRead.bind(disk)
     if (disk.fingerprint) this.fingerprint = disk.fingerprint.bind(disk)
+    if (disk.fileIdentity) this.fileIdentity = disk.fileIdentity.bind(disk)
     if (disk.beginAtomicWrite) this.beginAtomicWrite = disk.beginAtomicWrite.bind(disk)
     if (disk.reopenStage) this.reopenStage = disk.reopenStage.bind(disk)
     if (disk.conditionalFile) this.conditionalFile = disk.conditionalFile.bind(disk)
