@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest'
 import { serverHarness, type Harness } from '../helpers/harness.js'
 import { Device, converge } from '../helpers/device.js'
 import { blob, seed, shaOf } from '../helpers/seed.js'
@@ -32,6 +32,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await h.close()
 })
+afterEach(() => vi.restoreAllMocks())
 
 describe('two devices', () => {
   const image = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), randomBytes(64)])

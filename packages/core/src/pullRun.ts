@@ -6,6 +6,7 @@ import {
   placeWave,
 } from './placement.js'
 import { pathOccupant } from './pathOccupant.js'
+import { hasStoredDirectoryRefusals } from './v2Directories.js'
 import { placementRefusal } from './placementRefusal.js'
 import { olderPull, recordPull } from './pullHistory.js'
 import { transact } from './stateTransaction.js'
@@ -281,6 +282,7 @@ export class Puller {
   }
 
   private async changeRefusal(change: ChangeItem) {
+    if (!this.client.pathRefusal && !(await hasStoredDirectoryRefusals(this.state))) return
     const entry = await this.state.byFileId(change.file_id)
     return placementRefusal(this.client, this.state, change, entry)
   }

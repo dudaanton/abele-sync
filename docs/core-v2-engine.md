@@ -407,6 +407,8 @@ has consumed their sequence. This also covers incoming-only directories with no
 local removal record. Collection persists with the next directory document write.
 Pull/directory gate selections must include `feedTombstones.test.ts` and
 `directoryDepartureCleanup.test.ts`, including their restart and exclusion cases.
+Also include `twoDevices.test.ts`: its bootstrap and follow-up operation budgets
+and manifest/feed request counts guard against unnecessary ownership reads.
 
 An excluded directory stays on disk and is not reported as
 departed; its existing ledger/removal evidence remains available if scope widens.
