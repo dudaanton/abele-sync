@@ -230,7 +230,23 @@ describe('daemon plugin code approval', () => {
       expect(after.find((item) => item.path === code('local-delete'))).toEqual(oldBefore)
       expect(existsSync(join(pair.b, code('local-rename')))).toBe(false)
       expect(await listed('local-rename', pair.b)).toBeDefined()
+      expect((await decide('local-rename', '--approve', pair.b)).code).toBe(1)
+      // Resolve the first ambiguity by restoring the original tree before
+      // approving the independent plugin. A fresh approval cannot bypass a hold.
+      await write(pair.b, code('local-delete'), 'oldPlugin()')
+      await syncOnce(pair.b)
       expect((await decide('local-rename', '--approve', pair.b)).code).toBe(0)
+      const restored = SqliteStateStore.open(stateDbFile(pair.b))
+      try {
+        const doc = JSON.parse((await restored.getMeta('v2-directories'))!)
+        identity = doc.directories.find(
+          (d: { path: string }) => d.path === '.obsidian/plugins/local-delete'
+        ).identity
+      } finally {
+        restored.close()
+      }
+      await rm(join(pair.b, '.obsidian/plugins/local-delete'), { recursive: true })
+      await syncOnce(pair.b)
       await write(pair.a, code('local-rename'), 'newPluginUpdated()')
       await write(pair.a, code('local-rename', 'manifest.json'), '{"version":"2.0.0"}')
       await syncOnce(pair.a)
