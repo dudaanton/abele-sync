@@ -43,7 +43,7 @@ function fixture(gated = true) {
   }
 }
 describe('opt-in core recovery readiness', () => {
-  it('BUG: gates constructor scope effects while preserving the legacy constructor default', async () => {
+  it('gates constructor scope effects while preserving the legacy constructor default', async () => {
     const gated = fixture(),
       legacy = fixture(false)
     try {
@@ -68,7 +68,7 @@ describe('opt-in core recovery readiness', () => {
     'restore',
     'restoreDeleted',
   ] as const)
-    it(`BUG: ${verb} cannot mutate, replay publication or Restore before recovery`, async () => {
+    it(`${verb} cannot mutate, replay publication or Restore before recovery`, async () => {
       const f = fixture()
       try {
         await expect(
@@ -119,26 +119,39 @@ describe('opt-in core recovery readiness', () => {
   it('rechecks public exclusive readiness after waiting behind another host effect', async () => {
     const f = fixture()
     f.ready()
+    let entered!: () => void
+    const started = new Promise<void>((resolve) => {
+      entered = resolve
+    })
     let release!: () => void
     const running = f.engine.runExclusive(
       () =>
         new Promise<void>((resolve) => {
           release = resolve
+          entered()
         })
     )
+    await started
     let ran = false
     const waiting = f.engine.runExclusive(async () => {
       ran = true
     })
-    const refused = expect(waiting).rejects.toMatchObject({ code: 'lost' })
-    f.retire()
-    release()
-    await running
-    await refused
-    expect(ran).toBe(false)
-    await f.engine.stop()
+    try {
+      await Promise.all([
+        expect(waiting).rejects.toMatchObject({ code: 'lost' }),
+        (async () => {
+          f.retire()
+          release()
+          await running
+        })(),
+      ])
+      expect(ran).toBe(false)
+    } finally {
+      release()
+      await f.engine.stop()
+    }
   })
-  it('BUG: start/resume cannot activate watchers or timers before recovery', async () => {
+  it('start/resume cannot activate watchers or timers before recovery', async () => {
     const f = fixture(),
       watch = vi.spyOn(f.fs, 'watch')
     try {
@@ -154,12 +167,17 @@ describe('opt-in core recovery readiness', () => {
       await f.engine.stop()
     }
   })
-  it('BUG: stop waits for an already-issued Restore outcome instead of abandoning it as a read', async () => {
+  it('stop waits for an already-issued Restore outcome instead of abandoning it as a read', async () => {
+    let issued!: () => void
+    const sent = new Promise<void>((resolve) => {
+      issued = resolve
+    })
     let reply!: (value: Response) => void
     const fetch = vi.fn(
       () =>
         new Promise<Response>((resolve) => {
           reply = resolve
+          issued()
         })
     )
     const client = new Core.SyncClient({
@@ -176,12 +194,13 @@ describe('opt-in core recovery readiness', () => {
     })
     const restoring = engine.restore('file', 'old', 'request')
     void restoring.catch(() => {})
+    await sent
     let stopped = false
     const stopping = engine.stop().then(() => {
       stopped = true
     })
     try {
-      await new Promise((resolve) => setTimeout(resolve, 10))
+      await new Promise<void>((resolve) => setImmediate(resolve))
       expect(stopped).toBe(false)
     } finally {
       reply(
@@ -202,7 +221,7 @@ describe('opt-in core recovery readiness', () => {
     }
     await expect(restoring).resolves.toMatchObject({ status: 'applied' })
   })
-  it('BUG: a recovered but retired runtime cannot start new effects', async () => {
+  it('a recovered but retired runtime cannot start new effects', async () => {
     const f = fixture()
     try {
       f.ready()
