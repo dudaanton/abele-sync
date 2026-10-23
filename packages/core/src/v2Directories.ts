@@ -447,7 +447,15 @@ export class V2Directories {
     )
     for (const old of roots.sort((a, b) => a.path.length - b.path.length)) {
       this.signal?.throwIfAborted()
-      const moved = local.find((l) => l.identity === old.identity)
+      // A physical inode can be reused after a directory is removed. A path
+      // already owned by another remote directory is not a rename of this one,
+      // even when its current physical identity matches the missing source.
+      const foreignPaths = new Set(
+        doc.directories.filter((d) => d.file_id !== old.file_id).map((d) => d.path)
+      )
+      const moved = local.find(
+        (l) => l.identity === old.identity && !foreignPaths.has(wirePath(l.path))
+      )
       if (this.refusalFor(old.path) || (moved && this.refusalFor(moved.path))) continue
       // A widened/reset scope needs its snapshot before absence is a deletion.
       // The next ordinary cycle can delete missing folders on a known baseline.

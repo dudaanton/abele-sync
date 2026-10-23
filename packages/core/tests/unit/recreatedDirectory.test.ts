@@ -4,6 +4,58 @@ import { MemoryStateStore } from '../../src/state.js'
 import { V2Directories } from '../../src/v2Directories.js'
 import type { CommitOpResult, V2CommitOp } from '@abele/sync-protocol'
 
+it.each(['local-rename', 'cafe\u0301'])(
+  'does not infer a directory move into another tracked identity after inode reuse (%s)',
+  async (name) => {
+    const fs: FileSystem = new MemoryFileSystem(),
+      state = new MemoryStateStore()
+    const old = {
+      file_id: 'deleted',
+      version_id: 'old-v',
+      path: 'local-delete',
+      kind: 'directory' as const,
+      mtime: 1,
+      identity: 'reused-inode',
+      localPath: 'local-delete',
+    }
+    const target = {
+      ...old,
+      file_id: 'replacement',
+      version_id: 'new-v',
+      path: name.normalize('NFC'),
+      localPath: name,
+    }
+    fs.listDirectories = async function* () {
+      yield { path: name, identity: 'reused-inode', mtime: 1 }
+    }
+    await fs.writeAtomic(name + '/main.js', new Uint8Array([1]), 1)
+    await state.setCursor(1)
+    await state.setMeta(
+      'v2-directories',
+      JSON.stringify({ schemaVersion: 2, directories: [old, target], removals: [] })
+    )
+    const commit = vi.fn(async (ops: V2CommitOp[]): Promise<CommitOpResult[]> =>
+      ops.map((op) => {
+        expect(op).toEqual({ op: 'delete_directory', file_id: 'deleted', base_version_id: 'old-v' })
+        return {
+          status: 'applied',
+          file_id: 'deleted',
+          version_id: 'deleted-v',
+          path: old.path,
+          seq: 2,
+          sha: null,
+          size: 0,
+          mtime: 1,
+        }
+      })
+    )
+    await new V2Directories(fs, state, () => true, commit).scan()
+    expect(commit).toHaveBeenCalledTimes(1)
+    expect(JSON.parse((await state.getMeta('v2-directories'))!).directories).toEqual([target])
+    expect(await fs.read(name + '/main.js')).toEqual(new Uint8Array([1]))
+  }
+)
+
 it('D-149 directory replay cannot replace a different destination identity', async () => {
   const fs: FileSystem = new MemoryFileSystem(),
     state = new MemoryStateStore()

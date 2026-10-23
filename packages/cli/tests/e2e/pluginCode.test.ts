@@ -1,8 +1,9 @@
 import { existsSync } from 'node:fs'
 import { rename, rm } from 'node:fs/promises'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { acquireLock } from '@abele/sync-node'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { acquireLock, NodeFileSystem, SqliteStateStore } from '@abele/sync-node'
+import { stateDbFile } from '../../src/vault.js'
 import {
   cleanupFolders,
   cli,
@@ -174,6 +175,66 @@ describe('daemon plugin code approval', () => {
       if (action === 'rename') expect(await read(b, code(`${id}-kept`))).toBe(`${id}Before()`)
     })
   }
+
+  it('does not rename a deleted plugin into a different tracked plugin when its inode is reused', async () => {
+    const pair = await vaultPair(server, 'Plugin inode reuse')
+    await write(pair.a, code('local-delete'), 'oldPlugin()')
+    await syncOnce(pair.a)
+    await syncOnce(pair.b)
+    expect((await decide('local-delete', '--approve', pair.b)).code).toBe(0)
+    await write(pair.a, code('local-delete'), 'oldPluginUpdated()')
+    await write(pair.a, code('local-delete', 'manifest.json'), '{"version":"2.0.0"}')
+    await syncOnce(pair.a)
+    await syncOnce(pair.b)
+    const state = SqliteStateStore.open(stateDbFile(pair.b))
+    let identity: string
+    try {
+      const doc = JSON.parse((await state.getMeta('v2-directories'))!)
+      identity = doc.directories.find(
+        (d: { path: string }) => d.path === '.obsidian/plugins/local-delete'
+      ).identity
+    } finally {
+      state.close()
+    }
+    await rm(join(pair.b, '.obsidian/plugins/local-delete'), { recursive: true })
+    await write(pair.a, code('local-rename'), 'newPlugin()')
+    await syncOnce(pair.a)
+    const before = (await clientFor(pair.a).manifest(null)).items.find(
+      (item) => item.path === code('local-rename')
+    )!
+    const list = NodeFileSystem.prototype.listDirectories
+    let injected = false
+    const reused = vi
+      .spyOn(NodeFileSystem.prototype, 'listDirectories')
+      .mockImplementation(async function* (this: NodeFileSystem) {
+        for await (const dir of list.call(this)) {
+          // Linux may recycle dev:ino after unlink. Force the same observation on
+          // every host rather than depending on a particular allocator's timing.
+          if (
+            (this as unknown as { root: string }).root === pair.b &&
+            dir.path === '.obsidian/plugins/local-rename'
+          ) {
+            injected = true
+            yield { ...dir, identity }
+          } else yield dir
+        }
+      })
+    try {
+      await syncOnce(pair.b)
+      expect(injected).toBe(true)
+      const after = (await clientFor(pair.a).manifest(null)).items
+      const replacement = after.find((item) => item.path === code('local-rename'))!
+      // The compatibility manifest stamps every item with the page cursor;
+      // deleting the old plugin advances that cursor without changing this file.
+      expect(replacement).toEqual({ ...before, seq: replacement.seq })
+      expect(replacement.seq).toBeGreaterThan(before.seq)
+      expect(after.some((item) => item.path === code('local-delete'))).toBe(false)
+      expect(existsSync(join(pair.b, code('local-rename')))).toBe(false)
+      expect(await listed('local-rename', pair.b)).toBeDefined()
+    } finally {
+      reused.mockRestore()
+    }
+  })
 
   it('can approve absence already settled by a losing delete, rather than a new local deletion', async () => {
     const id = 'settled-delete-approval'
