@@ -199,7 +199,9 @@ describe('daemon plugin code approval', () => {
     await rm(join(pair.b, '.obsidian/plugins/local-delete'), { recursive: true })
     await write(pair.a, code('local-rename'), 'newPlugin()')
     await syncOnce(pair.a)
-    const before = (await clientFor(pair.a).manifest(null)).items.find(
+    const beforeItems = (await clientFor(pair.a).manifest(null)).items
+    const oldBefore = beforeItems.find((item) => item.path === code('local-delete'))!
+    const before = beforeItems.find(
       (item) => item.path === code('local-rename')
     )!
     const list = NodeFileSystem.prototype.listDirectories
@@ -224,11 +226,10 @@ describe('daemon plugin code approval', () => {
       expect(injected).toBe(true)
       const after = (await clientFor(pair.a).manifest(null)).items
       const replacement = after.find((item) => item.path === code('local-rename'))!
-      // The compatibility manifest stamps every item with the page cursor;
-      // deleting the old plugin advances that cursor without changing this file.
-      expect(replacement).toEqual({ ...before, seq: replacement.seq })
-      expect(replacement.seq).toBeGreaterThan(before.seq)
-      expect(after.some((item) => item.path === code('local-delete'))).toBe(false)
+      // An inode-only candidate is ambiguous. Hold the old remote tree, keeping
+      // both identities/content and the cursor unchanged instead of deleting it.
+      expect(replacement).toEqual(before)
+      expect(after.find((item) => item.path === code('local-delete'))).toEqual(oldBefore)
       expect(existsSync(join(pair.b, code('local-rename')))).toBe(false)
       expect(await listed('local-rename', pair.b)).toBeDefined()
     } finally {
