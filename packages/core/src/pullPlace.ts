@@ -1,7 +1,8 @@
 import { pathOccupant } from './pathOccupant.js'
 import { olderPull, pullHistoryKey, recordPull } from './pullHistory.js'
 import { replayAuthority } from './replayAuthority.js'
-import { transact } from './stateTransaction.js'
+import { afterStateCommit, transact } from './stateTransaction.js'
+import { commitAppliedSettlement } from './settlement.js'
 import { AbeleError, caseKey, normalisePath, type ChangeItem } from '@abele/sync-protocol'
 import { notifyApplied } from './applied.js'
 import { bytesFor, settledStat } from './apply.js'
@@ -298,16 +299,44 @@ export class PullPlacer {
     await this.settlement()
     if ((await LocalPaths.forFile(this.fs, entry.wirePath, this.state)).blocked(entry.wirePath))
       return false
+    const authorized = async (tx: StateStore) => {
+      const current = await tx.byFileId(entry.fileId)
+      return (
+        current?.path === entry.path &&
+        replayAuthority(
+          entry.fileId,
+          entry,
+          current,
+          await pathOccupant(this.fs, tx, entry.path, entry.fileId)
+        ) &&
+        !(await new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client).refused(
+          entry.fileId,
+          [entry.path, change?.path, change?.prev_path],
+          entry
+        ))
+      )
+    }
+    if (!(await authorized(this.state))) return false
     if (!(await this.clearPath(entry.path, entry))) return false
-    this.opts.expected.clear(entry.path)
     if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
-    await transact(this.state, async (tx) => {
-      await tx.delete(entry.path)
-      if (change) await recordPull(tx, change, true)
-      await tx.setMeta?.(scanHintKey(entry.path), null)
-      await new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client).clear(entry.fileId)
-      if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
-    })
+    let recorded = false
+    await commitAppliedSettlement(
+      this.state,
+      async () => ({ reached: await this.state.getCursor(), firstUnresolved: null }),
+      async (tx) => {
+        if (!(await authorized(tx)) || (await this.fs.stat(entry.path)) !== null) return
+        await tx.delete(entry.path)
+        if (change) await recordPull(tx, change, true)
+        await tx.setMeta?.(scanHintKey(entry.path), null)
+        await new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client).clear(
+          entry.fileId
+        )
+        if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
+        afterStateCommit(tx, () => this.opts.expected.clear(entry.path))
+        recorded = true
+      }
+    )
+    if (!recorded) return false
     if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
     if (!this.opts.signal?.aborted)
       await notifyApplied(this.opts, {
