@@ -86,6 +86,26 @@ interface Document {
   removals: Array<string | { localPath: string; identity: string; path: string }>
 }
 
+async function parseDocument(raw: string): Promise<Document> {
+  const value: unknown = JSON.parse(raw)
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    !('directories' in value) ||
+    !Array.isArray(value.directories)
+  )
+    return DocumentSchema.parse(value) as Document
+  // Validate the envelope strictly, then validate every directory in bounded
+  // chunks. Thousands of cold Zod parses must not form one renderer task.
+  const doc = DocumentSchema.parse({ ...value, directories: [] }) as Document
+  const work = new ScanWork()
+  for (const row of value.directories) {
+    doc.directories.push(DocumentSchema.shape.directories.element.parse(row))
+    await work.step()
+  }
+  return doc
+}
+
 export interface DirectoryRefusal extends Refusal {
   path: string
   direction: 'push' | 'pull'
@@ -99,7 +119,7 @@ export interface DirectoryRefusal extends Refusal {
 export async function heldDirectoryPaths(state: StateStore): Promise<Set<string>> {
   const raw = await state.getMeta?.(KEY)
   if (raw == null) return new Set()
-  const doc = DocumentSchema.parse(JSON.parse(raw))
+  const doc = await parseDocument(raw)
   return new Set(doc.refused?.filter((row) => row.evidence).map((row) => row.path))
 }
 
@@ -134,10 +154,7 @@ export class V2Directories {
   ) {}
   private async read(): Promise<Document> {
     const raw = await this.state.getMeta!(KEY)
-    const doc =
-      raw === null
-        ? { directories: [], removals: [] }
-        : (DocumentSchema.parse(JSON.parse(raw)) as Document)
+    const doc = raw === null ? { directories: [], removals: [] } : await parseDocument(raw)
     this.indexRefusals(doc.refused ?? [])
     return doc
   }
@@ -306,11 +323,12 @@ export class V2Directories {
   }
   async scan() {
     if (!this.fs.listDirectories) return
-    if (await this.retireRecreatedDelete()) return
-    const waiting = await this.read()
-    for (const item of waiting.incoming ?? [])
-      if (item.kind === 'directory') await this.receive(item)
-    const doc = await this.read()
+    let doc = await this.read()
+    if (await this.retireRecreatedDelete(doc)) return
+    if (doc.incoming?.length) {
+      for (const item of doc.incoming) if (item.kind === 'directory') await this.receive(item)
+      doc = await this.read()
+    }
     const beforeReplay = await LocalPaths.read(this.fs, this.state)
     if (doc.pending) {
       const op = doc.pending.op
@@ -686,8 +704,8 @@ export class V2Directories {
   }
 
   /** A recreated directory revokes the old recursive-delete intent, never current bytes. */
-  async retireRecreatedDelete(): Promise<boolean> {
-    const doc = await this.read(),
+  async retireRecreatedDelete(snapshot?: Document): Promise<boolean> {
+    const doc = snapshot ?? (await this.read()),
       pending = doc.pending
     if (pending?.op.op !== 'delete_directory' || !this.fs.listDirectories) return false
     const fileId = pending.op.file_id

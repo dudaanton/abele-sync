@@ -336,3 +336,7 @@ and relative child names once per inventory. Lookup cost follows path components
 actual candidate relationships rather than every folder times every local path.
 Enumeration and index construction yield macrotasks in bounded chunks so a host can
 paint and process input while large scans run.
+
+A stable directory scan reuses one metadata image. Large directory documents validate
+rows in yielding chunks; repeated cold schema parses must not precede the first host
+checkpoint. Incoming work still reloads its updated durable image before planning.

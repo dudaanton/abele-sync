@@ -44,6 +44,12 @@ it('indexes 33k paths and 3k folders with bounded work and host checkpoints', as
     })
   )
   const commit = vi.fn()
+  let metadataReads = 0
+  const getMeta = state.getMeta.bind(state)
+  state.getMeta = async (key) => {
+    if (key === 'v2-directories') metadataReads++
+    return getMeta(key)
+  }
   const normalize = String.prototype.normalize
   let operations = 0,
     ticks = 0,
@@ -68,8 +74,17 @@ it('indexes 33k paths and 3k folders with bounded work and host checkpoints', as
   }
   longest = Math.max(longest, performance.now() - last)
   const elapsed = performance.now() - start
-  console.info({ paths: files, folders: count, operations, ticks, longest, elapsed })
+  console.info({
+    paths: files,
+    folders: count,
+    operations,
+    metadataReads,
+    ticks,
+    longest,
+    elapsed,
+  })
   expect(commit).not.toHaveBeenCalled()
+  expect(metadataReads).toBe(1)
   expect(operations).toBeLessThan(30 * (files + count))
   expect(ticks).toBeGreaterThan(0)
   // Overall work budget scales with inventory; heartbeat checks renderer latency.
