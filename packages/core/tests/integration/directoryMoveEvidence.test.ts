@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rename, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, open, rename, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
 import { NodeFileSystem } from '@abele/sync-node'
@@ -105,9 +105,16 @@ it('native conditional source identity refuses equal bytes recreated with the sa
     const identity = await fs.fileIdentity('source')
     expect(identity).not.toBeNull()
     const before = (await fs.stat('source'))!
-    await fs.remove('source')
-    await fs.writeAtomic('source', bytes, 1000)
-    expect(await fs.fileIdentity('source')).not.toBe(identity)
+    // Keep the unlinked inode alive so this fixture deterministically creates
+    // a different identity, even on a filesystem that immediately recycles it.
+    const original = await open(join(root, 'source'), 'r')
+    try {
+      await fs.remove('source')
+      await fs.writeAtomic('source', bytes, 1000)
+      expect(await fs.fileIdentity('source')).not.toBe(identity)
+    } finally {
+      await original.close()
+    }
     expect(
       await fs.conditionalFile({
         path: 'source',
