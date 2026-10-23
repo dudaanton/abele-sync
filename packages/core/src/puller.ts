@@ -88,6 +88,8 @@ export interface PullOptions {
    * buffered publication. Zero forces recoverable streaming stages instead.
    */
   prefetchBytes?: number
+  /** Durable refused stages: oldest first eviction, default 64 stages / 256 MiB. */
+  heldStageLimits?: { count: number; bytes: number }
   /** The digest, `sha256` by default. Local bytes and downloaded ones alike are checked with it. */
   hash?: (bytes: Uint8Array) => Promise<string>
   log?: (message: string) => void

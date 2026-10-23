@@ -11,6 +11,8 @@ import { discardPullStage, stageMissing } from './pullStages.js'
 import { isFileFailure, type FileRetries } from './fileRetry.js'
 
 interface Intent {
+  heldOrder?: number
+  retiring?: boolean
   seq?: number
   receiptId?: string
   stageId?: string
@@ -29,6 +31,13 @@ interface Intent {
 export function decodePullIntent(raw: string, fileId: string): Intent {
   try {
     const value = JSON.parse(raw) as Intent
+    if (
+      value?.heldOrder !== undefined &&
+      (!Number.isSafeInteger(value.heldOrder) || value.heldOrder < 1)
+    )
+      throw new Error('invalid held stage order')
+    if (value?.retiring !== undefined && typeof value.retiring !== 'boolean')
+      throw new Error('invalid stage retirement')
     if (value?.seq !== undefined && (!Number.isSafeInteger(value.seq) || value.seq < 0))
       throw new Error('invalid feed sequence')
     if (
@@ -96,7 +105,12 @@ export async function recoverPendingPullWrites(
   state: StateStore,
   fileIds: readonly string[],
   client?: Pick<EngineClient, 'getBlob' | 'openVersion'>,
-  opts: { signal?: AbortSignal; expected?: ExpectedWrites; retries?: FileRetries } = {}
+  opts: {
+    signal?: AbortSignal
+    expected?: ExpectedWrites
+    retries?: FileRetries
+    log?: (message: string) => void
+  } = {}
 ): Promise<void> {
   const placerFor = (sequenceKnown: boolean) =>
     new PullPlacer(
@@ -112,6 +126,7 @@ export async function recoverPendingPullWrites(
         expected: opts.expected ?? new ExpectedWrites(),
         dirty: new Set(),
         filter: { excluded: () => false },
+        log: opts.log,
       },
       sha256,
       sequenceKnown
@@ -146,6 +161,16 @@ export async function recoverPendingPullWrites(
         actor: { kind: 'system', id: 'recovery', name: 'recovery' },
         at: '',
       }
+      await placer.pending.superseded(change)
+      if (intent.retiring) continue
+      // A known refusal owns received bytes, not the local file. Let normal
+      // scan/push classify local edits and the feed resolve or supersede it.
+      if (intent.heldOrder !== undefined) {
+        await placer.pending.retain(fileId, undefined, opts.log)
+        for (const name of [...protectedPaths, `pull-write:${fileId}`])
+          await opts.retries?.succeeded(name, 'recovery')
+        continue
+      }
       if (
         entry?.versionId === intent.versionId &&
         entry.wirePath === intent.wirePath &&
@@ -178,7 +203,8 @@ export async function recoverPendingPullWrites(
       }
       // adopt either recorded the completed installation or preserved both local bytes
       // and the earlier base, retiring only a definite not-written intent.
-      if ((await state.getMeta?.(`pull-write:${fileId}`)) != null)
+      const remaining = await state.getMeta?.(`pull-write:${fileId}`)
+      if (remaining != null && decodePullIntent(remaining, fileId).heldOrder === undefined)
         throw new ExternalStateError('recovery-required')
       await opts.retries?.succeeded(path, 'recovery')
       await opts.retries?.succeeded(`pull-write:${fileId}`, 'recovery')

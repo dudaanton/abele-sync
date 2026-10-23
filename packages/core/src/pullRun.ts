@@ -803,6 +803,7 @@ export class Puller {
       this.report.skipped++
       return
     }
+    await this.placer.pending.superseded(change)
     if (this.stagedReplay && change.op !== 'delete') {
       let target: string
       try {

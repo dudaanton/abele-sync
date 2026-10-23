@@ -66,6 +66,7 @@ export class PullPlacer {
       | 'transferBudget'
       | 'onApplied'
       | 'prefetchBytes'
+      | 'heldStageLimits'
     >,
     private readonly hash: (bytes: Uint8Array) => Promise<string>,
     private readonly sequenceKnown = true
@@ -620,16 +621,29 @@ export class PullPlacer {
             this.pending.prepare(change, entry, target, from, id)
           )
     if (!pending?.stageId) await this.pending.prepare(change, entry, target, from, stage.id)
+    let sealed = false
     try {
       const source =
-        (await this.localSource(sha, local)) ??
-        (await this.client.openVersion!(
-          change.file_id,
-          change.version_id,
-          identity,
-          this.opts.signal
-        ))
+        // A complete stage is authenticated again by seal; it needs no remote
+        // handle, including after a crash between seal and refusal recording.
+        stage.offset === identity.size
+          ? {
+              size: identity.size,
+              read: async () => {
+                throw new Error('complete stage requested bytes')
+              },
+              assertUnchanged: async () => {},
+              close: async () => {},
+            }
+          : ((await this.localSource(sha, local)) ??
+            (await this.client.openVersion!(
+              change.file_id,
+              change.version_id,
+              identity,
+              this.opts.signal
+            )))
       await downloadToStage(source, stage, identity, this.budget, this.opts.signal, async () => {
+        sealed = true
         await this.recheckTarget(change.path, target)
         if (
           !sameStat(beforeTarget, await this.fs.stat(target)) ||
@@ -650,7 +664,7 @@ export class PullPlacer {
           throw new EngineError('conflict', 'pull source changed before move')
         this.opts.expected.expect(target, sha)
       })
-      return await this.remember(
+      const remembered = await this.remember(
         change,
         sha,
         target,
@@ -660,11 +674,18 @@ export class PullPlacer {
         null,
         stage
       )
+      if (!remembered)
+        await this.pending.retain(change.file_id, this.opts.heldStageLimits, this.opts.log)
+      return remembered
     } catch (error) {
       this.opts.expected.clear(target)
       if (!this.inTheWay(error)) throw error
-      await stage.discard()
-      await this.pending.clear(change.file_id)
+      if (sealed)
+        await this.pending.retain(change.file_id, this.opts.heldStageLimits, this.opts.log)
+      else {
+        await stage.discard()
+        await this.pending.clear(change.file_id)
+      }
       this.opts.log?.(`pull: holding ${target}: ${(error as Error).message}`)
       return false
     }

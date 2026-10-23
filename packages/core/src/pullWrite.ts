@@ -4,9 +4,12 @@ import type { StateEntry, StateStore } from './state.js'
 import { replayAuthority } from './replayAuthority.js'
 import { pathOccupant } from './pathOccupant.js'
 import type { FileSystem } from './fs.js'
+import { discardPullStage } from './pullStages.js'
 
 /** Intent saved before a pull touches the disk, retired atomically with its ledger update. */
 interface PendingPullWrite {
+  heldOrder?: number
+  retiring?: boolean
   seq?: number
   receiptId?: string
   stageId?: string
@@ -116,6 +119,68 @@ export class PendingPullWrites {
 
   async clear(fileId: string): Promise<void> {
     await this.state.setMeta?.(keyFor(fileId), null)
+  }
+
+  /** Retire bytes before their ownership record. An interrupted retirement is
+   * resumed, never interpreted as permission to install or fetch the old stage. */
+  private async retire(pending: PendingPullWrite): Promise<void> {
+    if (!this.fs) return
+    await this.state.setMeta?.(
+      keyFor(pending.fileId),
+      JSON.stringify({ ...pending, retiring: true })
+    )
+    if (pending.stageId) await discardPullStage(this.fs, pending.stageId)
+    await this.clear(pending.fileId)
+  }
+
+  async superseded(change: ChangeItem): Promise<void> {
+    const pending = await this.read(change.file_id)
+    if (
+      pending &&
+      (pending.retiring ||
+        (pending.versionId !== change.version_id &&
+          pending.seq !== undefined &&
+          change.seq > pending.seq))
+    )
+      await this.retire(pending)
+  }
+
+  async retain(
+    fileId: string,
+    limits?: { count: number; bytes: number },
+    log?: (message: string) => void
+  ): Promise<void> {
+    const pending = await this.read(fileId)
+    if (!pending?.stageId) return
+    const held: PendingPullWrite[] = []
+    // Enumeration is required to bound retention across process restarts.
+    if (!this.state.metadataKeys) {
+      log?.(`pull: evicting held stage ${pending.wirePath}: host cannot enumerate owned stages`)
+      await this.retire(pending)
+      return
+    }
+    for (const key of await this.state.metadataKeys('pull-write:')) {
+      const saved = await this.read(key.slice('pull-write:'.length))
+      if (saved?.retiring) await this.retire(saved)
+      else if (saved?.heldOrder !== undefined && saved.fileId !== fileId) held.push(saved)
+    }
+    pending.heldOrder ??= 1 + Math.max(0, ...held.map((saved) => saved.heldOrder!))
+    await this.state.setMeta?.(keyFor(fileId), JSON.stringify(pending))
+    held.push(pending)
+    held.sort((a, b) => a.heldOrder! - b.heldOrder! || a.fileId.localeCompare(b.fileId))
+    const bounded = (value: number | undefined, fallback: number) =>
+      value !== undefined && Number.isSafeInteger(value) && value >= 0 ? value : fallback
+    const count = bounded(limits?.count, 64)
+    const cap = bounded(limits?.bytes, 256 * 1024 * 1024)
+    let bytes = held.reduce((sum, saved) => sum + (saved.size ?? 0), 0)
+    while (held.length > count || bytes > cap) {
+      const oldest = held.shift()!
+      log?.(
+        `pull: evicting held stage ${oldest.wirePath} (${oldest.size ?? 0} bytes): retained stage limit`
+      )
+      await this.retire(oldest)
+      bytes -= oldest.size ?? 0
+    }
   }
 
   private async read(fileId: string): Promise<PendingPullWrite | null> {

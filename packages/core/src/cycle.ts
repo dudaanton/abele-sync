@@ -262,6 +262,7 @@ export class SyncCycle {
     )
     if (!state.metadataKeys) for await (const entry of state.all()) pendingFiles.add(entry.fileId)
     await recoverPendingPullWrites(fs, state, [...pendingFiles], client, {
+      log,
       expected: this.ctx.expected,
       signal: this.ctx.signal?.(),
       retries: this.retries,
