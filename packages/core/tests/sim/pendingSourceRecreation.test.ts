@@ -2,6 +2,7 @@ import { expect, it } from 'vitest'
 import {
   pull,
   recoverPendingPullWrites,
+  scan,
   ExpectedWrites,
   EngineError,
   sha256,
@@ -134,6 +135,9 @@ it.each([
       expect(fs.stages.has(stage.id)).toBe(true)
       await recoverPendingPullWrites(fs, state, ['sample'], client)
       expect(fs.snapshot().get('old.md')).toEqual(bytes)
+      await fs.writeAtomic('old.md', new Uint8Array([9]), 1001)
+      const found = await scan(fs, state, { excluded: () => false })
+      expect(found.ops).not.toContainEqual(expect.objectContaining({ file_id: 'sample' }))
       return points
     }
     for (const cut of await execute()) await execute(cut)

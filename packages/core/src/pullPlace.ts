@@ -181,7 +181,8 @@ export class PullPlacer {
     newest = false
   ): Promise<boolean | 'held'> {
     if (change.op === 'delete' || change.sha === null) return false
-    if (entry && (await sourceRecreation(this.state, entry))) return 'held'
+    if (entry && (await sourceRecreation(this.state, entry)))
+      return (await this.pending.stageId(change)) ? false : 'held'
     // Arbitrary/staged changes may be historical and still require the old base.
     // A fully collected remote snapshot can acknowledge fresh equal bytes directly.
     let target: string
@@ -408,15 +409,21 @@ export class PullPlacer {
         this.opts.log?.(`pull: holding ${target}: pending stage lacks source publication authority`)
         return false
       }
-      if (!this.client.openVersion) return hold()
       if (pending.target !== target || pending.from !== from) return false
       if (
         from !== null &&
         beforeFrom !== null &&
         caseKey(from) !== caseKey(target) &&
         (!pending.sourceIdentity || (await this.fs.fileIdentity?.(from)) !== pending.sourceIdentity)
-      )
+      ) {
+        if (entry !== null)
+          await this.state.setMeta?.(
+            sourceRecreationKey(entry.fileId),
+            JSON.stringify({ base: entry, target })
+          )
         return hold()
+      }
+      if (!this.client.openVersion) return hold()
       return this.streamPlace(change, sha, entry, target, from, firstTarget, beforeFrom, local)
     }
     if (entry !== null && (await this.edited(entry, target))) return false
@@ -708,6 +715,17 @@ export class PullPlacer {
     } catch (error) {
       this.opts.expected.clear(target)
       if (!this.inTheWay(error)) throw error
+      if (
+        from !== null &&
+        entry !== null &&
+        sourceIdentity &&
+        (await this.fs.stat(from)) !== null &&
+        (await this.fs.fileIdentity?.(from)) !== sourceIdentity
+      )
+        await this.state.setMeta?.(
+          sourceRecreationKey(entry.fileId),
+          JSON.stringify({ base: entry, target })
+        )
       if (
         !sealed ||
         !(await this.pending.retain(change.file_id, this.opts.heldStageLimits, this.opts.log))
