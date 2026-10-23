@@ -38,7 +38,7 @@ it('D-203 passes an unqueued capability to a callback without a transaction hand
 
 it('supports concurrent placement inside an existing scoped capability', async () => {
   const state = new MemoryStateStore()
-  await bounded(state.transaction(tx => concurrentPlacement(tx)))
+  await bounded(state.transaction((tx) => concurrentPlacement(tx)))
   expect(await state.byFileId('placement-5')).toMatchObject({ versionId: 'v1' })
 })
 
