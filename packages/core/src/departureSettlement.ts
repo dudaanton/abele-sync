@@ -26,6 +26,29 @@ export type MembershipEvent = Omit<DepartureEvent, 'event' | 'supersededBy'> & {
 const membershipKey = (fileId: string) => 'settlement-membership:' + encodeURIComponent(fileId)
 const key = (sequence: number) => 'settlement-departure:row:' + sequenceKey(sequence)
 
+function contentProof(event: unknown): Extract<V2Change, { type: 'content' }> {
+  const proof = V2ChangeSchema.parse(event)
+  if (
+    proof.type !== 'content' ||
+    proof.item.file_id !== proof.file_id ||
+    proof.item.path !== proof.path
+  )
+    throw new Error('invalid departure membership proof')
+  return proof
+}
+
+function decodeMembership(raw: string): MembershipEvent {
+  const proof = JSON.parse(raw) as MembershipEvent
+  if (
+    !proof ||
+    typeof proof.connection !== 'string' ||
+    !(proof.generation === null || typeof proof.generation === 'string')
+  )
+    throw new Error('invalid departure membership proof')
+  contentProof(proof.event)
+  return proof
+}
+
 export function decodeDeparture(raw: string): DepartureObligation {
   const row = JSON.parse(raw) as DepartureObligation
   if (
@@ -46,13 +69,11 @@ export function decodeDeparture(raw: string): DepartureObligation {
         !Number.isSafeInteger(row.base.mtime)))
   )
     throw new Error('invalid departure obligation')
-  if (
-    row.supersededBy &&
-    (V2ChangeSchema.parse(row.supersededBy).type !== 'content' ||
-      row.supersededBy.file_id !== row.event.file_id ||
-      row.supersededBy.cursor <= row.event.cursor)
-  )
-    throw new Error('invalid departure supersession proof')
+  if (row.supersededBy) {
+    const proof = contentProof(row.supersededBy)
+    if (proof.file_id !== row.event.file_id || proof.cursor <= row.event.cursor)
+      throw new Error('invalid departure supersession proof')
+  }
   return row
 }
 
@@ -81,7 +102,7 @@ export async function captureDepartures(
       for (const membership of memberships) {
         const name = membershipKey(membership.event.file_id)
         const raw = await tx.getMeta!(name)
-        const old = raw === null ? null : (JSON.parse(raw) as MembershipEvent)
+        const old = raw === null ? null : decodeMembership(raw)
         if (
           old?.connection === membership.connection &&
           old.generation === membership.generation &&
@@ -139,7 +160,9 @@ export async function dispatchDepartures(
     if (retries && !retries.ready(row.event.path, 'departure')) return
     const member = await state.getMeta?.(membershipKey(row.event.file_id))
     if (member) {
-      const proof = JSON.parse(member) as MembershipEvent
+      const proof = decodeMembership(member)
+      if (proof.event.file_id !== row.event.file_id)
+        throw new Error('departure membership proof names another identity')
       if (
         proof.connection === row.connection &&
         proof.generation === row.generation &&

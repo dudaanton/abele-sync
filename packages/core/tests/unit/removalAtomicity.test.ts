@@ -295,6 +295,26 @@ it.each(['before', 'during'] as const)(
   }
 )
 
+it('does not accept a later removal as membership proof when replaying durable evidence', async () => {
+  const { fs, state, client, base, original } = await fixture()
+  const page = await client.changes(1)
+  await captureDepartures(state, page.departures, fs)
+  const corrupt = JSON.stringify({
+    connection: 'token',
+    generation: null,
+    event: { ...page.departures[0]!.event, cursor: 3 },
+  })
+  await state.setMeta('settlement-membership:root', corrupt)
+  const host = vi.fn(async () => true)
+  client.onRemoval = host
+  await expect(dispatchDepartures(state, client)).rejects.toThrow()
+  expect(host).not.toHaveBeenCalled()
+  expect(await firstSettlementSequence(state)).toBe(2)
+  expect(await state.getMeta('settlement-membership:root')).toBe(corrupt)
+  expect(await state.get(base.path)).toEqual(base)
+  expect(await fs.read(base.path)).toEqual(original)
+})
+
 it('a later rejoin in the same page supersedes departure without deleting the current copy', async () => {
   const { fs, state, client, base, original } = await fixture((base) => [
     {
