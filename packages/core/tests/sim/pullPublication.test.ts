@@ -129,7 +129,10 @@ it.each(
         state = state.reopen()
         const installed = new Set(fs.snapshot().keys())
         const start = downloads.length
-        const result = await run()
+        const result = await run().catch((error) => {
+          console.error({ mode, placementConcurrency, cut, interruption })
+          throw error
+        })
         expect(result.held).toEqual([])
         for (const id of downloads.slice(start)) expect(installed.has(`${id}.bin`)).toBe(false)
       }

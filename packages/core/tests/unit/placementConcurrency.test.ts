@@ -7,6 +7,9 @@ import { sha256 } from '../../src/hash.js'
 import { applyStaged, pull, type PullOptions } from '../../src/puller.js'
 import type { EngineClient } from '../../src/engineClient.js'
 import { placementFootprints, placementWaves } from '../../src/placement.js'
+import { MemoryStreamingFS } from '../sim/streamingMemoryFs.js'
+import { SimScheduler } from '../sim/scheduler.js'
+import { PendingPullWrites } from '../../src/pullWrite.js'
 
 async function fixture(count = 32) {
   const fs = new MemoryFileSystem(),
@@ -159,6 +162,63 @@ function gate() {
   })
   return { promise, release }
 }
+
+it('aborts an admitted network request when an independent preparation fails', async () => {
+  const f = await fixture(2),
+    entered = gate()
+  const disk = new MemoryStreamingFS(new SimScheduler(59))
+  let observedAbort = false
+  f.client.openVersion = async (id, _version, _expected, signal) => {
+    if (id === 'f0') {
+      await entered.promise
+      throw new Error('network preparation failed')
+    }
+    entered.release()
+    return new Promise((_resolve, reject) => {
+      const abort = () => {
+        observedAbort = true
+        reject(signal!.reason)
+      }
+      if (signal!.aborted) abort()
+      else signal!.addEventListener('abort', abort, { once: true })
+    })
+  }
+  await expect(
+    applyStaged(f.client, disk, f.state, f.changes, { ...f.options, prefetchBytes: 0 })
+  ).rejects.toThrow('network preparation failed')
+  expect(observedAbort).toBe(true)
+  expect(f.applied).toEqual([])
+  expect(await f.state.byFileId('f0')).toBeNull()
+  expect(await f.state.byFileId('f1')).toBeNull()
+})
+
+it('reallocates a missing private stage without granting authority over a later local file', async () => {
+  const f = await fixture(1)
+  const disk = new MemoryStreamingFS(new SimScheduler(59)),
+    change = f.changes[0]!
+  await new PendingPullWrites(f.state, disk).prepare(
+    change,
+    null,
+    change.path,
+    null,
+    'never-allocated'
+  )
+  await disk.writeAtomic(change.path, new Uint8Array([2]), 1)
+  f.client.openVersion = async () => ({
+    size: 1,
+    read: async () => new Uint8Array([1]),
+    assertUnchanged: async () => {},
+    close: async () => {},
+  })
+  const report = await applyStaged(f.client, disk, f.state, f.changes, {
+    ...f.options,
+    prefetchBytes: 0,
+  })
+  expect(report.held.map((c) => c.file_id)).toEqual(['f0'])
+  expect(await disk.read(change.path)).toEqual(new Uint8Array([2]))
+  expect(await f.state.byFileId('f0')).toBeNull()
+  expect(f.applied).toEqual([])
+})
 
 it.each(['cancel', 'failure'] as const)(
   'drains issued writes and blocks later acknowledgements on %s',

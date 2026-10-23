@@ -35,6 +35,7 @@ import type { PullOptions, PullReport } from './puller.js'
 import { isEngineOwn } from './selective.js'
 import type { StateEntry, StateStore } from './state.js'
 import { checkCancellation } from './cancellation.js'
+import { MAX_CHUNK_BYTES } from './streaming.js'
 import { GENERATION_KEY } from './restoreGeneration.js'
 
 import { PullHolds, importLegacyPullHolds } from './pullHolds.js'
@@ -681,7 +682,16 @@ export class Puller {
     }
     const local = await shaIndex(this.state)
     const budget = this.opts.prefetchBytes ?? DEFAULT_PREFETCH_BYTES
-    for (const run of runsWithin(taking, downloads, budget)) {
+    // Streaming stages retain chunks under the shared transfer budget, not a
+    // whole prefetched body. A zero prefetch budget must not serialize stages.
+    const retainedBytes = (change: ChangeItem) =>
+      this.fs.beginAtomicWrite &&
+      this.fs.reopenStage &&
+      this.client.openVersion &&
+      (!this.fs.conditionalFile || (change.size ?? 0) > Math.min(MAX_CHUNK_BYTES, budget))
+        ? 0
+        : downloads(change)
+    for (const run of runsWithin(taking, retainedBytes, budget)) {
       checkCancellation(this.opts.signal)
       const fetched = await this.prefetch(run, local)
       const footprints =

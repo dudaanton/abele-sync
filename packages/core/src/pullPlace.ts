@@ -650,13 +650,24 @@ export class PullPlacer {
     await this.state.setMeta?.(`pull-base:${target}`, JSON.stringify({ base }))
     if (!pending?.stageId)
       await this.pending.prepare(change, entry, target, from, undefined, undefined, sourceIdentity)
-    const stage =
-      pending?.stageId !== undefined
-        ? await this.fs.reopenStage!(pending.stageId)
-        : await this.fs.beginAtomicWrite!(target, change.mtime ?? 0, base, (id) =>
-            this.pending.prepare(change, entry, target, from, id, undefined, sourceIdentity)
-          )
-    if (!pending?.stageId)
+    const allocate = () =>
+      this.fs.beginAtomicWrite!(target, change.mtime ?? 0, base, (id) =>
+        this.pending.prepare(change, entry, target, from, id, undefined, sourceIdentity)
+      )
+    let stage: AtomicStage
+    if (pending?.stageId !== undefined) {
+      try {
+        stage = await this.fs.reopenStage!(pending.stageId)
+      } catch (error) {
+        if (!stageMissing(error)) throw error
+        // Intent is durable before allocation. Another participant can crash in
+        // that interval, leaving an id with no stage. Reallocate under the same
+        // exact version/base/source authority, never adopt public bytes or switch
+        // to a buffered write. Conditional commit still checks the original base.
+        stage = await allocate()
+      }
+    } else stage = await allocate()
+    if (stage.id !== pending?.stageId)
       await this.pending.prepare(change, entry, target, from, stage.id, undefined, sourceIdentity)
     let sealed = false
     try {
