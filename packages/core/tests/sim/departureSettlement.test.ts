@@ -34,8 +34,25 @@ it.each(['remove', 'retain', 'defer'] as const)(
         type: 'removal',
         file_id: 'file',
         path,
-        cursor: 2,
+        cursor: 3,
         at: '2026-01-01T00:00:00.000Z',
+      }
+      const content = {
+        type: 'content',
+        file_id: 'file',
+        path,
+        cursor: 2,
+        at: event.at,
+        prev_path: null,
+        item: {
+          file_id: 'file',
+          path,
+          version_id: 'v2',
+          sha: base.sha,
+          size: base.size,
+          mtime: base.mtime,
+          kind: 'note',
+        },
       }
       let calls = 0
       let accepted = mode !== 'defer'
@@ -53,7 +70,7 @@ it.each(['remove', 'retain', 'defer'] as const)(
                     status: 'active',
                     limits: { max_file_bytes: 10000, quota_bytes: null },
                   })
-                : Response.json({ items: [event], cursor: 2, next: null }),
+                : Response.json({ items: [content, event], cursor: 3, next: null }),
           }
         )
         await client.prepare(fs, state, () => false, undefined, true)
@@ -61,7 +78,7 @@ it.each(['remove', 'retain', 'defer'] as const)(
           client.onRemoval = async () => {
             calls++
             const row = JSON.parse(
-              (await state.getMeta('settlement-departure:row:00000000000002'))!
+              (await state.getMeta('settlement-departure:row:00000000000003'))!
             )
             expect(row.pending).toBe(true)
             await state.setMeta('retained-share-copy:file', JSON.stringify(base))
@@ -75,12 +92,18 @@ it.each(['remove', 'retain', 'defer'] as const)(
         scheduler.cut = point
         const start = scheduler.points.length
         try {
+          const before = await state.getMeta('settlement-departure:row:00000000000003')
           const page = await current.changes(1)
-          await captureDepartures(state, page.departures, fs)
+          if (before && JSON.parse(before).pending === false) {
+            expect(page.items).toHaveLength(0)
+            expect(current.includes(path)).toBe(false)
+          }
+          await captureDepartures(state, page.departures, fs, page.memberships)
           await dispatchDepartures(state, current)
+          await scheduler.point('departure.before-cursor-publication')
           await commitAppliedSettlement(
             state,
-            () => ({ reached: 2, firstUnresolved: null }),
+            () => ({ reached: 3, firstUnresolved: null }),
             async () => {}
           )
         } catch (error) {
@@ -92,11 +115,12 @@ it.each(['remove', 'retain', 'defer'] as const)(
       const reopen = async () => {
         state = state.reopen()
         fs = fs.reopen()
-        const raw = await state.getMeta('settlement-departure:row:00000000000002')
+        const raw = await state.getMeta('settlement-departure:row:00000000000003')
         const row = raw === null ? null : JSON.parse(raw)
         const resolved = row?.pending === false
         expect(await state.byFileId('file')).toEqual(resolved ? null : base)
-        if ((await state.getCursor()) === 2) expect(resolved).toBe(true)
+        if ((await state.getCursor()) === 3) expect(resolved).toBe(true)
+        if (resolved) expect((await client()).includes(path)).toBe(false)
         if (retained) expect(await fs.read(path)).toEqual(bytes)
         if (resolved && retained)
           expect(await state.getMeta('retained-share-copy:file')).not.toBeNull()
@@ -111,7 +135,7 @@ it.each(['remove', 'retain', 'defer'] as const)(
       const completedCalls = calls
       await attempt()
       expect(calls).toBe(completedCalls)
-      expect(await state.getCursor()).toBe(2)
+      expect(await state.getCursor()).toBe(3)
       expect(await state.byFileId('file')).toBeNull()
       if (!retained) expect(await fs.stat(path)).toBeNull()
       return { cuts, recoveryCuts }

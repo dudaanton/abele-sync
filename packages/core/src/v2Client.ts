@@ -49,6 +49,7 @@ import { negotiateExternalFiles, checkedExternalVerification } from './externalV
 import { isFinalForBatch } from './commitErrors.js'
 import { scanHintEpoch } from './scanHints.js'
 import type { DepartureEvent, DepartureObligation, MembershipEvent } from './departureSettlement.js'
+import { predatesDeparture } from './departureSettlement.js'
 import { PendingPullWrites } from './pullWrite.js'
 import { pathOccupant } from './pathOccupant.js'
 import { replayAuthority } from './replayAuthority.js'
@@ -371,6 +372,17 @@ export class V2EngineClient implements EngineClient {
     }
   }
   private async fileItem(item: V2ManifestItem, seq: number): Promise<ManifestItem | null> {
+    if (
+      this.ports &&
+      (await predatesDeparture(
+        this.ports.state,
+        item.file_id,
+        seq,
+        this.connectionInfo!.token_id,
+        this.http.observedGeneration ?? null
+      ))
+    )
+      return null
     if (item.kind === 'directory') {
       await this.directories?.receive(item)
       return null
@@ -380,11 +392,9 @@ export class V2EngineClient implements EngineClient {
     this.byteSources.set(item.sha, item)
     return { ...item, seq }
   }
-  rememberManifest(items: readonly ManifestItem[]): void {
+  async rememberManifest(items: readonly ManifestItem[]): Promise<void> {
     for (const item of items) {
-      this.departed.delete(item.path)
-      this.files.set(item.path, item)
-      this.byteSources.set(item.sha, item)
+      await this.fileItem(item, item.seq)
     }
   }
   async manifest(cursor: string | null, limit?: number, signal?: AbortSignal) {

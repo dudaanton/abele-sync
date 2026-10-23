@@ -26,6 +26,35 @@ export type MembershipEvent = Omit<DepartureEvent, 'event' | 'supersededBy'> & {
 }
 const membershipKey = (fileId: string) => 'settlement-membership:' + encodeURIComponent(fileId)
 const key = (sequence: number) => 'settlement-departure:row:' + sequenceKey(sequence)
+const completedKey = (fileId: string) =>
+  'settlement-departure:completed:' + encodeURIComponent(fileId)
+
+/** Durable membership ordering survives a crash before feed cursor publication.
+ * This is an indexed proof, not a scan of retained completed obligations. */
+export async function predatesDeparture(
+  state: StateStore,
+  fileId: string,
+  sequence: number,
+  connection: string,
+  generation: string | null
+): Promise<boolean> {
+  const raw = await state.getMeta?.(completedKey(fileId))
+  if (raw == null) return false
+  const proof = JSON.parse(raw) as DepartureEvent
+  if (
+    !proof ||
+    typeof proof.connection !== 'string' ||
+    !(proof.generation === null || typeof proof.generation === 'string') ||
+    V2ChangeSchema.parse(proof.event).type !== 'removal' ||
+    proof.event.file_id !== fileId
+  )
+    throw new Error('invalid completed departure proof')
+  return (
+    proof.connection === connection &&
+    proof.generation === generation &&
+    sequence <= proof.event.cursor
+  )
+}
 
 function contentProof(event: unknown): Extract<V2Change, { type: 'content' }> {
   const proof = V2ChangeSchema.parse(event)
@@ -103,6 +132,16 @@ export async function captureDepartures(
     async () => ({ reached: await state.getCursor(), firstUnresolved: null }),
     async (tx) => {
       for (const membership of memberships) {
+        if (
+          await predatesDeparture(
+            tx,
+            membership.event.file_id,
+            membership.event.cursor,
+            membership.connection,
+            membership.generation
+          )
+        )
+          continue
         const name = membershipKey(membership.event.file_id)
         const raw = await tx.getMeta!(name)
         const old = raw === null ? null : decodeMembership(raw)
@@ -202,6 +241,23 @@ export async function dispatchDepartures(
       async (tx) => {
         if ((await tx.getMeta!(key(sequence))) !== raw) throw new Error('departure owner changed')
         if (!(await publish(tx))) return
+        if (
+          !(await predatesDeparture(
+            tx,
+            row.event.file_id,
+            sequence,
+            row.connection,
+            row.generation
+          ))
+        )
+          await tx.setMeta!(
+            completedKey(row.event.file_id),
+            JSON.stringify({
+              connection: row.connection,
+              generation: row.generation,
+              event: row.event,
+            })
+          )
         await tx.setMeta!(key(sequence), JSON.stringify({ ...row, pending: false }))
         await indexSettlement(tx, sequence, false)
         await retries?.succeeded(row.event.path, 'departure', tx)
