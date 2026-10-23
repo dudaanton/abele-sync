@@ -36,6 +36,12 @@ it('D-203 passes an unqueued capability to a callback without a transaction hand
   expect(writes).toBe(1)
 })
 
+it('supports concurrent placement inside an existing scoped capability', async () => {
+  const state = new MemoryStateStore()
+  await bounded(state.transaction(tx => concurrentPlacement(tx)))
+  expect(await state.byFileId('placement-5')).toMatchObject({ versionId: 'v1' })
+})
+
 it.each(['scoped', 'unadvertised', 'legacy', 'root', 'plugin'] as const)(
   'D-203 nested mutations, root ordering, rollback and cancellation drain (%s)',
   async (shape) => {
