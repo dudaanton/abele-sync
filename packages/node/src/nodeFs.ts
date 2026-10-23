@@ -30,6 +30,7 @@ import { syncParents, syncPath } from './nodeFsDurability.js'
 import { NodeStages } from './nodeStages.js'
 import {
   conditionalFile,
+  fileObjectIdentity,
   installedFile,
   recoverConditionalFiles,
   discardInstallation,
@@ -99,6 +100,9 @@ export class NodeFileSystem implements FileSystem {
     if (applied && (operation.effect.kind === 'remove' || operation.effect.kind === 'move'))
       await this.pruneAbove(operation.path)
     return applied
+  }
+  async fileIdentity(path: string): Promise<string | null> {
+    return fileObjectIdentity(await this.contained(path))
   }
   installedFile(receipt: string, path: string, sha: string): Promise<boolean> {
     return installedFile(this.base, receipt, path, sha)

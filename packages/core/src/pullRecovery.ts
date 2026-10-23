@@ -11,6 +11,7 @@ import { discardPullStage, stageMissing } from './pullStages.js'
 import { isFileFailure, type FileRetries } from './fileRetry.js'
 
 interface Intent {
+  sourceIdentity?: string
   heldOrder?: number
   retiring?: boolean
   seq?: number
@@ -31,6 +32,13 @@ interface Intent {
 export function decodePullIntent(raw: string, fileId: string): Intent {
   try {
     const value = JSON.parse(raw) as Intent
+    if (
+      value?.sourceIdentity !== undefined &&
+      (typeof value.sourceIdentity !== 'string' ||
+        !value.sourceIdentity ||
+        value.sourceIdentity.length > 256)
+    )
+      throw new Error('invalid source identity')
     if (
       value?.heldOrder !== undefined &&
       (!Number.isSafeInteger(value.heldOrder) || value.heldOrder < 1)

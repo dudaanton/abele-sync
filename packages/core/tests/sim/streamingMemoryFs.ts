@@ -101,6 +101,10 @@ export class MemoryStreamingFS {
     await this.point('stat')
     return this.disk.fs.stat(path)
   }
+  async fileIdentity(path: string) {
+    await this.point('fileIdentity')
+    return this.disk.fs.fileIdentity(path)
+  }
   async writeAtomic(path: string, bytes: Uint8Array, mtime: number) {
     await this.mkdir(path.split('/').slice(0, -1).join('/'))
     await this.point('writeAtomic')

@@ -25,6 +25,7 @@ const ports = {
   watch: 'read',
   openRead: 'read',
   fingerprint: 'read',
+  fileIdentity: 'read',
   beginAtomicWrite: 'effect',
   reopenStage: 'effect',
   discardStage: 'cleanup',

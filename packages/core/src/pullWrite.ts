@@ -8,6 +8,7 @@ import { discardPullStage } from './pullStages.js'
 
 /** Intent saved before a pull touches the disk, retired atomically with its ledger update. */
 interface PendingPullWrite {
+  sourceIdentity?: string
   heldOrder?: number
   retiring?: boolean
   seq?: number
@@ -44,11 +45,13 @@ export class PendingPullWrites {
     target: string,
     from: string | null,
     stageId?: string,
-    receiptId?: string
+    receiptId?: string,
+    sourceIdentity?: string
   ): Promise<void> {
     if (this.state.getMeta === undefined || this.state.setMeta === undefined) return
     const owner = this.state.effectOwner?.()
     const pending: PendingPullWrite = {
+      ...(sourceIdentity === undefined ? {} : { sourceIdentity }),
       ...(this.sequenceKnown ? { seq: change.seq } : {}),
       ...(receiptId === undefined ? {} : { receiptId }),
       ...(stageId === undefined ? {} : { stageId }),

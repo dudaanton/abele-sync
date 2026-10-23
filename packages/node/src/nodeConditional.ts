@@ -17,6 +17,17 @@ import type { ConditionalFileOperation, FileVersion } from '@abele/sync-core'
 import { containedIn, isMissing } from './nodeFsGuard.js'
 import { syncParents, syncPath } from './nodeFsDurability.js'
 
+export async function fileObjectIdentity(path: string): Promise<string | null> {
+  try {
+    const info = await lstat(path, { bigint: true })
+    if (!info.isFile() || info.birthtimeNs <= 0n) return null
+    return `${info.dev}:${info.ino}:${info.birthtimeNs}`
+  } catch (error) {
+    if (isMissing(error)) return null
+    throw error
+  }
+}
+
 async function fingerprint(path: string, limit: number) {
   const file = await open(path, 'r'),
     hash = createHash('sha256')
@@ -42,6 +53,8 @@ async function fingerprint(path: string, limit: number) {
  * POSIX has no compare-and-unlink: the caller must unlink immediately after this
  * resolves and preserve the capture on any mismatch or I/O uncertainty. */
 export async function matchesVictim(path: string, expected: FileVersion): Promise<boolean> {
+  if (expected.identity !== undefined && (await fileObjectIdentity(path)) !== expected.identity)
+    return false
   const before = await lstat(path, { bigint: true })
   if (
     !before.isFile() ||
@@ -243,6 +256,8 @@ export async function conditionalFile(
       if (
         !info.isFile() ||
         info.isSymbolicLink() ||
+        (op.expected.identity !== undefined &&
+          (await fileObjectIdentity(victim)) !== op.expected.identity) ||
         info.size !== op.expected.size ||
         Math.max(0, Math.round(info.mtimeMs)) !== op.expected.mtime ||
         (await fingerprint(victim, op.expected.size)) !== op.expected.sha

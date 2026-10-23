@@ -200,6 +200,7 @@ export class PullPlacer {
     if (!(await this.pending.authorizes(change, entry, target))) return false
     const pending = await this.pending.matching(change, entry)
     if (pending !== null && pending.target !== target) return false
+    if (pending?.stageId) return 'held'
     if (!newest && entry !== null && (await this.edited(entry, target))) return false
     const from = entry === null || entry.path === target ? null : entry.path
     if (from !== null && (await this.fs.stat(from)) !== null) return false
@@ -393,13 +394,17 @@ export class PullPlacer {
       const occupant = await pathOccupant(this.fs, this.state, target, change.file_id)
       if (!replayAuthority(change.file_id, pending.base, entry, occupant)) return false
     }
-    if (pending?.stageId && this.fs.reopenStage && this.client.openVersion) {
+    if (pending?.stageId) {
+      // A saved private stage cannot be replaced by a fresh buffered write or
+      // by equal-byte adoption. Nor does it prove that a present source is still
+      // the original object: it may have been removed/recreated during downtime.
+      if (!this.fs.reopenStage || !this.client.openVersion) return false
       if (pending.target !== target || pending.from !== from) return false
       if (
         from !== null &&
         beforeFrom !== null &&
-        firstTarget !== null &&
-        caseKey(from) !== caseKey(target)
+        caseKey(from) !== caseKey(target) &&
+        (!pending.sourceIdentity || (await this.fs.fileIdentity?.(from)) !== pending.sourceIdentity)
       )
         return false
       return this.streamPlace(change, sha, entry, target, from, firstTarget, beforeFrom, local)
@@ -606,6 +611,11 @@ export class PullPlacer {
   ): Promise<boolean> {
     const identity = { sha, size: change.size! }
     const pending = await this.pending.matching(change, entry)
+    const sourceIdentity =
+      pending?.sourceIdentity ??
+      (pending === null && from !== null
+        ? ((await this.fs.fileIdentity?.(from)) ?? undefined)
+        : undefined)
     // Persist authority from the ledger, never a fresh read that could already
     // contain an edit made after our inspection and before stage allocation.
     const base =
@@ -613,14 +623,16 @@ export class PullPlacer {
         ? { sha: entry.sha, size: entry.size, mtime: entry.mtime }
         : null
     await this.state.setMeta?.(`pull-base:${target}`, JSON.stringify({ base }))
-    if (!pending?.stageId) await this.pending.prepare(change, entry, target, from)
+    if (!pending?.stageId)
+      await this.pending.prepare(change, entry, target, from, undefined, undefined, sourceIdentity)
     const stage =
       pending?.stageId !== undefined
         ? await this.fs.reopenStage!(pending.stageId)
         : await this.fs.beginAtomicWrite!(target, change.mtime ?? 0, base, (id) =>
-            this.pending.prepare(change, entry, target, from, id)
+            this.pending.prepare(change, entry, target, from, id, undefined, sourceIdentity)
           )
-    if (!pending?.stageId) await this.pending.prepare(change, entry, target, from, stage.id)
+    if (!pending?.stageId)
+      await this.pending.prepare(change, entry, target, from, stage.id, undefined, sourceIdentity)
     let sealed = false
     try {
       const source =
@@ -657,7 +669,10 @@ export class PullPlacer {
           (entry === null ||
             !(await this.effect({
               path: from,
-              expected: entry,
+              expected: {
+                ...entry,
+                ...(sourceIdentity === undefined ? {} : { identity: sourceIdentity }),
+              },
               effect: { kind: 'move', to: target },
             })))
         )

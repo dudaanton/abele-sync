@@ -6,6 +6,7 @@ import { checkCancellation } from './cancellation.js'
 import { sha256 as digest } from '@noble/hashes/sha256'
 
 export interface FileVersion {
+  identity?: string
   size: number
   mtime: number
   sha: string
@@ -32,6 +33,10 @@ export interface FileInfo {
  * the daemon over Node's `fs`; the engine and its tests use `MemoryFileSystem`.
  */
 export interface FileSystem extends Partial<StreamingFileSystem> {
+  /** Optional durable object identity, stable across rename, different after
+   * replacement even for equal bytes/stat. Hosts exposing this MUST enforce
+   * expected.identity in conditionalFile at the captured-object boundary. */
+  fileIdentity?(path: string): Promise<string | null>
   /** Stable collision key for vault-relative names, including parent components.
    * Equal keys mean names may address one file. Report the host's case/Unicode
    * rules, never content hashes or inode numbers (hard links remain distinct names).
@@ -108,6 +113,7 @@ export async function fingerprintFile(
 }
 
 interface Entry {
+  identity: string
   /** The spelling the file was created or last renamed under. */
   path: string
   bytes: Uint8Array
@@ -134,6 +140,10 @@ export interface MemoryFileSystemOptions {
  * are copied in and out, so no caller can reach into the store through an array it still holds.
  */
 export class MemoryFileSystem implements FileSystem {
+  private nextIdentity = 0
+  async fileIdentity(path: string): Promise<string | null> {
+    return this.files.get(this.fold(path))?.identity ?? null
+  }
   private readonly installations = new Map<string, Entry>()
   private readonly files = new Map<string, Entry>()
   private readonly watchers = new Set<(paths: string[]) => void>()
@@ -165,7 +175,12 @@ export class MemoryFileSystem implements FileSystem {
   async writeAtomic(path: string, bytes: Uint8Array, mtime: number): Promise<void> {
     // A write over a file that is there keeps the name it has, as a rename onto it does.
     const spelled = this.files.get(this.fold(path))?.path ?? path
-    this.files.set(this.fold(path), { path: spelled, bytes: bytes.slice(), mtime })
+    this.files.set(this.fold(path), {
+      path: spelled,
+      bytes: bytes.slice(),
+      mtime,
+      identity: String(++this.nextIdentity),
+    })
   }
 
   async move(from: string, to: string): Promise<void> {
@@ -192,6 +207,7 @@ export class MemoryFileSystem implements FileSystem {
       op.expected === null
         ? current !== undefined
         : !current ||
+          (op.expected.identity !== undefined && current.identity !== op.expected.identity) ||
           current.bytes.length !== op.expected.size ||
           current.mtime !== op.expected.mtime ||
           Array.from(digest(current.bytes), (b) => b.toString(16).padStart(2, '0')).join('') !==
@@ -206,6 +222,7 @@ export class MemoryFileSystem implements FileSystem {
       this.files.set(this.fold(op.effect.to), { ...current, path: op.effect.to })
     } else if (op.effect.kind === 'write') {
       const installed = {
+        identity: String(++this.nextIdentity),
         path: current?.path ?? op.path,
         bytes: op.effect.bytes.slice(),
         mtime: op.effect.mtime,
