@@ -413,7 +413,16 @@ export class PullPlacer {
         await this.settlement()
         const stage = await this.fs.reopenStage!(pending.stageId!)
         if (stage.offset === change.size) {
-          await stage.seal({ sha, size: change.size! })
+          try {
+            await stage.seal({ sha, size: change.size! })
+          } catch (error) {
+            if (!(error instanceof EngineError) || error.code !== 'conflict') throw error
+            // Holding is not publication. A host may be unable to verify old
+            // private bytes; keep the exact intent and unsealed evidence as-is,
+            // outside the verified-stage retention/eviction policy.
+            this.opts.log?.(`pull: holding ${target}: ${error.message}`)
+            return false
+          }
           await this.pending.retain(change.file_id, this.opts.heldStageLimits, this.opts.log)
         }
         this.opts.log?.(`pull: holding ${target}: pending stage lacks source publication authority`)

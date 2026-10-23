@@ -23,9 +23,18 @@ it.each([
   [false, true, true, true],
   [true, true, true, true],
   [true, true, true, false],
+  [true, false, false, false, true, true],
+  [true, false, false, false, true, false],
 ])(
-  'pending private stage never claims a recreated source (streaming=%s, identity=%s, case-only=%s, capability=%s)',
-  async (streaming, recordedIdentity, caseOnly, capability) => {
+  'pending private stage never claims a recreated source (streaming=%s, identity=%s, case-only=%s, capability=%s, unsealable=%s, same-bytes=%s)',
+  async (
+    streaming,
+    recordedIdentity,
+    caseOnly,
+    capability,
+    unsealable = false,
+    sameBytes = true
+  ) => {
     const from = caseOnly ? 'Note.md' : 'old.md',
       to = caseOnly ? 'note.md' : 'new.md'
     const bytes = new TextEncoder().encode('sample A'),
@@ -62,7 +71,7 @@ it.each([
       await state.setCursor(1)
       const stage = await fs.beginAtomicWrite(to, 1000, null)
       await stage.append(0, bytes)
-      await stage.seal({ sha, size: bytes.length })
+      if (!unsealable) await stage.seal({ sha, size: bytes.length })
       await state.setMeta(
         'pull-write:sample',
         JSON.stringify({
@@ -80,13 +89,26 @@ it.each([
           ...(recordedIdentity ? { sourceIdentity: await fs.fileIdentity(from) } : {}),
         })
       )
+      const recreated = sameBytes ? bytes : new Uint8Array(bytes.length).fill(9)
       await fs.remove(from)
-      await fs.writeAtomic(from, bytes, 1000)
+      await fs.writeAtomic(from, recreated, 1000)
+      if (unsealable) {
+        fs = fs.reopen()
+        state = state.reopen()
+      }
       const instrument = () => {
         if (!capability) Object.defineProperty(fs, 'fileIdentity', { value: undefined })
         const reopen = fs.reopenStage.bind(fs)
         fs.reopenStage = async (id) => {
           const handle = await reopen(id)
+          if (unsealable)
+            handle.seal = async () => {
+              await scheduler.point('stage.unavailableVerification')
+              throw new EngineError(
+                'conflict',
+                'Existing bytes require bounded local verification; file kept'
+              )
+            }
           handle.installed = async () => false
           handle.commit = async () => {
             throw new EngineError('conflict', 'not authorized')
@@ -133,16 +155,28 @@ it.each([
       const result = await run()
       expect(result.applied).toBe(0)
       expect(result.held).toHaveLength(1)
-      expect(fs.snapshot().get(from)).toEqual(bytes)
+      expect(fs.snapshot().get(from)).toEqual(recreated)
       expect(fs.snapshot().has(to)).toBe(false)
       expect(await state.byFileId('sample')).toEqual(base)
       expect(JSON.parse((await state.getMeta('pull-write:sample'))!)).toMatchObject({
         stageId: stage.id,
-        heldOrder: expect.any(Number),
+        ...(unsealable ? {} : { heldOrder: expect.any(Number) }),
       })
       expect(fs.stages.has(stage.id)).toBe(true)
-      await recoverPendingPullWrites(fs, state, ['sample'], client)
-      expect(fs.snapshot().get(from)).toEqual(bytes)
+      if (unsealable) {
+        expect(fs.stages.get(stage.id)?.sealed).toBe(false)
+        expect(fs.stages.get(stage.id)?.bytes).toEqual(bytes)
+        expect(JSON.parse((await state.getMeta('pull-write:sample'))!).heldOrder).toBeUndefined()
+      }
+      // Unverified evidence remains a recovery obligation, not a verified held cache.
+      if (unsealable)
+        await expect(recoverPendingPullWrites(fs, state, ['sample'], client)).rejects.toMatchObject(
+          {
+            reason: 'recovery-required',
+          }
+        )
+      else await recoverPendingPullWrites(fs, state, ['sample'], client)
+      expect(fs.snapshot().get(from)).toEqual(recreated)
       await fs.writeAtomic(from, new Uint8Array([9]), 1001)
       const found = await scan(fs, state, { excluded: () => false })
       expect(found.ops).not.toContainEqual(expect.objectContaining({ file_id: 'sample' }))

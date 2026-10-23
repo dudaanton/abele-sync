@@ -318,6 +318,12 @@ runtime capability flag is required.
    effect without promoting equality into identity, and never blindly replays a
    write over later local edits.
 
+   A source-authority hold may encounter a complete private stage that the host
+   cannot seal because bounded verification is unavailable. A seal conflict keeps
+   that stage and its exact intent unchanged and returns held; it does not authenticate
+   bytes by stat or enroll unverified evidence in verified-stage eviction. Explicit
+   pending-write recovery still reports `recovery-required` for that evidence.
+
 The host must document its tier and the checked tier's final-check-to-mutation
 gap. Desktop hosts with native identity support can continue to use the exclusive
 tier. Host-side coordination must still serialize the host's own pending writes;
@@ -356,6 +362,12 @@ delete. Previous source/candidate barriers remain; when all nomination hints van
 untracked possible destinations are held as well. A corroborated move replaces the
 hold atomically with its pending operation. Removal can be inferred only on a later
 unheld baseline, or through explicit user resolution.
+
+Pull placement and staged approval check directory refusals for the destination,
+the tracked source (physical and wire names), and `prev_path`. An unheld destination
+does not authorize removal from a held source. Approval retains the staged decision
+and reports it held; ordinary pull retains a retryable refusal. Incoming metadata
+can still be staged for review before these placement checks.
 
 Directory scans index canonical paths, object identities, ancestors, tracked children
 and relative child names once per inventory. Lookup cost follows path components and
