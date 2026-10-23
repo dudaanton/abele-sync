@@ -35,6 +35,7 @@ import { checkCancellation } from './cancellation.js'
 import { isFinalForBatch } from './commitErrors.js'
 import { rejectedOp } from './pushRefusal.js'
 import { requestReconciliation } from './reconciliation.js'
+import { sourceRecreation } from './sourceRecreation.js'
 export { batches } from './pushBatches.js'
 
 /**
@@ -724,15 +725,30 @@ class Pusher {
     // A recovered local journal is a replay even if the server had not received
     // the original request. Its answer cannot authorize an older local baseline.
     const replay = outcome.replayed || startedAt !== undefined
-    if (replay)
+    if (replay) {
+      const releasing = new Set<string>()
       for (const [at, op] of sending.entries()) {
         const result = results[at]!
         const path = result.status !== 'rejected' ? result.path : op.op === 'create' ? op.path : ''
+        // An earlier move releases this recreated source's ledger slot. Validate
+        // its create inside settlement, after that move. The per-record replay
+        // fence still applies and refuses a slot that was not actually released.
+        if (op.op === 'create' && releasing.has(op.path)) continue
         if (!(await receiptStillCurrent(this.fs, this.state, { op, result, path }))) {
           superseded.add(at)
           await countSuperseded(at)
+        } else if (
+          op.op === 'move' &&
+          result.status === 'applied' &&
+          result.file_id === op.file_id &&
+          result.path === op.to_path
+        ) {
+          const base = await this.state.byFileId(op.file_id)
+          if (base !== null && (await sourceRecreation(this.state, base))?.target === op.to_path)
+            releasing.add(base.wirePath)
         }
       }
+    }
     const verdicts = await this.planner.plan(sending, results, superseded)
     try {
       if (verdicts.staged.size > 0) {
