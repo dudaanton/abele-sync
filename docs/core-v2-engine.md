@@ -77,6 +77,10 @@ aborts active transfers and drains admitted filesystem work and settlement befor
 returning. A cancelled participant emits no applied callback. Failure releases
 all waiters and retains pending installation evidence for restart. No operation
 waits for a fixed number of participants.
+The default serial mode retains its existing pause checkpoint guarantee: its
+single already-issued successful file finishes ledger settlement while draining,
+without a post-cancellation callback. Concurrent cancelled attempts retain their
+intents for recovery instead of advancing acknowledgement past unresolved work.
 
 File mutation ports follow the [exclusive/checked host contract](#filesystem-host-contract).
 A checked host may implement conditional effects without object identity, but

@@ -109,7 +109,11 @@ export async function placementFootprints(
 export async function placeWave(
   changes: ChangeItem[],
   signal: AbortSignal | undefined,
-  work: (change: ChangeItem, settle: () => Promise<void>, signal: AbortSignal) => Promise<void>
+  work: (
+    change: ChangeItem,
+    settle: (completedSerial?: boolean) => Promise<void>,
+    signal: AbortSignal
+  ) => Promise<void>
 ): Promise<void> {
   const stop = new AbortController()
   const activeSignal = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal
@@ -123,10 +127,10 @@ export async function placeWave(
     previous = new Promise<void>((resolve) => {
       release = resolve
     })
-    const settle = async () => {
+    const settle = async (completedSerial = false) => {
       await before
       if (failure) throw failure.error
-      checkCancellation(activeSignal)
+      if (!completedSerial) checkCancellation(activeSignal)
     }
     tasks.push(
       (async () => {

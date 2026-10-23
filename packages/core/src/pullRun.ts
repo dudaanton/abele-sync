@@ -704,6 +704,11 @@ export class Puller {
         footprints
       )) {
         await placeWave(wave, this.opts.signal, async (change, settle, signal) => {
+          // Default serial pulls historically drain the one issued successful
+          // file into the ledger on pause. Preserve that checkpoint guarantee;
+          // concurrent cancellations retain intents instead. Neither emits a
+          // post-cancellation applied callback.
+          const serial = (this.opts.placementConcurrency ?? 1) === 1
           const report: PullReport = {
             applied: 0,
             skipped: 0,
@@ -723,8 +728,9 @@ export class Puller {
               { ...this.opts, signal },
               this.hash,
               true,
-              settle,
-              this.placer
+              () => settle(serial),
+              this.placer,
+              serial
             ),
           }
           const base = (await this.state.byFileId(change.file_id))?.versionId ?? null
@@ -742,9 +748,9 @@ export class Puller {
               attempt.held = true
             }
           }
-          await settle()
+          await settle(serial && report.applied > 0)
           if (succeeded) await this.opts.retries?.succeeded(change.path, 'pull')
-          checkCancellation(signal)
+          if (!(serial && report.applied > 0)) checkCancellation(signal)
           this.report.applied += report.applied
           this.report.skipped += report.skipped
           if (attempt.held) {

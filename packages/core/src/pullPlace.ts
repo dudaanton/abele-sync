@@ -71,7 +71,8 @@ export class PullPlacer {
     private readonly hash: (bytes: Uint8Array) => Promise<string>,
     private readonly sequenceKnown = true,
     private readonly settlement: () => Promise<void> = async () => {},
-    shared?: PullPlacer
+    shared?: PullPlacer,
+    private readonly drainCompletedSerial = true
   ) {
     this.pending = shared?.pending ?? new PendingPullWrites(state, fs, sequenceKnown)
     this.paths = shared?.paths ?? LocalPaths.filePass(fs, state)
@@ -293,21 +294,22 @@ export class PullPlacer {
       return false
     if (!(await this.clearPath(entry.path, entry))) return false
     this.opts.expected.clear(entry.path)
-    checkCancellation(this.opts.signal)
+    if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
     await transact(this.state, async (tx) => {
       await tx.delete(entry.path)
       if (change) await recordPull(tx, change, true)
       await tx.setMeta?.(scanHintKey(entry.path), null)
       await new PendingPullWrites(tx, this.fs).clear(entry.fileId)
-      checkCancellation(this.opts.signal)
+      if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
     })
-    checkCancellation(this.opts.signal)
-    await notifyApplied(this.opts, {
-      path: entry.wirePath,
-      kind: 'delete',
-      origin: 'remote',
-      fileId: entry.fileId,
-    })
+    if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
+    if (!this.opts.signal?.aborted)
+      await notifyApplied(this.opts, {
+        path: entry.wirePath,
+        kind: 'delete',
+        origin: 'remote',
+        fileId: entry.fileId,
+      })
     return true
   }
 
@@ -942,7 +944,7 @@ export class PullPlacer {
     liveStage?: AtomicStage
   ): Promise<boolean> {
     await this.settlement()
-    checkCancellation(this.opts.signal)
+    if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
     const have = await settledStat(this.fs, target, sha, wrote, this.hash)
     const stageId = await this.pending.stageId(change)
     const receiptId = await this.pending.receiptId(change)
@@ -982,7 +984,7 @@ export class PullPlacer {
       await tx.setMeta?.(`pull-base:${target}`, null)
       if (from !== null) await tx.setMeta?.(scanHintKey(from), null)
       if (stageId === undefined) await new PendingPullWrites(tx, this.fs).clear(change.file_id)
-      checkCancellation(this.opts.signal)
+      if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
       return true
     })
     if (!recorded) return false
@@ -992,15 +994,16 @@ export class PullPlacer {
       await this.pending.clear(change.file_id)
     }
     if (receiptId !== undefined) await this.fs.discardInstallation?.(receiptId)
-    checkCancellation(this.opts.signal)
+    if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
     const source = change.prev_path ?? (from === null ? undefined : from.normalize('NFC'))
-    await notifyApplied(this.opts, {
-      path: change.path,
-      kind: source !== undefined && source !== change.path ? 'move' : 'upsert',
-      ...(source !== undefined && source !== change.path ? { from: source } : {}),
-      origin: 'remote',
-      fileId: change.file_id,
-    })
+    if (!this.opts.signal?.aborted)
+      await notifyApplied(this.opts, {
+        path: change.path,
+        kind: source !== undefined && source !== change.path ? 'move' : 'upsert',
+        ...(source !== undefined && source !== change.path ? { from: source } : {}),
+        origin: 'remote',
+        fileId: change.file_id,
+      })
     return true
   }
 

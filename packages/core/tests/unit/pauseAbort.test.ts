@@ -51,8 +51,9 @@ async function fixture() {
     }),
     subscribe: () => () => {},
   } as unknown as EngineClient
-  const engine = new SyncEngine({ fs, state, client, selective: selectiveDefaults() })
-  return { fs, state, client, engine, items, bytes }
+  const onApplied = vi.fn()
+  const engine = new SyncEngine({ fs, state, client, selective: selectiveDefaults(), onApplied })
+  return { fs, state, client, engine, items, bytes, onApplied }
 }
 
 it('D-022 retains completed manifest coverage when one local edit stays held', async () => {
@@ -257,6 +258,7 @@ for (const verb of ['pause', 'stop'] as const) {
     expect(writes).toBe(1)
     expect(await f.state.getCursor()).toBe(2)
     expect(await f.state.get('0.md')).not.toBeNull()
+    expect(f.onApplied).not.toHaveBeenCalled()
     expect(f.engine.status.state).toBe('paused')
     const gets = vi.mocked(f.client.getBlob).mock.calls.length
     await f.engine.sync()
