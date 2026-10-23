@@ -32,6 +32,8 @@ const DocumentSchema = z
             code: ErrorCodeSchema,
             message: z.string(),
             direction: z.enum(['push', 'pull']),
+            evidence: z.literal(true).optional(),
+            source: PathSchema.optional(),
           })
           .strict()
       )
@@ -85,6 +87,17 @@ interface Document {
 export interface DirectoryRefusal extends Refusal {
   path: string
   direction: 'push' | 'pull'
+  /** Recomputed on every directory scan, unlike an explicit server refusal. */
+  evidence?: true
+  source?: string
+}
+
+/** Scanner protection shares the same durable image as the directory decision. */
+export async function heldDirectoryPaths(state: StateStore): Promise<Set<string>> {
+  const raw = await state.getMeta?.(KEY)
+  if (raw == null) return new Set()
+  const doc = DocumentSchema.parse(JSON.parse(raw))
+  return new Set(doc.refused?.filter((row) => row.evidence).map((row) => row.path))
 }
 
 // These codes are item refusals in an op result or a host mkdir. HTTP forbidden
@@ -133,8 +146,9 @@ export class V2Directories {
   async loadRefusals(retry = false, paths?: readonly string[]): Promise<void> {
     const doc = await this.read()
     if (retry && doc.refused?.length) {
-      doc.refused =
-        paths === undefined ? [] : doc.refused.filter((item) => !paths.includes(item.path))
+      doc.refused = doc.refused.filter(
+        (item) => item.evidence || (paths !== undefined && !paths.includes(item.path))
+      )
       await this.save(doc)
     }
   }
@@ -317,12 +331,27 @@ export class V2Directories {
         return
       }
     }
+    const emptyRefusal = async (pending: NonNullable<Document['pending']>, error: Refusal) => {
+      const op = pending.op
+      if (!('empty_only' in op) || !op.empty_only || error.code !== 'conflict') return false
+      const source = doc.directories.find((dir) => dir.file_id === op.file_id)
+      for (const path of [source?.path, op.op === 'move_directory' ? op.to_path : undefined]) {
+        if (path === undefined) continue
+        this.refuse(doc, path, error, 'push')
+        doc.refused!.find((row) => row.path === path)!.evidence = true
+        doc.refused!.find((row) => row.path === path)!.source = source?.path
+      }
+      delete doc.pending
+      await this.save(doc)
+      return true
+    }
     const record = async (pending: NonNullable<Document['pending']>) => {
       this.signal?.throwIfAborted()
       let result: CommitOpResult
       try {
         result = (await this.commit([pending.op], pending.key))[0]!
       } catch (error) {
+        if (error instanceof AbeleError && (await emptyRefusal(pending, error))) return false
         // Only a definitive validator rejection retires the immutable request.
         // Network failures and uncertain outcomes keep the original key and bytes.
         if (pending.op.op === 'mkdir' && itemRefusal(error) && error.code !== 'forbidden') {
@@ -342,6 +371,7 @@ export class V2Directories {
       if (latest.pending?.key !== pending.key) return false
       Object.assign(doc, latest)
       if (result.status === 'rejected') {
+        if (await emptyRefusal(pending, result)) return false
         if (pending.op.op === 'mkdir' && refusalCodes.has(result.code)) {
           this.refuse(doc, pending.op.path, result, 'push')
           delete doc.pending
@@ -426,27 +456,44 @@ export class V2Directories {
     // Occupancy owns the wire identity. A host may replace a directory inode while
     // retaining its contents; that is not authority to recursively delete the server tree.
     // Identity is only rename evidence when the canonical source path is absent.
+    const previousEvidence = (doc.refused ?? []).filter((row) => row.evidence)
+    const previousCandidates = new Map<string, Set<string>>()
+    for (const row of doc.refused ?? []) {
+      if (!row.evidence || !row.source || row.path === row.source) continue
+      const candidates = previousCandidates.get(row.source) ?? new Set<string>()
+      candidates.add(row.path)
+      previousCandidates.set(row.source, candidates)
+    }
+    const hasPreviousCandidate = (source: string) =>
+      local.some((dir) => previousCandidates.get(source)?.has(wirePath(dir.path)))
     for (const old of doc.directories) {
       const current = local.find((l) => wirePath(l.path) === old.path)
       if (current) {
+        // A newly recreated source name cannot erase evidence of the original
+        // object still waiting at its candidate path.
+        if (hasPreviousCandidate(old.path)) continue
         old.localPath = current.path
         old.identity = current.identity
       }
     }
     doc.refused = doc.refused?.filter(
-      (item) => item.direction === 'pull' || local.some((dir) => wirePath(dir.path) === item.path)
+      (item) =>
+        !item.evidence &&
+        (item.direction === 'pull' || local.some((dir) => wirePath(dir.path) === item.path))
     )
-    await this.save(doc)
     const missing = doc.directories.filter(
       (d) =>
         this.includes(d.path) &&
         !inventory.blocked(d.path) &&
-        !local.some((l) => wirePath(l.path) === d.path)
+        (!local.some((l) => wirePath(l.path) === d.path) || hasPreviousCandidate(d.path))
     )
     // Parents first: a server tree operation updates the identities of descendants.
     const roots = missing.filter(
       (old) => !missing.some((parent) => parent !== old && old.path.startsWith(parent.path + '/'))
     )
+    const plans: Array<{ old: LocalDirectory; moved?: (typeof local)[number]; empty: boolean }> = []
+    const entries: StateEntry[] = []
+    for await (const entry of this.state.all()) entries.push(entry)
     for (const old of roots.sort((a, b) => a.path.length - b.path.length)) {
       this.signal?.throwIfAborted()
       // Inode equality only nominates candidates. A replacement rename and
@@ -454,12 +501,20 @@ export class V2Directories {
       const foreignPaths = new Set(
         doc.directories.filter((d) => d.file_id !== old.file_id).map((d) => d.path)
       )
-      const candidates = local.filter((l) => l.identity === old.identity)
+      const candidates = local.filter(
+        (l) =>
+          wirePath(l.path) !== old.path &&
+          (l.identity === old.identity || previousCandidates.get(old.path)?.has(wirePath(l.path)))
+      )
+      const children = entries.filter((child) => child.wirePath.startsWith(old.path + '/'))
+      const empty =
+        children.length === 0 &&
+        !doc.directories.some((child) => child.path.startsWith(old.path + '/'))
       let moved: (typeof local)[number] | undefined
       if (candidates.length === 1 && !foreignPaths.has(wirePath(candidates[0]!.path))) {
         const candidate = candidates[0]!
-        for await (const child of this.state.all()) {
-          if (!child.wirePath.startsWith(old.path + '/')) continue
+        if (empty) moved = candidate
+        for (const child of children) {
           const target = wirePath(candidate.path) + child.wirePath.slice(old.path.length)
           if (inventory.blocked(target)) continue
           const path = inventory.resolve(target, 'file')
@@ -475,8 +530,50 @@ export class V2Directories {
       }
       // Never reinterpret an ambiguous move as recursive deletion. In
       // particular, replacement of an occupied remote identity needs resolution.
-      if (candidates.length && !moved) continue
-      if (this.refusalFor(old.path) || (moved && this.refusalFor(moved.path))) continue
+      if (candidates.length && !moved && !empty) {
+        for (const path of [old.path, ...candidates.map((dir) => wirePath(dir.path))])
+          doc.refused = [
+            ...(doc.refused ?? []).filter(
+              (row) => row.path !== path || !row.evidence || row.source !== old.path
+            ),
+            {
+              path,
+              source: old.path,
+              code: 'conflict',
+              message: 'directory move evidence is ambiguous; old and candidate subtrees are held',
+              direction: 'push',
+              evidence: true,
+            },
+          ]
+        continue
+      }
+      if (moved)
+        doc.refused = [
+          ...(doc.refused ?? []),
+          ...previousEvidence.filter((row) => row.source === old.path),
+        ]
+      plans.push({ old, moved, empty })
+    }
+    // Keep resolved candidate evidence durable until the replacement move journal
+    // is saved: a crash between clearing the hold and saving that journal must
+    // not forget a candidate whose inode has since changed.
+    // Publish all subtree barriers together before emitting any directory operation.
+    // A restart sees the previous complete decision or this recomputed one.
+    await this.save(doc)
+    const blockedTree = (path: string) =>
+      this.refusalFor(path) ||
+      doc.refused?.some((row) => row.evidence && row.path.startsWith(wirePath(path) + '/'))
+    for (const { old, moved, empty } of plans) {
+      const retained = doc.refused
+      if (moved) {
+        doc.refused = doc.refused?.filter((row) => !row.evidence || row.source !== old.path)
+        this.indexRefusals(doc.refused ?? [])
+      }
+      if (blockedTree(old.path) || (moved && blockedTree(moved.path))) {
+        doc.refused = retained
+        this.indexRefusals(doc.refused ?? [])
+        continue
+      }
       // A widened/reset scope needs its snapshot before absence is a deletion.
       // The next ordinary cycle can delete missing folders on a known baseline.
       if (!moved && (await this.state.getCursor()) === 0) continue
@@ -486,8 +583,14 @@ export class V2Directories {
             file_id: old.file_id,
             base_version_id: old.version_id,
             to_path: wirePath(moved.path),
+            ...(empty ? { empty_only: true as const } : {}),
           }
-        : { op: 'delete_directory', file_id: old.file_id, base_version_id: old.version_id }
+        : {
+            op: 'delete_directory',
+            file_id: old.file_id,
+            base_version_id: old.version_id,
+            ...(empty ? { empty_only: true as const } : {}),
+          }
       doc.pending = {
         key: crypto.randomUUID(),
         op,

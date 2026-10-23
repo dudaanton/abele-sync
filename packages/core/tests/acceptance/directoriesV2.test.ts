@@ -71,10 +71,9 @@ it('preserves file and directory IDs through case-only renames', async () => {
     const after = (await server.manifest()).items
     expect(after.find((item) => item.path === 'й')?.file_id).toBe(directory.file_id)
     expect(after.find((item) => item.path === 'й/note.md')?.file_id).toBe(note.file_id)
-    // An empty inode-only rename has no descendant witness. Preserve the remote
-    // identity at its original name rather than infer a recursive tree operation.
-    expect(after.find((item) => item.path === 'Й-empty')?.file_id).toBe(empty.file_id)
-    expect(after.some((item) => item.path === 'й-empty')).toBe(false)
+    // Empty renames are authorized by an atomic server-side emptiness check.
+    expect(after.find((item) => item.path === 'й-empty')?.file_id).toBe(empty.file_id)
+    expect(after.some((item) => item.path === 'Й-empty')).toBe(false)
     expect(after).toHaveLength(3)
     expect(await a!.text(raw + '/note.md')).toBe('case rename bytes\n')
     expect(await b!.text('й/note.md')).toBe('case rename bytes\n')
@@ -87,6 +86,35 @@ it('preserves file and directory IDs through case-only renames', async () => {
     await f.close()
   }
 })
+
+it.each(['move_directory', 'delete_directory'] as const)(
+  'empty-only %s refuses concurrent remote children without changing their history',
+  async (op) => {
+    const f = await acceptanceFixture()
+    try {
+      const server = new V2SyncClient(f.roots[0]!.token)
+      const made = (await server.commit([{ op: 'mkdir', path: 'empty' }])).results[0]!
+      if (made.status === 'rejected') throw new Error(made.message)
+      await server.create('empty/remote.md', 'remote content')
+      const before = await server.manifest()
+      const identity = {
+        file_id: made.file_id,
+        base_version_id: made.version_id,
+        empty_only: true as const,
+      }
+      expect(
+        (
+          await server.commit([
+            op === 'move_directory' ? { op, ...identity, to_path: 'moved' } : { op, ...identity },
+          ])
+        ).results
+      ).toEqual([expect.objectContaining({ status: 'rejected', code: 'conflict' })])
+      expect(await server.manifest()).toEqual(before)
+    } finally {
+      await f.close()
+    }
+  }
+)
 
 it('replays a lost directory commit response after restart without a second identity', async () => {
   const f = await acceptanceFixture()

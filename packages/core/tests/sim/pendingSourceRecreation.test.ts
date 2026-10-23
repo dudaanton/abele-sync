@@ -14,13 +14,20 @@ import { DurableStateStore } from './durableState.js'
 import { SimScheduler, EpochError } from './scheduler.js'
 
 it.each([
-  [false, false],
-  [true, false],
-  [false, true],
-  [true, true],
+  [false, false, false, true],
+  [true, false, false, true],
+  [false, true, false, true],
+  [true, true, false, true],
+  [false, false, true, true],
+  [true, false, true, true],
+  [false, true, true, true],
+  [true, true, true, true],
+  [true, true, true, false],
 ])(
-  'pending private stage never claims a recreated source (streaming=%s, identity=%s)',
-  async (streaming, recordedIdentity) => {
+  'pending private stage never claims a recreated source (streaming=%s, identity=%s, case-only=%s, capability=%s)',
+  async (streaming, recordedIdentity, caseOnly, capability) => {
+    const from = caseOnly ? 'Note.md' : 'old.md',
+      to = caseOnly ? 'note.md' : 'new.md'
     const bytes = new TextEncoder().encode('sample A'),
       sha = await sha256(bytes)
     async function execute(cut?: string) {
@@ -28,8 +35,8 @@ it.each([
       let fs = new MemoryStreamingFS(scheduler),
         state = new DurableStateStore(scheduler)
       const base = {
-        path: 'old.md',
-        wirePath: 'old.md',
+        path: from,
+        wirePath: from,
         fileId: 'sample',
         versionId: 'base',
         sha,
@@ -40,8 +47,8 @@ it.each([
         seq: 2,
         file_id: 'sample',
         version_id: 'incoming',
-        path: 'new.md',
-        prev_path: 'old.md',
+        path: to,
+        prev_path: from,
         op: 'move',
         sha,
         size: bytes.length,
@@ -50,10 +57,10 @@ it.each([
         at: '',
         actor: { kind: 'system', id: 'sample', name: 'Sample' },
       }
-      await fs.writeAtomic('old.md', bytes, 1000)
+      await fs.writeAtomic(from, bytes, 1000)
       await state.put(base)
       await state.setCursor(1)
-      const stage = await fs.beginAtomicWrite('new.md', 1000, null)
+      const stage = await fs.beginAtomicWrite(to, 1000, null)
       await stage.append(0, bytes)
       await stage.seal({ sha, size: bytes.length })
       await state.setMeta(
@@ -62,20 +69,21 @@ it.each([
           seq: 2,
           fileId: 'sample',
           versionId: 'incoming',
-          wirePath: 'new.md',
+          wirePath: to,
           sha,
           size: bytes.length,
           mtime: 1000,
-          target: 'new.md',
-          from: 'old.md',
+          target: to,
+          from: from,
           base,
           stageId: stage.id,
-          ...(recordedIdentity ? { sourceIdentity: await fs.fileIdentity('old.md') } : {}),
+          ...(recordedIdentity ? { sourceIdentity: await fs.fileIdentity(from) } : {}),
         })
       )
-      await fs.remove('old.md')
-      await fs.writeAtomic('old.md', bytes, 1000)
+      await fs.remove(from)
+      await fs.writeAtomic(from, bytes, 1000)
       const instrument = () => {
+        if (!capability) Object.defineProperty(fs, 'fileIdentity', { value: undefined })
         const reopen = fs.reopenStage.bind(fs)
         fs.reopenStage = async (id) => {
           const handle = await reopen(id)
@@ -125,8 +133,8 @@ it.each([
       const result = await run()
       expect(result.applied).toBe(0)
       expect(result.held).toHaveLength(1)
-      expect(fs.snapshot().get('old.md')).toEqual(bytes)
-      expect(fs.snapshot().has('new.md')).toBe(false)
+      expect(fs.snapshot().get(from)).toEqual(bytes)
+      expect(fs.snapshot().has(to)).toBe(false)
       expect(await state.byFileId('sample')).toEqual(base)
       expect(JSON.parse((await state.getMeta('pull-write:sample'))!)).toMatchObject({
         stageId: stage.id,
@@ -134,8 +142,8 @@ it.each([
       })
       expect(fs.stages.has(stage.id)).toBe(true)
       await recoverPendingPullWrites(fs, state, ['sample'], client)
-      expect(fs.snapshot().get('old.md')).toEqual(bytes)
-      await fs.writeAtomic('old.md', new Uint8Array([9]), 1001)
+      expect(fs.snapshot().get(from)).toEqual(bytes)
+      await fs.writeAtomic(from, new Uint8Array([9]), 1001)
       const found = await scan(fs, state, { excluded: () => false })
       expect(found.ops).not.toContainEqual(expect.objectContaining({ file_id: 'sample' }))
       return points

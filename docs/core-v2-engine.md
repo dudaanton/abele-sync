@@ -74,10 +74,17 @@ need directory ports:
   a missing directory's candidate with a known descendant's relative path and
   verified content. An occupied destination remains a separate remote identity,
   including POSIX replacement of an empty directory; hold rather than recursively
-  deleting the source or merging identities. An empty or edited candidate without
-  corroboration is ambiguous and stays held. A later scan can resolve changed
-  evidence; mere passage of time never authorizes recursive deletion. Unrelated
-  fresh directories may be created under their own identities, never the old tree's.
+  deleting the source or merging identities. A populated candidate without
+  corroboration is ambiguous. A durable, visible refusal protects both the old
+  subtree and every candidate subtree: file and directory scans emit no creates,
+  moves or deletes within either side. Candidates cannot acquire fresh identities
+  while held. Every directory scan re-evaluates these evidence holds, independently
+  of explicit retries for server refusals. Restoring a known child's bytes can
+  therefore resolve a hold into a move; passage of time cannot authorize deletion.
+  Empty directories have no tracked children to endanger: a unique rename,
+  including a case-only rename, moves the identity when the server subtree is
+  empty too. Otherwise only an atomic delete-empty followed by creation is safe;
+  recursive deletion is never a substitute for an empty-directory check.
 
 A pending pull stage is the sole publication authority for its saved intent: do
 not replace it with a buffered write or equal-content adoption when streaming
@@ -88,8 +95,9 @@ capture. `fileIdentity` is an optional paired capability: a host exposing it mus
 enforce `expected.identity` on the captured file, including recovery cleanup.
 The Node host uses device, inode and nanosecond birth time (never inode alone);
 hosts without this capability hold a resumed distinct-path source. Old intents
-without identity remain held when the source exists. This preserves bytes and
-intent rather than assigning the recreated file to the remote move.
+without identity remain held when the source exists, including case-only moves
+on case-sensitive hosts. Case folding alone cannot prove physical aliasing and
+does not exempt a move from this check. This preserves bytes and intent rather than assigning the recreated file to the remote move.
 
 Verified refused stages belong to their exact pending decision. Replacing or
 dropping a deferred decision (including exclusion, explicit discard and host

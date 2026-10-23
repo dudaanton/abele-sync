@@ -11,6 +11,7 @@ import { checkCancellation } from './cancellation.js'
 import { scanHintEpoch, readScanHint, writeScanHint } from './scanHints.js'
 import { isFileFailure } from './fileRetry.js'
 import { sourceRecreation, type SourceRecreation } from './sourceRecreation.js'
+import { heldDirectoryPaths } from './v2Directories.js'
 
 /**
  * The scanner: what is on disk against what was last synced, as the ops a push commits.
@@ -339,6 +340,23 @@ export async function scan(
   const skip = (path: string, reason: string): void => {
     skipped.push({ path, reason })
     opts.log?.(`scan: skipped ${path}: ${reason}`)
+  }
+  const heldDirectories = await heldDirectoryPaths(state)
+  if (heldDirectories.size) {
+    const previousFilter = filter
+    filter = {
+      excluded: (path, size) => {
+        let parent = path.normalize('NFC')
+        for (;;) {
+          if (heldDirectories.has(parent)) return true
+          const slash = parent.lastIndexOf('/')
+          if (slash < 0) break
+          parent = parent.slice(0, slash)
+        }
+        return previousFilter.excluded(path, size)
+      },
+    }
+    for (const path of heldDirectories) skip(path, 'directory move evidence is ambiguous')
   }
 
   const present = new Set<string>()

@@ -413,7 +413,6 @@ export class PullPlacer {
       if (
         from !== null &&
         beforeFrom !== null &&
-        caseKey(from) !== caseKey(target) &&
         (!pending.sourceIdentity || (await this.fs.fileIdentity?.(from)) !== pending.sourceIdentity)
       ) {
         if (entry !== null)

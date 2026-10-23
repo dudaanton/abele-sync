@@ -148,6 +148,21 @@ export async function validateDirectoryOp(ctx: Ctx, op: DirectoryOp) {
     throw new AbeleError('not_found', 'no mutable directory in this scope')
   if (dir.version_id !== op.base_version_id)
     throw new AbeleError('invalid_request', 'directory base version is stale')
+  // The directory version does not change when another client adds a child.
+  // Check emptiness inside the same transaction that performs the tree operation.
+  if (op.empty_only) {
+    const descendants = (await liveDirectories(ctx)).some(
+      (child) => child.id !== dir.id && atPath(child.path, dir.path)
+    )
+    const files = await ctx.trx
+      .selectFrom('files')
+      .select('path')
+      .where('vault_id', '=', ctx.vaultId)
+      .where('deleted_at', 'is', null)
+      .execute()
+    if (descendants || files.some((file) => atPath(file.path, dir.path)))
+      throw new AbeleError('conflict', 'directory is not empty')
+  }
   if (op.op === 'move_directory') {
     if (op.to_path === dir.path) return
     if (atPath(op.to_path, dir.path))

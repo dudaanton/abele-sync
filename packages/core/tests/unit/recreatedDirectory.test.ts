@@ -36,7 +36,12 @@ it.each(['local-rename', 'cafe\u0301'])(
     )
     const commit = vi.fn(async (ops: V2CommitOp[]): Promise<CommitOpResult[]> =>
       ops.map((op) => {
-        expect(op).toEqual({ op: 'delete_directory', file_id: 'deleted', base_version_id: 'old-v' })
+        expect(op).toEqual({
+          op: 'delete_directory',
+          file_id: 'deleted',
+          base_version_id: 'old-v',
+          empty_only: true,
+        })
         return {
           status: 'applied',
           file_id: 'deleted',
@@ -50,10 +55,10 @@ it.each(['local-rename', 'cafe\u0301'])(
       })
     )
     await new V2Directories(fs, state, () => true, commit).scan()
-    // Inode reuse and replacement of an empty destination are ambiguous. Neither
-    // a move nor a recursive delete may be inferred from this observation.
-    expect(commit).not.toHaveBeenCalled()
-    expect(JSON.parse((await state.getMeta('v2-directories'))!).directories).toEqual([old, target])
+    // The missing source has no tracked children. Only delete-empty is allowed;
+    // the occupied target keeps its separate identity and all of its content.
+    expect(commit).toHaveBeenCalledOnce()
+    expect(JSON.parse((await state.getMeta('v2-directories'))!).directories).toEqual([target])
     expect(await fs.read(name + '/main.js')).toEqual(new Uint8Array([1]))
   }
 )

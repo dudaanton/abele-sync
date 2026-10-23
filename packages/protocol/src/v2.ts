@@ -245,9 +245,17 @@ export const V2CommitOpSchema = z.union([
       file_id: id,
       base_version_id: id,
       to_path: PathSchema,
+      empty_only: z.literal(true).optional(),
     })
     .strict(),
-  z.object({ op: z.literal('delete_directory'), file_id: id, base_version_id: id }).strict(),
+  z
+    .object({
+      op: z.literal('delete_directory'),
+      file_id: id,
+      base_version_id: id,
+      empty_only: z.literal(true).optional(),
+    })
+    .strict(),
 ])
 export type V2CommitOp = z.infer<typeof V2CommitOpSchema>
 export const V2CommitRequestSchema = z
