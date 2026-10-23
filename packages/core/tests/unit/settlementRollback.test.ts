@@ -73,12 +73,23 @@ it('keeps the patch dirty when the host rejects commit after the callback return
   await holds.load()
   const item = await change(0)
   holds.put({ change: item, base: null, firstSeq: 1 })
-  await expect(
-    transact(state, async (tx) => {
-      await holds.persist(10, true, tx)
-      await state.setMeta('unrelated', 'survives')
-    })
-  ).rejects.toThrow('state changed outside the transaction')
+  let entered!: () => void, release!: () => void
+  const ready = new Promise<void>((resolve) => {
+    entered = resolve
+  })
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const pending = transact(state, async (tx) => {
+    await holds.persist(10, true, tx)
+    entered()
+    await gate
+  })
+  const rejected = expect(pending).rejects.toThrow('state changed outside the transaction')
+  await ready
+  await state.setMeta('unrelated', 'survives')
+  release()
+  await rejected
   expect(await state.getMeta('unrelated')).toBe('survives')
   expect(await state.getMeta('pull-held-progress')).toBeNull()
   expect(holds.dirty).toBe(true)
