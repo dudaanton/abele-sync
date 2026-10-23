@@ -8,11 +8,12 @@ import {
 } from '../../src/index.js'
 import type { ChangeItem } from '@abele/sync-protocol'
 import { recoverPendingPullWrites } from '../../src/pullRecovery.js'
+import { Staging } from '../../src/staging.js'
 import { DurableStateStore } from './durableState.js'
 import { MemoryStreamingFS } from './streamingMemoryFs.js'
 import { EpochError, SimScheduler } from './scheduler.js'
 
-it.each(['count', 'bytes', 'supersede', 'delete'] as const)(
+it.each(['count', 'bytes', 'supersede', 'delete', 'keep', 'settled'] as const)(
   'held stage %s resolution preserves ownership across every crash',
   async (mode) => {
     const bytes = new TextEncoder().encode('incoming'),
@@ -73,6 +74,20 @@ it.each(['count', 'bytes', 'supersede', 'delete'] as const)(
           log: (row) => logs.push(row),
         })
       await run(change('a'))
+      const staging = () =>
+        new Staging({
+          client,
+          fs,
+          state,
+          filter: { excluded: () => false },
+          expected: new ExpectedWrites(),
+          defer: () => true,
+          log: (row) => logs.push(row),
+        })
+      if (mode === 'keep' || mode === 'settled') {
+        await staging().stage([{ change: change('a'), base: null }])
+        await fs.writeAtomic('a.bin', new Uint8Array([42]), 1)
+      }
       const original = JSON.parse((await state.getMeta('pull-write:a'))!).stageId as string
       // Recovery must leave a known refusal available to normal scan/push, even
       // if the ledger base changed while the decision was held.
@@ -81,7 +96,19 @@ it.each(['count', 'bytes', 'supersede', 'delete'] as const)(
       await run(change('a'))
       expect(opens).toBe(1)
       const operation = async () => {
-        if (mode === 'count' || mode === 'bytes') {
+        if (mode === 'keep') await staging().keep(null)
+        else if (mode === 'settled') {
+          await state.put({
+            path: 'a.bin',
+            wirePath: 'a.bin',
+            fileId: 'a',
+            versionId: 'a-2',
+            sha: await sha256(new Uint8Array([42])),
+            size: 1,
+            mtime: 1,
+          })
+          await staging().afterPull()
+        } else if (mode === 'count' || mode === 'bytes') {
           await run(change('b', 2))
           await run(change('c', 3))
         } else {
@@ -109,7 +136,13 @@ it.each(['count', 'bytes', 'supersede', 'delete'] as const)(
         await operation()
       }
       expect(fs.stages.has(original), cut).toBe(false)
-      expect(fs.stages.size).toBe(mode === 'delete' ? 0 : mode === 'count' ? 2 : 1)
+      expect(fs.stages.size).toBe(
+        ['delete', 'keep', 'settled'].includes(mode) ? 0 : mode === 'count' ? 2 : 1
+      )
+      if (mode === 'keep' || mode === 'settled') {
+        expect(fs.snapshot().get('a.bin')).toEqual(new Uint8Array([42]))
+        expect(await staging().count()).toBe(0)
+      }
       const ids = new Set<string>()
       for (const key of await state.metadataKeys('pull-write:')) {
         const intent = JSON.parse((await state.getMeta(key))!)

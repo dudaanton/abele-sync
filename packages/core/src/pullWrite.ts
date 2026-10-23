@@ -146,6 +146,16 @@ export class PendingPullWrites {
       await this.retire(pending)
   }
 
+  /** An explicit staging decision resolves only the version the user was shown. */
+  async discardHeld(change: ChangeItem): Promise<void> {
+    const pending = await this.read(change.file_id)
+    if (
+      pending?.versionId === change.version_id &&
+      (pending.heldOrder !== undefined || pending.retiring)
+    )
+      await this.retire(pending)
+  }
+
   async retain(
     fileId: string,
     limits?: { count: number; bytes: number },

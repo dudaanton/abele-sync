@@ -12,6 +12,7 @@ import { applyStaged } from './puller.js'
 import type { ScanFilter } from './scanner.js'
 import { isEngineOwn } from './selective.js'
 import type { StateEntry, StateStore } from './state.js'
+import { PendingPullWrites } from './pullWrite.js'
 
 /**
  * What the engine does with its staged changes (`defer.ts`) around a sync and at the host's
@@ -183,6 +184,8 @@ export class Staging {
     const left: Staged[] = []
     for (const one of list) {
       const outcome = await this.keepOne(one)
+      if (outcome !== 'blocked')
+        await new PendingPullWrites(this.ctx.state, this.ctx.fs).discardHeld(one.change)
       if (outcome === 'kept') kept.push(one)
       else if (outcome === 'left') left.push(one)
     }
@@ -329,6 +332,7 @@ export class Staging {
       const entry = await state.byFileId(change.file_id)
       if ((entry?.versionId ?? null) === base) continue
       if (journal !== null && sentFor(journal.ops, change, entry)) continue
+      await new PendingPullWrites(state, this.ctx.fs).discardHeld(change)
       superseded.push(change.file_id)
       this.ctx.log(supersededLine(change, entry, sent !== null && sentFor(sent, change, entry)))
     }
