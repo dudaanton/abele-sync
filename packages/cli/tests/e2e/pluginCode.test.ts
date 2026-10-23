@@ -201,9 +201,7 @@ describe('daemon plugin code approval', () => {
     await syncOnce(pair.a)
     const beforeItems = (await clientFor(pair.a).manifest(null)).items
     const oldBefore = beforeItems.find((item) => item.path === code('local-delete'))!
-    const before = beforeItems.find(
-      (item) => item.path === code('local-rename')
-    )!
+    const before = beforeItems.find((item) => item.path === code('local-rename'))!
     const list = NodeFileSystem.prototype.listDirectories
     let injected = false
     const reused = vi

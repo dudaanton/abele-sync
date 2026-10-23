@@ -1,5 +1,12 @@
 import { expect, it } from 'vitest'
-import { pull, ExpectedWrites, EngineError, sha256, type EngineClient } from '../../src/index.js'
+import {
+  pull,
+  recoverPendingPullWrites,
+  ExpectedWrites,
+  EngineError,
+  sha256,
+  type EngineClient,
+} from '../../src/index.js'
 import type { ChangeItem } from '@abele/sync-protocol'
 import { MemoryStreamingFS } from './streamingMemoryFs.js'
 import { DurableStateStore } from './durableState.js'
@@ -120,8 +127,13 @@ it.each([
       expect(fs.snapshot().get('old.md')).toEqual(bytes)
       expect(fs.snapshot().has('new.md')).toBe(false)
       expect(await state.byFileId('sample')).toEqual(base)
-      expect(JSON.parse((await state.getMeta('pull-write:sample'))!).stageId).toBe(stage.id)
+      expect(JSON.parse((await state.getMeta('pull-write:sample'))!)).toMatchObject({
+        stageId: stage.id,
+        heldOrder: expect.any(Number),
+      })
       expect(fs.stages.has(stage.id)).toBe(true)
+      await recoverPendingPullWrites(fs, state, ['sample'], client)
+      expect(fs.snapshot().get('old.md')).toEqual(bytes)
       return points
     }
     for (const cut of await execute()) await execute(cut)

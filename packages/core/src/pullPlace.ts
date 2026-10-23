@@ -200,7 +200,7 @@ export class PullPlacer {
     if (!(await this.pending.authorizes(change, entry, target))) return false
     const pending = await this.pending.matching(change, entry)
     if (pending !== null && pending.target !== target) return false
-    if (pending?.stageId) return 'held'
+    if (pending?.stageId) return false
     if (!newest && entry !== null && (await this.edited(entry, target))) return false
     const from = entry === null || entry.path === target ? null : entry.path
     if (from !== null && (await this.fs.stat(from)) !== null) return false
@@ -398,7 +398,17 @@ export class PullPlacer {
       // A saved private stage cannot be replaced by a fresh buffered write or
       // by equal-byte adoption. Nor does it prove that a present source is still
       // the original object: it may have been removed/recreated during downtime.
-      if (!this.fs.reopenStage || !this.client.openVersion) return false
+      if (!this.fs.reopenStage) return false
+      const hold = async () => {
+        const stage = await this.fs.reopenStage!(pending.stageId!)
+        if (stage.offset === change.size) {
+          await stage.seal({ sha, size: change.size! })
+          await this.pending.retain(change.file_id, this.opts.heldStageLimits, this.opts.log)
+        }
+        this.opts.log?.(`pull: holding ${target}: pending stage lacks source publication authority`)
+        return false
+      }
+      if (!this.client.openVersion) return hold()
       if (pending.target !== target || pending.from !== from) return false
       if (
         from !== null &&
@@ -406,7 +416,7 @@ export class PullPlacer {
         caseKey(from) !== caseKey(target) &&
         (!pending.sourceIdentity || (await this.fs.fileIdentity?.(from)) !== pending.sourceIdentity)
       )
-        return false
+        return hold()
       return this.streamPlace(change, sha, entry, target, from, firstTarget, beforeFrom, local)
     }
     if (entry !== null && (await this.edited(entry, target))) return false
