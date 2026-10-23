@@ -1,7 +1,26 @@
 import { expect, it } from 'vitest'
 import { MemoryStateStore, type StateStore } from '../../src/state.js'
-import { transact } from '../../src/stateTransaction.js'
+import { afterStateCommit, savepoint, transact } from '../../src/stateTransaction.js'
 import { identityReplacement, rollbackIsolation } from '../helpers/stateTransactionContract.js'
+
+it('transfers successful savepoint acknowledgements and discards a caught rollback', async () => {
+  const state = new MemoryStateStore()
+  const acknowledged: string[] = []
+  await state.transaction(async (outer) => {
+    await expect(
+      transact(outer, async (tx) => {
+        afterStateCommit(tx, () => acknowledged.push('rolled back'))
+        throw new Error('child rollback')
+      })
+    ).rejects.toThrow('child rollback')
+    await savepoint(outer, async (tx) => {
+      await tx.setMeta!('savepoint', 'committed')
+      afterStateCommit(tx, () => acknowledged.push('savepoint'))
+    })
+    expect(acknowledged).toEqual([])
+  })
+  expect(acknowledged).toEqual(['savepoint'])
+})
 
 it('keeps identity indexes consistent through path replacement and nested publication', async () => {
   await identityReplacement(new MemoryStateStore())

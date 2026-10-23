@@ -32,6 +32,10 @@ export interface Journal {
 export interface StateStore {
   /** True only when transaction passes an isolated, revocable capability. */
   readonly transactionScoped?: boolean
+  /** Transaction capabilities may register in-memory acknowledgements with their
+   * durable owner. Nested success transfers callbacks; rollback discards them.
+   * Hosts without this port must reload owners after commit. */
+  afterCommit?(acknowledge: () => void): void
   /** Optional host claim attribution for durable in-flight installation intents. */
   effectOwner?(): string | undefined
   get(path: string): Promise<StateEntry | null>
@@ -211,6 +215,7 @@ export class MemoryStateStore implements StateStore {
       if (revision !== this.revision) throw changedState()
       // Publication is synchronous: no unrelated task can interleave patch mutations.
       for (const op of tx.mutations) this.apply(op)
+      tx.acknowledgeCommit()
       return result
     } finally {
       tx.close()

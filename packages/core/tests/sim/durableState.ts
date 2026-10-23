@@ -43,6 +43,11 @@ export class DurableStateStore implements StateStore {
   get(path: string) {
     return this.access('get', (s) => s.get(path))
   }
+  afterCommit(acknowledge: () => void): void {
+    if (!this.active) throw new Error('expired transaction epoch')
+    this.scheduler.fence(this.epoch)
+    this.view.afterCommit?.(acknowledge)
+  }
   byFileId(id: string) {
     return this.access('byFileId', (s) => s.byFileId(id))
   }

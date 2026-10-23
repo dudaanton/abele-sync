@@ -8,6 +8,7 @@ import { concurrentPlacement } from '../../../core/tests/helpers/concurrentPlace
 import type { Journal, StateEntry } from '@abele/sync-core'
 import { SqliteStateStore } from '../../src/sqliteState.js'
 import { MemoryFileSystem, refreshLocalPaths, reconcileGeneration } from '@abele/sync-core'
+import { afterStateCommit, transact } from '@abele/sync-core'
 import {
   identityReplacement,
   rollbackIsolation,
@@ -22,6 +23,37 @@ const entry = (over: Partial<StateEntry> = {}): StateEntry => ({
   size: 5,
   mtime: 1000,
   ...over,
+})
+
+it('D-214 acknowledges nested work only after the raw SQLite owner commits', async () => {
+  let acknowledged = 0
+  const work = () =>
+    store.transaction(async (outer) => {
+      await transact(outer, async (tx) => {
+        await tx.setMeta!('owned', 'value')
+        afterStateCommit(tx, () => {
+          acknowledged++
+        })
+      })
+      expect(acknowledged).toBe(0)
+    })
+  await expect(
+    store.transaction(async (outer) => {
+      await transact(outer, async (tx) => {
+        await tx.setMeta!('owned', 'rolled back')
+        afterStateCommit(tx, () => {
+          acknowledged++
+        })
+      })
+      expect(acknowledged).toBe(0)
+      throw new Error('outer rollback')
+    })
+  ).rejects.toThrow('outer rollback')
+  expect(acknowledged).toBe(0)
+  expect(await store.getMeta('owned')).toBeNull()
+  await work()
+  expect(acknowledged).toBe(1)
+  expect(await store.getMeta('owned')).toBe('value')
 })
 
 const journal = (over: Partial<Journal> = {}): Journal => ({

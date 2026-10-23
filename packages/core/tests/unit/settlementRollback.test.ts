@@ -5,6 +5,31 @@ import { transact } from '../../src/stateTransaction.js'
 import { commitAppliedSettlement } from '../../src/settlement.js'
 import { change } from './holdFixture.js'
 
+it('D-214 keeps nested persistence dirty until a raw outer host transaction commits', async () => {
+  const state = new MemoryStateStore()
+  const holds = new PullHolds(state)
+  await holds.load()
+  const item = await change(0)
+  holds.put({ change: item, base: null, firstSeq: item.seq })
+  await expect(
+    state.transaction(async (outer) => {
+      await transact(outer, (tx) => holds.persist(10, true, tx))
+      expect(holds.dirty).toBe(true)
+      throw new Error('rollback')
+    })
+  ).rejects.toThrow('rollback')
+  expect(holds.dirty).toBe(true)
+  expect(await state.getMeta('pull-held-progress')).toBeNull()
+  await state.transaction(async (outer) => {
+    await transact(outer, (tx) => holds.persist(10, true, tx))
+    expect(holds.dirty).toBe(true)
+  })
+  expect(holds.dirty).toBe(false)
+  const reopened = new PullHolds(state)
+  await reopened.load()
+  expect(reopened.files.get(item.file_id)).toEqual(item)
+})
+
 it('retains the unresolved patch when publication fails after hold persistence', async () => {
   const state = new MemoryStateStore()
   const holds = new PullHolds(state)

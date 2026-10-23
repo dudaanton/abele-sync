@@ -17,6 +17,7 @@ export class StateTransaction implements StateStore {
   readonly transactionScoped = true
   readonly mutations: StateMutation[] = []
   private active = true
+  private acknowledgements: Array<() => void> = []
   private entries = new Map<string, StateEntry | null>()
   private ids = new Map<string, string>()
   private wirePaths = new Map<string, string>()
@@ -31,6 +32,24 @@ export class StateTransaction implements StateStore {
   ) {}
   close(): void {
     this.active = false
+    this.acknowledgements = []
+  }
+  afterCommit(acknowledge: () => void): void {
+    this.check()
+    this.acknowledgements.push(acknowledge)
+  }
+  /** Host-only: call after the outermost patch has durably committed. */
+  acknowledgeCommit(): void {
+    this.check()
+    const callbacks = this.acknowledgements
+    this.acknowledgements = []
+    for (const acknowledge of callbacks) acknowledge()
+  }
+  /** A savepoint published only into its parent, not into durable storage. */
+  acknowledgeThrough(parent: StateStore): void {
+    this.check()
+    for (const acknowledge of this.acknowledgements) parent.afterCommit?.(acknowledge)
+    this.acknowledgements = []
   }
   private check(): void {
     if (!this.active) throw new EngineError('conflict', 'state transaction capability has expired')
@@ -146,6 +165,7 @@ export class StateTransaction implements StateStore {
       this.check()
       if (version !== this.mutations.length) throw changedState()
       for (const op of child.mutations) this.apply(op)
+      child.acknowledgeThrough(this)
       return result
     } finally {
       child.close()
@@ -193,13 +213,12 @@ export const changedState = () =>
   new EngineError('conflict', 'state changed outside the transaction; retry')
 
 const legacyQueue = new WeakMap<StateStore, Promise<unknown>>()
-const committed = new WeakMap<StateStore, Array<() => void>>()
 
 /** In-memory acknowledgements belong to the outer durable commit, not to the
  * successful return of a nested transaction callback. Unknown host callbacks
  * conservatively leave their patches dirty, so retry cannot lose work. */
 export function afterStateCommit(state: StateStore, acknowledge: () => void): void {
-  committed.get(state)?.push(acknowledge)
+  state.afterCommit?.(acknowledge)
 }
 /** A per-record savepoint inside an existing transaction, including legacy hosts.
  * Failed work never publishes its patch into the surrounding transaction. */
@@ -229,6 +248,7 @@ export async function savepoint<T>(
           break
       }
     }
+    patch.acknowledgeThrough(state)
     return result
   } finally {
     patch.close()
@@ -240,27 +260,15 @@ export async function savepoint<T>(
  * fallback cannot isolate writes made directly by another host task. Concurrent hosts
  * must implement transactionScoped and pass a distinct handle (never the root store). */
 export function transact<T>(state: StateStore, work: (tx: StateStore) => Promise<T>): Promise<T> {
-  const parent = committed.get(state)
   const run = async () => {
-    const acknowledgements: Array<() => void> = []
-    const scoped = async (tx: StateStore) => {
-      committed.set(tx, acknowledgements)
-      try {
-        return await work(tx)
-      } finally {
-        committed.delete(tx)
-      }
-    }
     const result = await state.transaction((tx) => {
       if (state.transactionScoped && (!tx || tx === state))
         throw new EngineError(
           'protocol',
           'scoped state store did not provide a transaction capability'
         )
-      return tx === undefined || tx === state ? legacyWork(state, scoped) : scoped(tx)
+      return tx === undefined || tx === state ? legacyWork(state, work) : work(tx)
     })
-    if (parent) for (const acknowledge of acknowledgements) parent.push(acknowledge)
-    else for (const acknowledge of acknowledgements) acknowledge()
     return result
   }
   if (state.transactionScoped) return run()

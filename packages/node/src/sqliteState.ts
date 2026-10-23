@@ -406,6 +406,7 @@ export class SqliteStateStore implements StateStore, ExternalStatePort {
           throw cause
         }
       }
+      tx.acknowledgeCommit()
       return result
     } finally {
       tx.close()

@@ -51,17 +51,31 @@ it('acknowledges retry retirement only after the outer settlement commits', asyn
   expect(retries.has('a.md')).toBe(false)
 })
 
-it('leaves raw host transaction acknowledgement to an explicit reload', async () => {
+it('leaves a host without an acknowledgement port to an explicit reload', async () => {
   const { state, retries } = fixture()
+  const withoutAcknowledgement = (tx: import('../../src/state.js').StateStore) =>
+    new Proxy(tx, {
+      get(target, key) {
+        if (key === 'afterCommit') return undefined
+        const value = Reflect.get(target, key)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
   await expect(
     state.transaction(async (tx) => {
-      await retries.failed('a.md', 'pull', new Error('disk failure'), false, tx)
+      await retries.failed(
+        'a.md',
+        'pull',
+        new Error('disk failure'),
+        false,
+        withoutAcknowledgement(tx)
+      )
       throw new Error('host rollback')
     })
   ).rejects.toThrow('host rollback')
   expect(retries.has('a.md')).toBe(false)
   await state.transaction((tx) =>
-    retries.failed('a.md', 'pull', new Error('disk failure'), false, tx)
+    retries.failed('a.md', 'pull', new Error('disk failure'), false, withoutAcknowledgement(tx))
   )
   expect(retries.has('a.md')).toBe(false)
   await retries.load()
