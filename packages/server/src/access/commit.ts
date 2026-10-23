@@ -1,3 +1,4 @@
+import { ownsBlob } from './blobAuthority.js'
 import { addDaily } from '../history/activity.js'
 import { createHash } from 'node:crypto'
 import {
@@ -51,27 +52,7 @@ export async function authorizeOp(
     throw new AbeleError('forbidden', 'groups do not authorize directory operations')
   // Check byte ownership before opening a candidate's frontmatter, including guessed SHAs.
   if ('sha' in op) {
-    const uploaded = await ctx.trx
-      .selectFrom('blob_uploads')
-      .select('sha')
-      .where('vault_id', '=', ctx.vaultId)
-      .where('device_id', '=', principal.token.id)
-      .where('sha', '=', op.sha)
-      .executeTakeFirst()
-    const named = uploaded
-      ? uploaded
-      : await ctx.trx
-          .selectFrom('scope_versions')
-          .innerJoin('versions', 'versions.id', 'scope_versions.version_id')
-          .innerJoin('scope_members', (join) =>
-            join
-              .onRef('scope_members.file_id', '=', 'scope_versions.file_id')
-              .onRef('scope_members.scope_id', '=', 'scope_versions.scope_id')
-          )
-          .select('versions.id')
-          .where('scope_versions.scope_id', '=', principal.scope.id)
-          .where('versions.blob_sha', '=', op.sha)
-          .executeTakeFirst()
+    const named = await ownsBlob(ctx.trx, principal, op.sha)
     if (!named)
       throw new AbeleError('not_found', 'upload these bytes through this token before committing')
   }

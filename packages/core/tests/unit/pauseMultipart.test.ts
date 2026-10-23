@@ -41,5 +41,5 @@ it('cancels an in-flight buffered multipart upload before another part or comple
   controller.abort()
   release()
   expect(await upload).toBeInstanceOf(Error)
-  expect(requests.map((path) => path.split('/').at(-1))).toEqual(['begin', '0'])
+  expect(requests.map((path) => path.split('/').at(-1))).toEqual(['a'.repeat(64), 'begin', '0'])
 })

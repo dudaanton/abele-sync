@@ -1,3 +1,4 @@
+import { ownsBlob } from '../../access/blobAuthority.js'
 import { deleteScope } from '../../access/deleteScope.js'
 import { createHash } from 'node:crypto'
 import {
@@ -210,6 +211,19 @@ export function registerV2SyncRoutes(app: FastifyInstance, deps: AppDeps) {
       .header('accept-ranges', 'bytes')
       .code(200)
       .send()
+  })
+  app.head<{ Params: { sha: string } }>('/v2/uploads/:sha', async (request, reply) => {
+    const sha = ShaSchema.parse(request.params.sha)
+    const available = await withToken(
+      accessDeps(deps, request),
+      bearerKey(request),
+      async (tx, p) => {
+        requireWrite(p)
+        // Never probe the shared store before proving this token owns the bytes.
+        return (await ownsBlob(tx.db, p, sha)) && (await deps.store.has(sha))
+      }
+    )
+    return reply.code(available ? 200 : 404).send()
   })
   app.put<{ Params: { sha: string } }>('/v2/uploads/:sha', async (request, reply) => {
     const sha = ShaSchema.parse(request.params.sha)

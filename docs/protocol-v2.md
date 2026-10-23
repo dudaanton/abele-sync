@@ -403,6 +403,7 @@ conflict outputs. Credential and inherited-boundary checks precede receipt repla
 
 | Route                                            | Operation                                                                                              |
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `HEAD /v2/uploads/:sha`                          | 200 only for stored bytes owned by this token or its currently readable scope; otherwise 404           |
 | `PUT /v2/uploads/:sha`                           | Raw `application/octet-stream`, 201 `{sha,size}`; always supply actual bytes, no hash-only shortcut    |
 | `POST /v2/uploads/:sha/begin`                    | `{size}`, 201 retained `UploadBeginResponse` with upload ID, part size/count and received part numbers |
 | `PUT /v2/uploads/:sha/:id/:part`                 | Raw part bytes, 204; upload is bound to token, space and digest                                        |
@@ -421,3 +422,13 @@ History/restore UI, group assets and root settings endpoints remain later-stage
 work. The retained merge algorithm still depends on `work/server-merge`; expected
 failures cover first-connect divergence, stale line merge and original merge
 mtime. The token-item migration and legacy connection compatibility are described above.
+
+Upload recovery checks authorized SHA availability before sending bodies, including
+after a lost completion or commit response. HEAD does not grant an upload entitlement:
+it uses exactly the commit byte-ownership rule and checks active credentials/scope
+before inspecting storage. An unauthorized digest and a missing digest both return
+404; no global SHA oracle is exposed. Clients need a server with this route to avoid
+retransfers after completed uploads (older servers return 404 and remain compatible).
+For partial multipart uploads, begin returns durable received parts. After a lost
+part acknowledgement, re-query that state before retrying the body. No local-only
+cache or unacknowledged transfer is proof of server possession.

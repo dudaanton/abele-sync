@@ -554,9 +554,9 @@ export class V2EngineClient implements EngineClient {
   async commit(ops: CommitOp[], key: string) {
     return (await this.commitRaw(ops, key)).body
   }
-  // A digest is never read authority. Always establish this token's upload entitlement.
-  async hasBlob(_sha: string) {
-    return false
+  // The server checks token/scope entitlement before consulting its shared store.
+  async hasBlob(sha: string, signal?: AbortSignal) {
+    return (await this.http.send('HEAD', `/v2/uploads/${sha}`, { signal }, [404])).status === 200
   }
   async getBlob(sha: string, signal?: AbortSignal): Promise<Uint8Array> {
     let file = this.byteSources.get(sha)
@@ -590,6 +590,11 @@ export class V2EngineClient implements EngineClient {
   }
   async putBlob(sha: string, bytes: Uint8Array, signal?: AbortSignal) {
     signal?.throwIfAborted()
+    if (await this.hasBlob(sha, signal)) {
+      if ((await sha256(bytes)) !== sha)
+        throw new AbeleError('hash_mismatch', 'source content changed')
+      return
+    }
     const path = `/v2/uploads/${sha}`
     if (bytes.length <= this.http.simpleUploadBytes) {
       await this.http.send('PUT', path, { bytes, signal })
@@ -649,6 +654,10 @@ export class V2EngineClient implements EngineClient {
         throw new AbeleError('hash_mismatch', 'source content changed')
       await source.assertUnchanged()
       signal?.throwIfAborted()
+      if (await this.hasBlob(expected.sha, signal)) {
+        await source.assertUnchanged()
+        return
+      }
       const path = `/v2/uploads/${expected.sha}`
       if (expected.size <= Math.min(maxChunkBytes, this.http.simpleUploadBytes)) {
         const bytes = expected.size === 0 ? new Uint8Array() : await read(0, expected.size)
@@ -687,6 +696,28 @@ export class V2EngineClient implements EngineClient {
               signal?.throwIfAborted()
               if (!(error instanceof EngineError && error.code === 'offline') || attempt >= 2)
                 throw error
+              if (await this.hasBlob(expected.sha, signal)) {
+                await source.assertUnchanged()
+                return
+              }
+              const resumed = await this.http.json(
+                UploadBeginResponseSchema,
+                'POST',
+                path + '/begin',
+                {
+                  json: { size: expected.size, max_part_bytes: maxChunkBytes },
+                  signal,
+                }
+              )
+              if (
+                resumed.upload_id !== upload.upload_id ||
+                resumed.part_size !== upload.part_size ||
+                resumed.parts !== parts ||
+                (resumed.received ?? []).some((part) => part < 0 || part >= parts)
+              )
+                throw new EngineError('protocol', 'upload changed during part recovery')
+              for (const accepted of resumed.received ?? []) received.add(accepted)
+              if (received.has(part)) break
             }
           }
         }
