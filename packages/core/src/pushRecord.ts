@@ -14,7 +14,7 @@ import type { PushReport, Refusal, ResumeOptions } from './pusher.js'
 import type { Aside, Verdicts } from './pushVerdicts.js'
 import type { StateEntry, StateStore } from './state.js'
 import { rejectedOp } from './pushRefusal.js'
-import { sourceRecreation } from './sourceRecreation.js'
+import { isRecreatedTarget, sourceRecreation } from './sourceRecreation.js'
 
 /**
  * A commit's verdicts carried onto this disk and into this state, one op at a time, inside the
@@ -130,7 +130,7 @@ export class VerdictRecorder {
     }
     const sent = sentBy(op, previous)
     const recreated =
-      previous !== null && (await sourceRecreation(this.state, previous))?.target === target
+      previous !== null && isRecreatedTarget(await sourceRecreation(this.state, previous), target)
     if (
       staged === undefined &&
       !(await this.disk.place(

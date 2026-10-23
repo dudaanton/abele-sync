@@ -35,7 +35,7 @@ import { checkCancellation } from './cancellation.js'
 import { isFinalForBatch } from './commitErrors.js'
 import { rejectedOp } from './pushRefusal.js'
 import { requestReconciliation } from './reconciliation.js'
-import { sourceRecreation } from './sourceRecreation.js'
+import { isRecreatedTarget, sourceRecreation } from './sourceRecreation.js'
 export { batches } from './pushBatches.js'
 
 /**
@@ -744,7 +744,10 @@ class Pusher {
           result.path === op.to_path
         ) {
           const base = await this.state.byFileId(op.file_id)
-          if (base !== null && (await sourceRecreation(this.state, base))?.target === op.to_path)
+          if (
+            base !== null &&
+            isRecreatedTarget(await sourceRecreation(this.state, base), op.to_path)
+          )
             releasing.add(base.wirePath)
         }
       }

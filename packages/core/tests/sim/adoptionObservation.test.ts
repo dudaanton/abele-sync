@@ -251,12 +251,15 @@ it('classifies and uploads a recreated source under its own identity across ever
 }, 20000)
 
 it.each(
-  ['keep', 'edit', 'delete'].flatMap((source) =>
-    ['keep', 'edit', 'delete'].map((target) => ({ source, target }))
+  ['new.md', 'cafe\u0301.md'].flatMap((diskTarget) =>
+    ['keep', 'edit', 'delete'].flatMap((source) =>
+      ['keep', 'edit', 'delete'].map((target) => ({ source, target, diskTarget }))
+    )
   )
 )(
-  'keeps both identities through source=$source target=$target and every settlement crash',
-  async ({ source, target }) => {
+  'keeps both identities through source=$source target=$target and every settlement crash (disk=$diskTarget)',
+  async ({ source, target, diskTarget }) => {
+    const wireTarget = diskTarget.normalize('NFC')
     const a = new TextEncoder().encode('sample A'),
       b = new TextEncoder().encode('sample B'),
       c = new TextEncoder().encode('sample C')
@@ -268,7 +271,7 @@ it.each(
       let fs = new MemoryStreamingFS(scheduler, { fs: disk, stages: new Map(), dirs: new Map() }),
         state = new DurableStateStore(scheduler)
       await fs.writeAtomic('old.md', a, 1000)
-      await fs.move('old.md', 'new.md')
+      await fs.move('old.md', diskTarget)
       await state.put({
         path: 'old.md',
         wirePath: 'old.md',
@@ -299,7 +302,7 @@ it.each(
               file_id: 'original',
               version_id: 'moved',
               op: 'move',
-              path: 'new.md',
+              path: wireTarget,
               prev_path: 'old.md',
               sha: shaA,
               size: 8,
@@ -344,7 +347,7 @@ it.each(
             for (const [path, action] of ops.some((op) => op.op === 'create')
               ? [
                   ['old.md', source],
-                  ['new.md', target],
+                  [diskTarget, target],
                 ]
               : []) {
               if (action === 'edit') await disk.writeAtomic(path!, c, 1000)
@@ -386,10 +389,13 @@ it.each(
       expect(fs.snapshot().get('old.md'), cut).toEqual(
         source === 'delete' ? undefined : source === 'edit' ? c : b
       )
-      expect(fs.snapshot().get('new.md'), cut).toEqual(
+      expect(fs.snapshot().get(diskTarget), cut).toEqual(
         target === 'delete' ? undefined : target === 'edit' ? c : a
       )
-      expect(await state.byFileId('original'), cut).toMatchObject({ path: 'new.md', sha: shaA })
+      const original = await state.byFileId('original')
+      expect(original, cut).toMatchObject({ wirePath: wireTarget, sha: shaA })
+      expect(original!.path.normalize('NFC'), cut).toBe(wireTarget)
+      if (target !== 'delete') expect(original!.path, cut).toBe(diskTarget)
       expect(await state.get('old.md'), cut).toMatchObject({ fileId: 'recreated', sha: shaB })
       const next = await scan(fs, state, { excluded: () => false })
       const expected = [

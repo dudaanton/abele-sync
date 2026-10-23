@@ -1,4 +1,5 @@
 import type { StateEntry, StateStore } from './state.js'
+import { wirePath } from './localPaths.js'
 
 /** An absent tracked source reappeared while its offline move target was observed.
  * Keep the old ledger until a scan classifies the move and the independent create. */
@@ -8,6 +9,12 @@ export interface SourceRecreation {
 }
 
 export const sourceRecreationKey = (id: string) => `pull-source-recreated:${id}`
+
+/** Match the portable destination, including when its physical spelling is now
+ * absent. This transfers ledger ownership only; content checks still own writes. */
+export function isRecreatedTarget(record: SourceRecreation | null, path: string): boolean {
+  return record !== null && wirePath(record.target) === wirePath(path)
+}
 
 export async function sourceRecreation(
   state: StateStore,
