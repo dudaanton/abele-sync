@@ -120,6 +120,7 @@ for (const mode of ['buffered', 'streamed', 'move', 'eviction', 'delete'] as con
             expected: new ExpectedWrites(),
             filter: { excluded: () => false },
             protectMissing: true,
+            ...(mode === 'streamed' ? { prefetchBytes: 0 } : {}),
           })
         } catch (error) {
           if (!(error instanceof EngineError && error.code === 'conflict')) throw error

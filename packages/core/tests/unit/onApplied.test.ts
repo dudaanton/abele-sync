@@ -259,6 +259,7 @@ it('reports streamed pull only after AtomicStage commit and ledger commit', asyn
     dirty: new Set(),
     expected: new ExpectedWrites(),
     onApplied,
+    prefetchBytes: 0,
   })
   expect(order).toEqual(['commit', 'hook'])
   expect(observed).toEqual([bytes, 'v'])

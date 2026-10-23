@@ -1,4 +1,5 @@
 import { expect, it, vi } from 'vitest'
+import { decorateStateTransactions } from '../helpers/stateTransactions.js'
 import { SyncEngine } from '../../src/engine.js'
 import { MemoryFileSystem, type FileSystem } from '../../src/fs.js'
 import { MemoryStateStore } from '../../src/state.js'
@@ -214,11 +215,13 @@ it.each(['inspection', 'intent', 'delete-intent'] as const)(
       if (fetched && boundary === 'inspection') engine.pause()
       return result
     }
-    const metadata = state.setMeta.bind(state)
-    state.setMeta = async (key, value) => {
-      await metadata(key, value)
-      if (key.startsWith('pull-base:') && boundary !== 'inspection') engine.pause()
-    }
+    decorateStateTransactions(state, (tx) => {
+      const metadata = tx.setMeta!.bind(tx)
+      tx.setMeta = async (key, value) => {
+        await metadata(key, value)
+        if (key.startsWith('pull-base:') && boundary !== 'inspection') engine.pause()
+      }
+    })
     await engine.sync().catch(() => {})
     if (boundary !== 'delete-intent') expect(fetched).toBe(true)
     expect(write).not.toHaveBeenCalled()

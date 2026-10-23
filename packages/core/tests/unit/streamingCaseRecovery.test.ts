@@ -95,6 +95,7 @@ it('resumes a case-only rename when both names stat the same file after a crash'
       filter: { excluded: () => false },
       dirty: new Set(),
       expected: new ExpectedWrites(),
+      prefetchBytes: 0,
     })
   ).rejects.toThrow('crash')
   crash = false

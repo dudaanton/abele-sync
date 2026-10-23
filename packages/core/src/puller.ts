@@ -84,6 +84,8 @@ export interface PullOptions {
    * runs that fit, one file bigger than the whole budget making a run of its own. 64 MiB when
    * unset. A first pull of a vault of large attachments would otherwise hold a whole page —
    * up to a thousand files — in memory at once.
+   * Immutable sources no larger than this limit and one chunk may use conditional
+   * buffered publication. Zero forces recoverable streaming stages instead.
    */
   prefetchBytes?: number
   /** The digest, `sha256` by default. Local bytes and downloaded ones alike are checked with it. */

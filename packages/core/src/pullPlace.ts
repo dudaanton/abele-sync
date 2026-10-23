@@ -8,9 +8,15 @@ import { bytesFor, settledStat } from './apply.js'
 import type { EngineClient } from './engineClient.js'
 import { EngineError } from './errors.js'
 import type { FileInfo, FileSystem, ConditionalFileOperation } from './fs.js'
-import { MAX_CHUNK_BYTES, type AtomicStage } from './streaming.js'
 import { fingerprintFile } from './fs.js'
-import { chunks, downloadToStage, TransferBudget, type ChunkSource } from './streaming.js'
+import {
+  chunks,
+  MAX_CHUNK_BYTES,
+  downloadToStage,
+  TransferBudget,
+  type ChunkSource,
+  type AtomicStage,
+} from './streaming.js'
 import type { PullOptions } from './puller.js'
 import { PendingPullWrites } from './pullWrite.js'
 import type { StateEntry, StateStore } from './state.js'
@@ -273,10 +279,11 @@ export class PullPlacer {
   }
 
   /** `remove`, with something in the way reported rather than thrown. */
-  private async effect(op: ConditionalFileOperation): Promise<boolean> {
+  private async effect(op: ConditionalFileOperation, prepared = false): Promise<boolean> {
     // A new save at a formerly absent name must not become a clean pull base
     // on retry before scanning classifies it.
-    await this.state.setMeta?.(`pull-base:${op.path}`, JSON.stringify({ base: op.expected }))
+    if (!prepared)
+      await this.state.setMeta?.(`pull-base:${op.path}`, JSON.stringify({ base: op.expected }))
     checkCancellation(this.opts.signal)
     return (await this.fs.conditionalFile?.(op)) ?? false
   }
@@ -410,12 +417,57 @@ export class PullPlacer {
     // The bytes before anything on the disk moves: a server whose blob is not what it says
     // leaves the file where it was, and the change is held with the reason in the log.
     const beforeTarget = state.free
-    await this.state.setMeta?.(`pull-base:${target}`, JSON.stringify({ base: entry }))
     if (!state.removed && !sameStat(firstTarget, beforeTarget)) return false
-    const streaming = this.fs.beginAtomicWrite && this.fs.reopenStage && this.client.openVersion && change.size !== null
+    const streaming =
+      this.fs.beginAtomicWrite &&
+      this.fs.reopenStage &&
+      this.client.openVersion &&
+      change.size !== null
     let bytes = streaming ? await this.smallLocalBytes(sha, local) : null
-    if (streaming && bytes === null) {
+    // Hosts with conditional buffered publication do not need a recoverable stage
+    // for a body bounded to one chunk. Read immutable versions through the same
+    // bounded source API; never turn this into an unbounded getBlob call.
+    const bufferVersion =
+      streaming &&
+      this.bufferedLimit > 0 &&
+      change.size! <= this.bufferedLimit &&
+      this.fs.conditionalFile !== undefined
+    if (streaming && bytes === null && !bufferVersion) {
       return this.streamPlace(change, sha, entry, target, from, beforeTarget, beforeFrom, local)
+    }
+    // One acknowledged preparation contains the exact base and installation
+    // receipt. A move still has separate source/destination effect boundaries.
+    const receipt = crypto.randomUUID()
+    if (from === null) {
+      await transact(this.state, async (tx) => {
+        await tx.setMeta?.(`pull-base:${target}`, JSON.stringify({ base: entry }))
+        await new PendingPullWrites(tx, this.fs, this.sequenceKnown).prepare(
+          change,
+          entry,
+          target,
+          from,
+          undefined,
+          receipt
+        )
+      })
+    } else {
+      await this.state.setMeta?.(`pull-base:${target}`, JSON.stringify({ base: entry }))
+    }
+    if (bytes === null && bufferVersion) {
+      bytes = await this.smallBytes(
+        await this.client.openVersion!(
+          change.file_id,
+          change.version_id,
+          { sha, size: change.size! },
+          this.opts.signal
+        ),
+        sha,
+        change.size!
+      )
+      if (bytes === null) {
+        this.disbelieve(sha)
+        return false
+      }
     }
     if (entry === null || entry.sha !== sha || (firstTarget === null && beforeFrom === null)) {
       bytes ??= await this.bytesOf(sha, fetched, local)
@@ -470,7 +522,6 @@ export class PullPlacer {
         if (bytes === null) return false
         // The fallback above can await a download too, after a move. A newly
         // created or edited target belongs to the user, not to this old plan.
-        if (from === null) await this.pending.prepare(change, entry, target, from)
         // Saving intent is awaited too; a local edit made during it is not ours to overwrite.
         if (
           !sameStat(have, await this.fs.stat(target)) ||
@@ -480,16 +531,21 @@ export class PullPlacer {
           return false
         }
         await this.recheckTarget(change.path, target)
-        const receipt = crypto.randomUUID()
-        await this.pending.prepare(change, entry, target, from, undefined, receipt)
+        if (from !== null)
+          await this.pending.prepare(change, entry, target, from, undefined, receipt)
         this.opts.expected.expect(target, sha)
         if (
-          !(await this.effect({
-            path: target,
-            expected:
-              have === null ? null : { size: have.size, mtime: have.mtime, sha: entry?.sha ?? sha },
-            effect: { kind: 'write', bytes, mtime: change.mtime ?? 0, receipt },
-          }))
+          !(await this.effect(
+            {
+              path: target,
+              expected:
+                have === null
+                  ? null
+                  : { size: have.size, mtime: have.mtime, sha: entry?.sha ?? sha },
+              effect: { kind: 'write', bytes, mtime: change.mtime ?? 0, receipt },
+            },
+            from === null
+          ))
         ) {
           this.opts.expected.clear(target)
           return false
@@ -657,6 +713,8 @@ export class PullPlacer {
           return null
         return await this.fs.openRead(entry.path)
       }
+      // Legacy whole-file reads cannot supply bounded replay of a large copy.
+      // Prefer the remote immutable source instead of assembling local contents.
       const have = await this.fs.stat(entry.path)
       if (!have || have.size > this.bufferedLimit) return null
       const bytes = await this.fs.read(entry.path)
@@ -771,7 +829,7 @@ export class PullPlacer {
     const recorded = await transact(this.state, async (tx) => {
       if (!(await new PendingPullWrites(tx, this.fs).authorizes(change, base, target))) return false
       const current = await tx.byFileId(change.file_id)
-      if (this.sequenceKnown && await olderPull(tx, change, current)) return false
+      if (this.sequenceKnown && (await olderPull(tx, change, current))) return false
       let occupant = await pathOccupant(this.fs, tx, target, change.file_id)
       // Only a fresh authoritative snapshot may replace a verified equal
       // occupant. Saved intents cannot take this branch, even with equal bytes.

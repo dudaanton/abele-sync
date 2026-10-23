@@ -255,3 +255,63 @@ it('copies a known small bounded source locally without allocating a stage or do
   expect(await fs.stat('existing.md')).toMatchObject({ mtime: 1000 })
 })
 
+it.each([false, true])(
+  'publishes first-pull state in at most two acknowledged durability phases per file (bounded=%s)',
+  async (bounded) => {
+    const fs = bounded ? new MemoryStreamingFS(new SimScheduler(1)) : new MemoryFileSystem(),
+      state = new MemoryStateStore()
+    const versions = await Promise.all(
+      Array.from({ length: 32 }, async (_, i) => {
+        const bytes = new Uint8Array([i])
+        return {
+          file_id: `sample-${i}`,
+          version_id: 'v1',
+          path: `sample-${i}.bin`,
+          sha: await sha256(bytes),
+          size: 1,
+          mtime: 1000,
+          seq: i + 1,
+          kind: 'attachment' as const,
+          bytes,
+        }
+      })
+    )
+    const mutations = new Map<string, number>()
+    for (const name of ['setMeta', 'setCursor', 'put', 'delete', 'transaction'] as const) {
+      const original = state[name].bind(state)
+      Object.assign(state, {
+        [name]: (...args: unknown[]) => {
+          const key = name === 'setMeta' ? 'meta:' + String(args[0]).split(':')[0] : name
+          mutations.set(key, (mutations.get(key) ?? 0) + 1)
+          return Reflect.apply(original, state, args)
+        },
+      })
+    }
+    const report = await pull(
+      {
+        manifest: async () => ({
+          items: versions.map(({ bytes: _bytes, ...item }) => item),
+          head_seq: 32,
+          next: null,
+        }),
+        changes: async () => ({ items: [], head_seq: 32, next_since: 32 }),
+        ...(!bounded
+          ? { getBlob: async (sha: string) => versions.find((one) => one.sha === sha)!.bytes }
+          : {}),
+        ...(bounded
+          ? {
+              openVersion: async (id: string) =>
+                source(versions.find((one) => one.file_id === id)!.bytes),
+            }
+          : {}),
+      } as unknown as EngineClient,
+      fs,
+      state,
+      options()
+    )
+    const durable = [...mutations.values()].reduce((a, b) => a + b, 0)
+    expect(report.applied).toBe(32)
+    expect(durable, JSON.stringify(Object.fromEntries(mutations))).toBeLessThanOrEqual(2 * 32 + 5)
+    for (const version of versions) expect(await fs.read(version.path)).toEqual(version.bytes)
+  }
+)

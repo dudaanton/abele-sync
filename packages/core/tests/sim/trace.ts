@@ -44,7 +44,7 @@ export async function replay(trace: Trace) {
             if (
               mark < 0 &&
               point.startsWith(
-                action.kind === 'pausePull' ? 'fs.stage.commit#' : 'net.after.GET./v2/manifest#'
+                action.kind === 'pausePull' ? 'fs.conditionalFile#' : 'net.after.GET./v2/manifest#'
               )
             ) {
               mark = scheduler.points.length - 1
@@ -61,8 +61,9 @@ export async function replay(trace: Trace) {
             await stopping
             if (mark < 0) throw new Error('pull mark not reached')
             haltedEffects(
-              scheduler.points.slice(mark + 1).filter((p) => p.startsWith('fs.stage.commit#'))
-                .length,
+              scheduler.points
+                .slice(mark + 1)
+                .filter((p) => /^fs\.(stage.commit|conditionalFile)#/.test(p)).length,
               4
             )
           } finally {

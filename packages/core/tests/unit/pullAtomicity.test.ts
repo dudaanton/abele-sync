@@ -328,11 +328,13 @@ it('buffered publication preserves an edit made during the final path recheck', 
   const f = await fixture(),
     get = f.state.getMeta.bind(f.state)
   let armed = false
-  const put = f.state.setMeta.bind(f.state)
-  f.state.setMeta = async (key, value) => {
-    await put(key, value)
-    if (key === 'pull-write:file' && value !== null) armed = true
-  }
+  decorateStateTransactions(f.state, (tx) => {
+    const put = tx.setMeta!.bind(tx)
+    tx.setMeta = async (key, value) => {
+      await put(key, value)
+      if (key === 'pull-write:file' && value !== null) armed = true
+    }
+  })
   f.state.getMeta = async (key) => {
     const value = await get(key)
     if (armed && key === 'normalization-directory-collisions')

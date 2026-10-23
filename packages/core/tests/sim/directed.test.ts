@@ -272,7 +272,7 @@ for (const operation of ['pause', 'stop'] as const) {
         if (
           mark < 0 &&
           point.startsWith(
-            operation === 'pause' ? 'fs.stage.commit#' : 'net.after.GET./v2/manifest#'
+            operation === 'pause' ? 'fs.conditionalFile#' : 'net.after.GET./v2/manifest#'
           )
         ) {
           mark = scheduler.points.length - 1
@@ -285,7 +285,7 @@ for (const operation of ['pause', 'stop'] as const) {
       expect(mark).toBeGreaterThanOrEqual(0)
       const effects = scheduler.points
         .slice(mark + 1)
-        .filter((p) => p.startsWith('fs.stage.commit#')).length
+        .filter((p) => /^fs\.(stage.commit|conditionalFile)#/.test(p)).length
       scheduler.hook = undefined
       if (operation === 'pause') device.engine.resume()
       await device.quiesce()
