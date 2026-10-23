@@ -9,6 +9,7 @@ import {
   SETUP_MS,
   syncOnce,
   vaultPair,
+  withFolderWork,
   write,
 } from './helpers/folders.js'
 import { spawnServer, type SpawnedServer } from './helpers/spawnServer.js'
@@ -72,25 +73,40 @@ describe('restore --deleted-since', () => {
     expect(run.out).toEqual([`nothing deleted since ${future} is in the trash`])
   })
 
-  it('asks for --yes past 20 files when nobody is at a terminal', async () => {
-    for (let k = 100; k < 121; k++) await write(a, name(k), `x ${k}\n`)
-    await syncOnce(a)
-    for (let k = 100; k < 121; k++) await rm(join(a, name(k)))
-    // 21 of 26 is held by the guard; confirmed, the deletes reach the trash.
-    await syncOnce(a)
-    const listed = /--expect (\S+)/.exec((await cli(['deletes', '--dir', a])).all)?.[1] ?? ''
-    expect((await cli(['deletes', '--dir', a, '--confirm', '--expect', listed])).code).toBe(0)
-    await syncOnce(a)
-    expect(await trashCount(a)).toBe(21)
+  describe('more than twenty deleted files', () => {
+    // Preparing the trash exercises upload and delete-guard commands, not the
+    // restore confirmation. Give each command behavior its own test budget.
+    beforeAll(
+      () =>
+        withFolderWork(async () => {
+          for (let k = 100; k < 121; k++) await write(a, name(k), `x ${k}\n`)
+          await syncOnce(a)
+          for (let k = 100; k < 121; k++) await rm(join(a, name(k)))
+          // 21 of 26 is held by the guard; confirmed, the deletes reach the trash.
+          await syncOnce(a)
+          const listed = /--expect (\S+)/.exec((await cli(['deletes', '--dir', a])).all)?.[1] ?? ''
+          expect((await cli(['deletes', '--dir', a, '--confirm', '--expect', listed])).code).toBe(0)
+          await syncOnce(a)
+          expect(await trashCount(a)).toBe(21)
+        }),
+      20_000
+    )
 
-    const asked = await cli(['restore', '--dir', a, '--deleted-since', '1d'])
-    expect(asked.code).toBe(2)
-    expect(asked.err.join('\n')).toMatch(/21 files; add --yes/)
-    expect(await trashCount(a)).toBe(21)
-    const done = await cli(['restore', '--dir', a, '--deleted-since', '1d', '--yes'])
-    expect(done.code).toBe(0)
-    expect(await trashCount(a)).toBe(0)
-    expect(await read(a, name(120))).toBe('x 120\n')
+    it('asks for --yes past 20 files when nobody is at a terminal', () =>
+      withFolderWork(async () => {
+        const asked = await cli(['restore', '--dir', a, '--deleted-since', '1d'])
+        expect(asked.code).toBe(2)
+        expect(asked.err.join('\n')).toMatch(/21 files; add --yes/)
+        expect(await trashCount(a)).toBe(21)
+      }))
+
+    it('restores the twenty-one files when --yes confirms them', () =>
+      withFolderWork(async () => {
+        const done = await cli(['restore', '--dir', a, '--deleted-since', '1d', '--yes'])
+        expect(done.code).toBe(0)
+        expect(await trashCount(a)).toBe(0)
+        expect(await read(a, name(120))).toBe('x 120\n')
+      }))
   })
 
   it('refuses a moment it cannot read, and a file named beside it', async () => {
