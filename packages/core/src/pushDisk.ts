@@ -60,6 +60,7 @@ export class PushDisk {
    */
   async whereIs(previous: StateEntry | null, target: string): Promise<string> {
     if (previous === null || previous.path === target) return target
+    if ((await sourceRecreation(this.state, previous))?.target === target) return target
     if ((await this.fs.stat(target)) !== null) return target
     return (await this.fs.stat(previous.path)) === null ? target : previous.path
   }
@@ -113,12 +114,8 @@ export class PushDisk {
       // The scan paired the original identity with its offline move target.
       // The recreated source is a separate create, even if its bytes changed
       // again after scanning. Never remove it while settling that move.
-      const there = await this.fs.stat(target)
-      if (
-        there === null ||
-        (await fingerprintFile(this.fs, target, this.hash)).sha !== previous.sha
-      )
-        return false
+      // This transfers ledger ownership, not disk content. Later edits/deletion
+      // belong to the original at target; settlement must retain its dirty base.
       await this.state.delete(previous.path)
       await this.state.setMeta?.(sourceRecreationKey(previous.fileId), null)
       return true

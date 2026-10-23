@@ -1,6 +1,42 @@
 import { expect } from 'vitest'
 import type { Journal, StateEntry, StateStore } from '../../src/state.js'
 
+/** Replacing a path must never make another ID resolve to the replacement row. */
+export async function identityReplacement(store: StateStore): Promise<void> {
+  const original: StateEntry = {
+    path: 'old.md',
+    wirePath: 'old.md',
+    fileId: 'original',
+    versionId: 'base',
+    sha: 'a'.repeat(64),
+    size: 8,
+    mtime: 1000,
+  }
+  for (const mode of ['direct', 'transaction', 'nested']) {
+    await store.put(original)
+    const replace = async (state: StateStore) => {
+      await state.put({ ...original, fileId: 'recreated' })
+      expect(await state.byFileId('original')).toBeNull()
+      expect(await state.byFileId('recreated')).toMatchObject({ fileId: 'recreated' })
+      await state.put({ ...original, path: 'new.md', wirePath: 'new.md' })
+      await state.delete('old.md')
+      expect(await state.byFileId('recreated')).toBeNull()
+      expect(await state.byFileId('original')).toMatchObject({ path: 'new.md', fileId: 'original' })
+    }
+    if (mode === 'direct') await replace(store)
+    else
+      await store.transaction(async (tx) => {
+        if (mode === 'nested') await tx.transaction(replace)
+        else await replace(tx)
+        expect(await tx.byFileId('original')).toMatchObject({ path: 'new.md', fileId: 'original' })
+        expect(await tx.byFileId('recreated')).toBeNull()
+      })
+    expect(await store.byFileId('original')).toMatchObject({ path: 'new.md', fileId: 'original' })
+    expect(await store.byFileId('recreated')).toBeNull()
+    await store.delete('new.md')
+  }
+}
+
 /** Shared with host adapters: an unrelated task must never join a suspended transaction. */
 export async function rollbackIsolation(store: StateStore): Promise<void> {
   const entry: StateEntry = {

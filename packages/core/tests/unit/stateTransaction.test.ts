@@ -1,7 +1,11 @@
 import { expect, it } from 'vitest'
 import { MemoryStateStore, type StateStore } from '../../src/state.js'
 import { transact } from '../../src/stateTransaction.js'
-import { rollbackIsolation } from '../helpers/stateTransactionContract.js'
+import { identityReplacement, rollbackIsolation } from '../helpers/stateTransactionContract.js'
+
+it('keeps identity indexes consistent through path replacement and nested publication', async () => {
+  await identityReplacement(new MemoryStateStore())
+})
 
 it('isolates unrelated writes from a suspended memory transaction rollback', async () => {
   await rollbackIsolation(new MemoryStateStore())

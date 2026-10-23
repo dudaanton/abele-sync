@@ -177,3 +177,89 @@ it.each([false, true])(
     expect(await f.fs.read('Moved/new.md')).toEqual(f.bytes[0])
   }
 )
+
+it.each(
+  ['keep', 'edit', 'delete'].flatMap((source) =>
+    ['edit', 'delete'].map((target) => ({ source, target }))
+  )
+)(
+  'does not delete the original while classification is held (source=$source target=$target)',
+  async ({ source, target }) => {
+    const f = await fixture()
+    await f.state.setMeta(
+      'pull-source-recreated:sample',
+      JSON.stringify({ base: f.base, target: 'Moved/new.md' })
+    )
+    if (source !== 'delete')
+      await f.fs.writeAtomic('old.md', f.bytes[source === 'edit' ? 2 : 1]!, 1000)
+    if (target === 'edit') await f.fs.writeAtomic('Moved/new.md', f.bytes[2]!, 1000)
+    else await f.fs.remove('Moved/new.md')
+    const found = await scan(f.fs, f.state, { excluded: () => false })
+    expect(found.ops).toEqual([])
+  }
+)
+
+it.each([false, true])(
+  'removes displaced identity indexes (transaction=%s)',
+  async (transaction) => {
+    const f = await fixture()
+    const replace = async (state: typeof f.state | import('../../src/state.js').StateStore) => {
+      await state.put({ ...f.base, fileId: 'recreated' })
+      expect(await state.byFileId('sample')).toBeNull()
+      expect(await state.byFileId('recreated')).toMatchObject({ fileId: 'recreated' })
+    }
+    if (transaction) await f.state.transaction(replace)
+    else await replace(f.state)
+    expect(await f.state.byFileId('sample')).toBeNull()
+  }
+)
+
+it.each(['edit', 'delete'] as const)(
+  'keeps the original identity after an in-flight target %s',
+  async (action) => {
+    const f = await fixture()
+    await f.fs.writeAtomic('old.md', f.bytes[1]!, 1000)
+    await f.state.setMeta(
+      'pull-source-recreated:sample',
+      JSON.stringify({ base: f.base, target: 'Moved/new.md' })
+    )
+    const found = await scan(f.fs, f.state, { excluded: () => false })
+    expect(found.ops.map((op) => op.op)).toEqual(['move', 'create'])
+    f.client.hasBlob = async () => true
+    f.client.commitRaw = async (ops) => {
+      if (action === 'edit') await f.fs.writeAtomic('Moved/new.md', f.bytes[2]!, 1000)
+      else await f.fs.remove('Moved/new.md')
+      return {
+        replayed: false,
+        body: {
+          head_seq: 4,
+          results: ops.map((op, i) => ({
+            status: 'applied' as const,
+            file_id: op.op === 'move' ? 'sample' : 'recreated',
+            version_id: `accepted-${i}`,
+            seq: i + 3,
+            path: op.op === 'move' ? op.to_path : 'old.md',
+            sha: op.op === 'move' ? f.hashes[0]! : f.hashes[1]!,
+            size: 8,
+            mtime: 1000,
+          })),
+        },
+      }
+    }
+    await push(f.client, f.fs, f.state, found, { expected: new ExpectedWrites() })
+    expect(await f.state.byFileId('sample')).toMatchObject({
+      fileId: 'sample',
+      path: 'Moved/new.md',
+      sha: f.hashes[0],
+    })
+    expect(await f.state.byFileId('recreated')).toMatchObject({
+      fileId: 'recreated',
+      path: 'old.md',
+      sha: f.hashes[1],
+    })
+    const next = await scan(f.fs, f.state, { excluded: () => false })
+    expect(next.ops).toEqual([
+      expect.objectContaining({ op: action === 'edit' ? 'modify' : 'delete', file_id: 'sample' }),
+    ])
+  }
+)

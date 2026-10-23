@@ -7,7 +7,10 @@ import SqliteDatabase from 'better-sqlite3'
 import type { Journal, StateEntry } from '@abele/sync-core'
 import { SqliteStateStore } from '../../src/sqliteState.js'
 import { MemoryFileSystem, refreshLocalPaths, reconcileGeneration } from '@abele/sync-core'
-import { rollbackIsolation } from '../../../core/tests/helpers/stateTransactionContract.js'
+import {
+  identityReplacement,
+  rollbackIsolation,
+} from '../../../core/tests/helpers/stateTransactionContract.js'
 
 const entry = (over: Partial<StateEntry> = {}): StateEntry => ({
   path: 'notes/a.md',
@@ -50,6 +53,9 @@ afterEach(async () => {
 })
 
 describe('SqliteStateStore', () => {
+  it('keeps identity indexes consistent through path replacement and nested publication', async () => {
+    await identityReplacement(store)
+  })
   it.each(['cursor', 'daemon:server-restore-generation'])(
     'rolls back generation retirement when durable publication of %s fails',
     async (key) => {

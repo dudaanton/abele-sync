@@ -155,8 +155,7 @@ export class MemoryStateStore implements StateStore {
    * and the caller does both.
    */
   async put(entry: StateEntry): Promise<void> {
-    this.change(this.entries, entry.path, { ...entry })
-    this.change(this.index, entry.fileId, entry.path)
+    this.apply({ kind: 'put', entry })
   }
 
   async delete(path: string): Promise<void> {
@@ -220,10 +219,18 @@ export class MemoryStateStore implements StateStore {
 
   private apply(op: StateMutation): void {
     switch (op.kind) {
-      case 'put':
+      case 'put': {
+        const displaced = this.entries.get(op.entry.path)
+        if (
+          displaced &&
+          displaced.fileId !== op.entry.fileId &&
+          this.index.get(displaced.fileId) === op.entry.path
+        )
+          this.change(this.index, displaced.fileId, undefined)
         this.change(this.entries, op.entry.path, { ...op.entry })
         this.change(this.index, op.entry.fileId, op.entry.path)
         break
+      }
       case 'delete': {
         const entry = this.entries.get(op.path)
         this.change(this.entries, op.path, undefined)

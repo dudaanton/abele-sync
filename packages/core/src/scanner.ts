@@ -512,6 +512,7 @@ export async function scan(
   const missing = [...entries.values()].filter(
     (entry) =>
       !inventory.blocked(entry.wirePath) &&
+      (!recreated.has(entry.wirePath) || classified.has(entry.wirePath)) &&
       (!opts.retries || opts.retries.ready(entry.wirePath, 'scan')) &&
       (!present.has(entry.wirePath) || classified.has(entry.wirePath)) &&
       !filter.excluded(entry.wirePath, entry.size)
