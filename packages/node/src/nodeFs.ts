@@ -24,6 +24,9 @@ import {
   acknowledgePublication,
   type RemovalPublication,
   type FileVersion,
+  pathAdmission,
+  assertHostPath,
+  type PathAdmission,
   recoverRemovals,
   type RemovalRetentionPolicy,
   type ChunkSource,
@@ -35,6 +38,7 @@ import {
 import { caseKey } from '@abele/sync-protocol'
 import { syncParents, syncPath } from './nodeFsDurability.js'
 import { NodeStages } from './nodeStages.js'
+import { nodeNames } from './nodeNames.js'
 import {
   conditionalFile,
   fileObjectIdentity,
@@ -65,6 +69,8 @@ const WATCH_MAX_WAIT_MS = 2000
 const STABLE_GAP_MS = 200
 
 export interface NodeFileSystemOptions {
+  /** Additional restrictions for network/custom volumes; cannot loosen native rules. */
+  pathAdmission?: (path: string) => PathAdmission
   removalRetention?: RemovalRetentionPolicy
   /** Volume's name-equivalence key when known. Without a volume capability probe,
    * conservatively fold case/Unicode; platform alone does not determine APFS rules. */
@@ -105,7 +111,19 @@ export interface NodeFileSystemOptions {
 export class NodeFileSystem implements FileSystem {
   readonly conditionalOwnership = true as const
   readonly pathKey: (path: string) => string
+  private readonly admitName: (path: string) => PathAdmission;
+  [pathAdmission](path: string): PathAdmission {
+    return this.admitName(path)
+  }
   async conditionalFile(operation: ConditionalFileOperation): Promise<boolean> {
+    if (
+      operation.effect.kind === 'remove' &&
+      operation.expected === null &&
+      !this[pathAdmission](operation.path).allowed
+    )
+      return !operation.authorize || (await operation.authorize())
+    assertHostPath(this, operation.path)
+    if (operation.effect.kind === 'move') assertHostPath(this, operation.effect.to)
     if (operation.effect.kind === 'remove') {
       this.checkEffect()
       if (operation.expected === null || (await this.stat(operation.path)) === null)
@@ -124,9 +142,11 @@ export class NodeFileSystem implements FileSystem {
     return applied
   }
   async fileIdentity(path: string): Promise<string | null> {
+    if (!this[pathAdmission](path).allowed) return null
     return fileObjectIdentity(await this.contained(path))
   }
   installedFile(receipt: string, path: string, sha: string): Promise<boolean> {
+    if (!this[pathAdmission](path).allowed) return Promise.resolve(false)
     return installedFile(this.base, receipt, path, sha)
   }
   async discardInstallation(receipt: string): Promise<void> {
@@ -178,8 +198,13 @@ export class NodeFileSystem implements FileSystem {
     options: NodeFileSystemOptions = {}
   ) {
     this.removalRetention = options.removalRetention ?? {}
-    this.pathKey = options.pathKey ?? caseKey
     this.base = resolve(root)
+    const names = nodeNames(this.base)
+    this.pathKey = (path) => (options.pathKey ?? caseKey)(names.canonical(path))
+    this.admitName = (path) => {
+      const native = names.admit(path)
+      return native.allowed ? (options.pathAdmission?.(path) ?? native) : native
+    }
     this.effectGuard = options.effectGuard
     this.stages = new NodeStages(
       this.base,
@@ -455,6 +480,7 @@ export class NodeFileSystem implements FileSystem {
     expectedBase: ContentIdentity | null,
     beforeCreate?: (stageId: string) => Promise<void>
   ): Promise<AtomicStage> {
+    assertHostPath(this, path)
     return this.stages.begin(path, mtime, expectedBase, beforeCreate)
   }
   reopenStage(id: string): Promise<AtomicStage> {
@@ -603,6 +629,7 @@ export class NodeFileSystem implements FileSystem {
   }
 
   async stat(path: string): Promise<FileInfo | null> {
+    if (!this[pathAdmission](path).allowed) return null
     let absolute
     try {
       absolute = await this.contained(path)
@@ -690,6 +717,7 @@ export class NodeFileSystem implements FileSystem {
 
   /** `path` under the root, every folder above it a real one (`containedIn`). */
   private contained(path: string): Promise<string> {
+    assertHostPath(this, path)
     return containedIn(this.base, path)
   }
 
