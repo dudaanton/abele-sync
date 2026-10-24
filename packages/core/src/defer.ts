@@ -92,6 +92,7 @@ export async function readStaged(state: StateStore): Promise<ChangeItem[]> {
  */
 export class StagedChanges {
   private filed: Filed | null = null
+  private image: string | null = null
 
   /** Durable state was reconciled after a server restore. */
   invalidate(): void {
@@ -105,7 +106,8 @@ export class StagedChanges {
 
   private async load(): Promise<Filed> {
     if (this.filed === null || (this.state.getMeta && this.state.setMeta)) {
-      this.filed = parse(this.state.getMeta ? await this.state.getMeta(DEFERRED_KEY) : null)
+      this.image = this.state.getMeta ? await this.state.getMeta(DEFERRED_KEY) : null
+      this.filed = parse(this.image)
     }
     return this.filed
   }
@@ -124,8 +126,12 @@ export class StagedChanges {
    * transition. Physical cleanup may finish in recovery, without replaying the
    * host's discarded/replacement decision from memory. */
   private async transition(next: Filed, retired: ChangeItem[]): Promise<void> {
-    if (!this.state.getMeta || !this.state.setMeta || retired.length === 0) return this.save(next)
-    const result = await new PendingPullWrites(this.state, this.fs).retireDecisions(retired, next)
+    if (!this.state.getMeta || !this.state.setMeta) return this.save(next)
+    const result = await new PendingPullWrites(this.state, this.fs).retireDecisions(
+      retired,
+      next,
+      this.image
+    )
     this.filed = null
     if (result.held.length)
       throw new EngineError(

@@ -6,7 +6,8 @@ import { pathOccupant } from './pathOccupant.js'
 import type { FileSystem } from './fs.js'
 import { discardPullStage } from './pullStages.js'
 import { DEFERRED_KEY, parse, type Filed } from './deferredFile.js'
-import { transact } from './stateTransaction.js'
+import { commitAppliedSettlement } from './settlement.js'
+import { afterStateCommit } from './stateTransaction.js'
 import { pathRefusal } from './placementRefusal.js'
 import type { EngineClient } from './engineClient.js'
 import { hasStoredDirectoryRefusals } from './v2Directories.js'
@@ -182,14 +183,43 @@ export class PendingPullWrites {
     if (await this.refused(pending.fileId)) return
     if (!this.fs)
       throw new EngineError('io', 'host cannot retire a held pull stage without its filesystem')
-    if (!pending.retiring)
-      await this.state.setMeta?.(
-        keyFor(pending.fileId),
-        JSON.stringify({ ...pending, retiring: true })
-      )
+    const original = JSON.stringify(pending)
+    const retiring = JSON.stringify({ ...pending, retiring: true })
+    let owned = false
+    await commitAppliedSettlement(
+      this.state,
+      async () => ({ reached: await this.state.getCursor(), firstUnresolved: null }),
+      async (tx) => {
+        const current = new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client)
+        if (
+          JSON.stringify(await current.read(pending.fileId)) !== original ||
+          (await current.refused(pending.fileId))
+        )
+          return
+        await tx.setMeta?.(keyFor(pending.fileId), retiring)
+        // A caller may itself be inside a raw host transaction. Its rollback
+        // must not lose private bytes; recovery finishes cleanup after commit.
+        afterStateCommit(tx, () => {
+          owned = true
+        })
+      }
+    )
+    if (!owned) return
     if (pending.stageId) await discardPullStage(this.fs, pending.stageId)
     if (pending.receiptId) await this.fs.discardInstallation?.(pending.receiptId)
-    await this.clear(pending.fileId)
+    await commitAppliedSettlement(
+      this.state,
+      async () => ({ reached: await this.state.getCursor(), firstUnresolved: null }),
+      async (tx) => {
+        const current = new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client)
+        if (
+          JSON.stringify(await current.read(pending.fileId)) !== retiring ||
+          (await current.refused(pending.fileId))
+        )
+          return
+        await tx.setMeta?.(keyFor(pending.fileId), null)
+      }
+    )
   }
 
   async superseded(change: ChangeItem): Promise<void> {
@@ -227,7 +257,8 @@ export class PendingPullWrites {
    * every retirement marker, then finish byte cleanup outside the transaction. */
   async retireDecisions(
     changes: readonly Pick<ChangeItem, 'file_id' | 'version_id'>[],
-    replacement?: Filed
+    replacement?: Filed,
+    replacementRevision?: string | null
   ): Promise<DecisionRetirement> {
     const result: DecisionRetirement = { held: [] }
     if (!this.state.getMeta || !this.state.setMeta) return result
@@ -240,26 +271,36 @@ export class PendingPullWrites {
       else ended.push(change)
     }
     if (!replacement && !ended.length) return result
-    await transact(this.state, async (tx) => {
-      const pending = new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client)
-      for (const change of ended) await pending.prepareRetirement(change)
-      const filed = parse(await tx.getMeta!(DEFERRED_KEY))
-      const gone = new Set(ended.map(identity))
-      let staged =
-        replacement?.staged ?? filed.staged.filter((one) => !gone.has(identity(one.change)))
-      if (replacement && result.held.length) {
-        const blocked = new Set(result.held.map((one) => one.file_id))
-        const previous = new Map(filed.staged.map((one) => [one.change.file_id, one]))
-        staged = staged.map((one) =>
-          blocked.has(one.change.file_id) ? (previous.get(one.change.file_id) ?? one) : one
+    await commitAppliedSettlement(
+      this.state,
+      async () => ({ reached: await this.state.getCursor(), firstUnresolved: null }),
+      async (tx) => {
+        if (
+          replacementRevision !== undefined &&
+          (await tx.getMeta!(DEFERRED_KEY)) !== replacementRevision
         )
-        const present = new Set(staged.map((one) => one.change.file_id))
-        for (const one of filed.staged)
-          if (blocked.has(one.change.file_id) && !present.has(one.change.file_id)) staged.push(one)
+          throw new EngineError('conflict', 'deferred decision revision changed')
+        const pending = new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client)
+        for (const change of ended) await pending.prepareRetirement(change)
+        const filed = parse(await tx.getMeta!(DEFERRED_KEY))
+        const gone = new Set(ended.map(identity))
+        let staged =
+          replacement?.staged ?? filed.staged.filter((one) => !gone.has(identity(one.change)))
+        if (replacement && result.held.length) {
+          const blocked = new Set(result.held.map((one) => one.file_id))
+          const previous = new Map(filed.staged.map((one) => [one.change.file_id, one]))
+          staged = staged.map((one) =>
+            blocked.has(one.change.file_id) ? (previous.get(one.change.file_id) ?? one) : one
+          )
+          const present = new Set(staged.map((one) => one.change.file_id))
+          for (const one of filed.staged)
+            if (blocked.has(one.change.file_id) && !present.has(one.change.file_id))
+              staged.push(one)
+        }
+        if (replacement || staged.length !== filed.staged.length)
+          await tx.setMeta!(DEFERRED_KEY, staged.length ? JSON.stringify({ staged }) : null)
       }
-      if (replacement || staged.length !== filed.staged.length)
-        await tx.setMeta!(DEFERRED_KEY, staged.length ? JSON.stringify({ staged }) : null)
-    })
+    )
     for (const change of ended) await this.finishRetirement(change)
     return result
   }
