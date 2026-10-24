@@ -42,8 +42,9 @@ it('D-017 recovers an engine eviction before a missing occupant can become a loc
     const applied = await remove(op)
     if (
       applied &&
-      op.effect.kind === 'move' &&
-      op.effect.to.startsWith('.abele-sync/retained-removals/')
+      ((op.effect.kind === 'move' && op.effect.to.startsWith('.abele-sync/retained-removals/')) ||
+        (op.effect.kind === 'remove' &&
+          op.effect.retainAt?.startsWith('.abele-sync/retained-removals/')))
     )
       throw new Error('crash after eviction')
     return applied

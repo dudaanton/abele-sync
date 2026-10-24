@@ -113,8 +113,10 @@ it('does not remove the old path after its owner moved before conditional captur
   const conditional = f.fs.conditionalFile.bind(f.fs)
   f.fs.conditionalFile = async (operation) => {
     if (
-      operation.effect.kind === 'move' &&
-      operation.effect.to.startsWith('.abele-sync/retained-removals/')
+      (operation.effect.kind === 'move' &&
+        operation.effect.to.startsWith('.abele-sync/retained-removals/')) ||
+      (operation.effect.kind === 'remove' &&
+        operation.effect.retainAt?.startsWith('.abele-sync/retained-removals/'))
     ) {
       await f.state.delete(f.base.path)
       await f.state.put(moved)
@@ -137,8 +139,10 @@ it.each(['owner', 'bytes', 'refused', 'hold', 'intent'] as const)(
     const conditional = f.fs.conditionalFile.bind(f.fs)
     f.fs.conditionalFile = async (operation) => {
       if (!(
-        operation.effect.kind === 'move' &&
-        operation.effect.to.startsWith('.abele-sync/retained-removals/')
+        (operation.effect.kind === 'move' &&
+          operation.effect.to.startsWith('.abele-sync/retained-removals/')) ||
+        (operation.effect.kind === 'remove' &&
+          operation.effect.retainAt?.startsWith('.abele-sync/retained-removals/'))
       ))
         return conditional(operation)
       if (mode === 'refused') return false
