@@ -12,6 +12,43 @@ import { push } from '../../src/pusher.js'
 import { pathAdmission } from '../../src/pathAdmission.js'
 import { PendingPullWrites } from '../../src/pullWrite.js'
 
+it('keeps an incoming directory visible after selected retry fails before preparation and after restart', async () => {
+  class DirectoryFs extends MemoryFileSystem {
+    [pathAdmission]() {
+      return { allowed: false as const, reason: 'unsupported-host-name: colon' }
+    }
+    mkdir = vi.fn(async (_path: string) => {})
+    async *listDirectories() {
+      yield* []
+    }
+  }
+  const fs = new DirectoryFs(),
+    state = new MemoryStateStore()
+  const dirs = new V2Directories(fs, state, () => true, vi.fn())
+  await dirs.receive(
+    { file_id: 'dir', version_id: 'v1', path: 'a:b', kind: 'directory', mtime: 1 },
+    7
+  )
+  const client = {
+    prepare: async () => {
+      throw new Error('offline')
+    },
+    retryRefusedDirectories: (paths?: readonly string[]) => dirs.loadRefusals(true, paths),
+  } as unknown as EngineClient
+  const engine = () => new SyncEngine({ fs, state, client, selective: selectiveDefaults() })
+  const before = await engine().waitingFiles()
+  await expect(engine().retryPaths(['a:b'])).rejects.toThrow('offline')
+  expect(JSON.parse((await state.getMeta('v2-directories'))!).refused).toEqual([])
+  expect(await engine().waitingFiles()).toEqual(before)
+  await dirs.receive(
+    { file_id: 'dir', version_id: 'v2', path: 'new:name', kind: 'directory', mtime: 1 },
+    8
+  )
+  expect(await engine().waitingFiles()).toEqual([
+    expect.objectContaining({ path: 'new:name', versionId: 'v2', seq: 8 }),
+  ])
+})
+
 it('rechecks directory admission after awaited inventory and before mkdir', async () => {
   let allowed = true
   class DirectoryFs extends MemoryFileSystem {

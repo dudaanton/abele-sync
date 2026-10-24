@@ -26,6 +26,12 @@ const DocumentSchema = z
   .object({
     schemaVersion: z.literal(2).optional(),
     incoming: z.array(V2ManifestItemSchema).optional(),
+    incomingReasons: z
+      .record(
+        z.string(),
+        z.object({ versionId: z.string().min(1), path: PathSchema, reason: z.string() }).strict()
+      )
+      .optional(),
     incomingSeq: z
       .record(z.string(), z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER))
       .optional(),
@@ -93,6 +99,7 @@ interface LocalDirectory extends DirectoryItem {
   localPath?: string
 }
 interface Document {
+  incomingReasons?: Record<string, { versionId: string; path: string; reason: string }>
   incomingSeq?: Record<string, number>
   schemaVersion?: 2
   incoming?: V2ManifestItem[]
@@ -101,6 +108,29 @@ interface Document {
   directories: LocalDirectory[]
   pending?: { key: string; op: V2CommitOp; identity: string; localPath?: string }
   removals: Array<string | { localPath: string; identity: string; path: string }>
+}
+
+/** Scheduling refusals may be reset before a run can prepare. Keep the last
+ * reason bound to the immutable incoming identity, independently of eligibility. */
+function rememberIncomingReasons(doc: Document) {
+  const refusals = new Map(
+    doc.refused?.filter((row) => row.direction === 'pull').map((row) => [row.path, row])
+  )
+  const reasons: NonNullable<Document['incomingReasons']> = {}
+  for (const item of doc.incoming ?? []) {
+    const refusal = refusals.get(item.path),
+      previous = doc.incomingReasons?.[`i:${item.file_id}`]
+    if (refusal)
+      reasons[`i:${item.file_id}`] = {
+        versionId: item.version_id,
+        path: item.path,
+        reason: refusal.message,
+      }
+    else if (previous?.versionId === item.version_id && previous.path === item.path)
+      reasons[`i:${item.file_id}`] = previous
+  }
+  if (Object.keys(reasons).length) doc.incomingReasons = reasons
+  else delete doc.incomingReasons
 }
 
 async function parseDocument(raw: string): Promise<Document> {
@@ -193,24 +223,24 @@ export async function waitingDirectories(
   const refusals = new Map(
     doc.refused?.filter((row) => row.direction === 'pull').map((row) => [row.path, row])
   )
-  return (doc.incoming ?? []).flatMap((item) => {
+  return (doc.incoming ?? []).map((item) => {
     const refusal = refusals.get(item.path)
-    return refusal
-      ? [
-          {
-            path: item.path,
-            fileId: item.file_id,
-            versionId: item.version_id,
-            seq: doc.incomingSeq?.[item.file_id] ?? 0,
-            reason: refusal.message,
-            phase: 'pull' as const,
-            attempts: 1,
-            nextAt: 0,
-            quarantined: true,
-            owner: KEY,
-          },
-        ]
-      : []
+    const saved = doc.incomingReasons?.[`i:${item.file_id}`]
+    return {
+      path: item.path,
+      fileId: item.file_id,
+      versionId: item.version_id,
+      seq: doc.incomingSeq?.[item.file_id] ?? 0,
+      reason:
+        saved?.versionId === item.version_id && saved.path === item.path
+          ? saved.reason
+          : (refusal?.message ?? 'awaiting directory placement'),
+      phase: 'pull' as const,
+      attempts: 1,
+      nextAt: 0,
+      quarantined: true,
+      owner: KEY,
+    }
   })
 }
 
@@ -257,6 +287,7 @@ export class V2Directories {
     return doc
   }
   private save(doc: Document, state: StateStore = this.state) {
+    rememberIncomingReasons(doc)
     if (doc.incomingSeq) {
       const ids = new Set(doc.incoming?.map((item) => item.file_id))
       for (const id of Object.keys(doc.incomingSeq)) if (!ids.has(id)) delete doc.incomingSeq[id]
@@ -268,6 +299,7 @@ export class V2Directories {
   async loadRefusals(retry = false, paths?: readonly string[]): Promise<void> {
     const doc = await this.read()
     if (retry && doc.refused?.length) {
+      rememberIncomingReasons(doc)
       doc.refused = doc.refused.filter(
         (item) => item.evidence || (paths !== undefined && !paths.includes(item.path))
       )
