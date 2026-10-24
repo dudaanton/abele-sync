@@ -95,7 +95,7 @@ it.each([false, true])(
     expect(await placer.drop(base)).toBe(false)
     expect(await state.get(base.path)).toEqual(replacement)
     const retained = [...fs.snapshot()].filter(([path]) =>
-      path.startsWith(`${base.path}.sync-conflict-`)
+      path.startsWith('.abele-sync/retained-removals/')
     )
     expect(retained).toHaveLength(1)
     expect(retained[0]![1]).toEqual(bytes)

@@ -390,11 +390,11 @@ export class PullPlacer {
       if (!(await authorize())) return false
       if (this.fs.conditionalOwnership && identity !== undefined)
         return await this.effect({ path, expected, authorize, effect: { kind: 'remove' } })
-      // Older hosts cannot enforce ledger authority at capture. Keep the captured
-      // bytes as an ordinary, visible conflict copy, including on success. Such a
-      // copy needs no private cleanup owner and must never be silently retired.
+      // Older hosts cannot enforce ledger authority at capture. Retain the
+      // uncertain object in the engine namespace: exposing it as a vault file
+      // would upload it again and resurrect a remote deletion.
       if ((await this.fs.stat(path)) === null) return await authorize()
-      const to = `${path}.sync-conflict-${crypto.randomUUID()}`
+      const to = `.abele-sync/retained-removals/${crypto.randomUUID()}/${path}`
       if (!(await this.effect({ path, expected, effect: { kind: 'move', to } }))) return false
       this.opts.log?.(`pull: retained removal at ${to}`)
       return await authorize()

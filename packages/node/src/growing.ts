@@ -54,6 +54,7 @@ export class SettlingFileSystem implements FileSystem, PathMatcher {
   readonly beginAtomicWrite?: FileSystem['beginAtomicWrite']
   readonly reopenStage?: FileSystem['reopenStage']
   readonly conditionalFile?: FileSystem['conditionalFile']
+  readonly conditionalOwnership?: FileSystem['conditionalOwnership']
   readonly installedFile?: FileSystem['installedFile']
   readonly discardInstallation?: FileSystem['discardInstallation']
   readonly recoverConditionalFiles?: FileSystem['recoverConditionalFiles']
@@ -74,6 +75,7 @@ export class SettlingFileSystem implements FileSystem, PathMatcher {
     if (disk.beginAtomicWrite) this.beginAtomicWrite = disk.beginAtomicWrite.bind(disk)
     if (disk.reopenStage) this.reopenStage = disk.reopenStage.bind(disk)
     if (disk.conditionalFile) this.conditionalFile = disk.conditionalFile.bind(disk)
+    this.conditionalOwnership = disk.conditionalOwnership
     if (disk.installedFile) this.installedFile = disk.installedFile.bind(disk)
     if (disk.discardInstallation) this.discardInstallation = disk.discardInstallation.bind(disk)
     if (disk.recoverConditionalFiles)

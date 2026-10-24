@@ -40,6 +40,7 @@ it('forwards conditional publication and installation evidence through settling'
   expect(fs.recoverConditionalFiles).toBeTypeOf('function')
   expect(fs.discardStage).toBeTypeOf('function')
   expect(fs.fileIdentity).toBeTypeOf('function')
+  expect(fs.conditionalOwnership).toBe(true)
   expect(await fs.fileIdentity?.('file')).toBe(await disk.fileIdentity('file'))
 })
 
