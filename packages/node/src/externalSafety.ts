@@ -241,14 +241,23 @@ export function assertLocalSafety(
       }
     }
     if (retirement)
-      for (const name of ['tmp', 'code-approvals', 'external', 'recovery', 'scoped-outbox']) {
+      for (const name of [
+        'tmp',
+        'code-approvals',
+        'retained-removals',
+        'external',
+        'recovery',
+        'scoped-outbox',
+      ]) {
         const path = join(
-          name === 'tmp' || name === 'code-approvals' ? stateFolder(dir) : folder,
+          name === 'tmp' || name === 'code-approvals' || name === 'retained-removals'
+            ? stateFolder(dir)
+            : folder,
           name
         )
         if (
           existsSync(path) &&
-          (name === 'scoped-outbox'
+          (name === 'scoped-outbox' || name === 'retained-removals'
             ? hasRetainedFiles(path)
             : !lstatSync(path).isDirectory() || readdirSync(path).length)
         )

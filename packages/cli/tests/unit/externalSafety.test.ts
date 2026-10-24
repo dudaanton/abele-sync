@@ -43,6 +43,23 @@ beforeEach(async () => {
   dir = await mkdtemp(join(scratch, 'external-safety-'))
   writeConfig(dir, cfg)
 })
+it.each([undefined, 'other-state'])(
+  'retirement preserves private removal retention (state=%s)',
+  async (other) => {
+    const retained = join(stateFolder(dir), 'retained-removals', 'capture', 'file.bin')
+    await mkdir(join(stateFolder(dir), 'retained-removals', 'capture'), { recursive: true })
+    await writeFile(retained, 'local bytes')
+    const stateDir = other ? join(dir, other) : undefined
+    expect(() =>
+      assertLocalSafety(dir, true, true, false, false, false, undefined, stateDir)
+    ).toThrow('retained retained-removals artifacts')
+    expect(readFileSync(retained, 'utf8')).toBe('local bytes')
+    await rm(retained)
+    expect(() =>
+      assertLocalSafety(dir, true, true, false, false, false, undefined, stateDir)
+    ).not.toThrow()
+  }
+)
 it('retirement sees a pending connection departure and permits its resolved evidence', () => {
   const state = SqliteStateStore.open(dbFile())
   const key = 'settlement-departure:row:00000000000002'
