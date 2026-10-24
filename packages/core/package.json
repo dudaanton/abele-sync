@@ -20,7 +20,7 @@
   "dependencies": {
     "@abele/sync-protocol": "0.5.0",
     "@noble/hashes": "1.8.0",
-    "zod": "3.25.76"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@abele/sync-node": "0.5.0",

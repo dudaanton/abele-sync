@@ -39,7 +39,7 @@ const ErrorEnvelopeSchema = z.object({
   error: z.object({
     code: ErrorCodeSchema,
     message: z.string(),
-    details: z.record(z.unknown()).default({}),
+    details: z.record(z.string(), z.unknown()).default({}),
   }),
 })
 
@@ -48,7 +48,7 @@ const ErrorEnvelopeSchema = z.object({
  * back the protocol's own type. Naming the input `unknown` is what lets a schema
  * with defaults keep its parsed type rather than its looser input one.
  */
-export type WireSchema<T> = z.ZodType<T, z.ZodTypeDef, unknown>
+export type WireSchema<T> = z.ZodType<T, unknown>
 
 /** A query string's values, as the caller has them: absent ones are simply not sent. */
 type Query = Record<string, string | number | null | undefined>

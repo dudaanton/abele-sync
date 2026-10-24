@@ -8,7 +8,7 @@ import { z } from 'zod'
 
 const Checkpoint = z.object({
   generation: z.string().uuid(),
-  heads: z.record(z.object({ seq: z.number().nonnegative(), digest: z.string() })),
+  heads: z.record(z.string(), z.object({ seq: z.number().nonnegative(), digest: z.string() })),
 })
 type Checkpoint = z.infer<typeof Checkpoint>
 const mutexes = new Map<string, Mutex>()

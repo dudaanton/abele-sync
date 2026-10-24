@@ -111,7 +111,7 @@ export const UsageSchema = z.object({
   history_bytes: bytes,
   trash_bytes: bytes,
   quota_bytes: bytes.nullable(),
-  by_kind: z.record(FileKindSchema, z.object({ live_bytes: bytes, count })),
+  by_kind: z.partialRecord(FileKindSchema, z.object({ live_bytes: bytes, count })),
 })
 export type Usage = z.infer<typeof UsageSchema>
 
@@ -139,7 +139,7 @@ export const VaultSettingsSchema = z.object({
     .positive()
     .default(200 * 1024 * 1024),
   quota_bytes: bytes.nullable().default(null),
-  retention: RetentionSchema.default({}),
+  retention: RetentionSchema.prefault({}),
   scripts_folder: z.string().default('Scripts'),
   key_signature: z
     .object({ enabled: z.boolean(), property: z.string(), value: z.string() })
@@ -155,9 +155,24 @@ export type VaultSettings = z.infer<typeof VaultSettingsSchema>
  * nothing about retention would still carry `retention`'s own defaults and quietly
  * reset every span the caller left out.
  */
-export const VaultSettingsPatchSchema = VaultSettingsSchema.partial().extend({
-  retention: VaultSettingsSchema.shape.retention.removeDefault().partial().optional(),
-})
+// Zod 4 applies inner defaults even inside optional properties. Remove defaults
+// before making a patch optional, so omission never resets an existing setting.
+export const VaultSettingsPatchSchema = z
+  .object({
+    conflict: VaultSettingsSchema.shape.conflict.removeDefault(),
+    max_file_bytes: VaultSettingsSchema.shape.max_file_bytes.removeDefault(),
+    quota_bytes: VaultSettingsSchema.shape.quota_bytes.removeDefault(),
+    retention: z
+      .object({
+        notes_days: RetentionSchema.shape.notes_days.removeDefault(),
+        attachments_days: RetentionSchema.shape.attachments_days.removeDefault(),
+        settings_days: RetentionSchema.shape.settings_days.removeDefault(),
+      })
+      .partial(),
+    scripts_folder: VaultSettingsSchema.shape.scripts_folder.removeDefault(),
+    key_signature: VaultSettingsSchema.shape.key_signature.removeDefault(),
+  })
+  .partial()
 export type VaultSettingsPatch = z.infer<typeof VaultSettingsPatchSchema>
 
 /** Password proof is request-only: never part of stored or returned vault settings. */
