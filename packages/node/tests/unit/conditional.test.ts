@@ -1,10 +1,80 @@
-import { mkdtemp, rm, readFile, readdir, mkdir, rename, writeFile } from 'node:fs/promises'
-import { writeFileSync, existsSync } from 'node:fs'
+import { mkdtemp, rm, readFile, readdir, mkdir, rename, writeFile, open } from 'node:fs/promises'
+import { writeFileSync, existsSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { expect, it } from 'vitest'
 import { sha256 } from '@abele/sync-core'
 import { NodeFileSystem } from '../../src/nodeFs.js'
+import { conditionalFile } from '../../src/nodeConditional.js'
+
+it.each(['move', 'write'] as const)(
+  'rechecks the captured victim before %s publication',
+  async (kind) => {
+    const root = await mkdtemp(join(tmpdir(), 'conditional-publication-writer-'))
+    try {
+      const fs = new NodeFileSystem(root)
+      const original = new Uint8Array([1]),
+        edited = new Uint8Array([2])
+      await fs.writeAtomic('file.bin', original, 1000)
+      const expected = { ...(await fs.stat('file.bin'))!, sha: await sha256(original) }
+      const writer = await open(join(root, 'file.bin'), 'r+')
+      try {
+        let checks = 0
+        const effect =
+          kind === 'move' ? { kind, to: 'moved.bin' } : { kind, bytes: original, mtime: 1000 }
+        expect(
+          await conditionalFile(root, { path: 'file.bin', expected, effect }, () => {
+            if (++checks === 5) writeSync(writer.fd, edited, 0, edited.length, 0)
+          })
+        ).toBe(false)
+        expect(checks).toBe(6) // The refusal also checks authority before restoration.
+        expect(await fs.read('file.bin')).toEqual(edited)
+        expect(await fs.stat('moved.bin')).toBeNull()
+      } finally {
+        await writer.close()
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }
+)
+
+it('preserves bytes written through an open descriptor during removal authorization', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'conditional-open-writer-'))
+  try {
+    const fs = new NodeFileSystem(root)
+    const original = new Uint8Array([1])
+    const edited = new Uint8Array([2])
+    await fs.writeAtomic('file.bin', original, 1000)
+    const expected = {
+      ...(await fs.stat('file.bin'))!,
+      sha: await sha256(original),
+      identity: (await fs.fileIdentity('file.bin'))!,
+    }
+    const writer = await open(join(root, 'file.bin'), 'r+')
+    try {
+      expect(
+        await fs.conditionalFile({
+          path: 'file.bin',
+          expected,
+          effect: { kind: 'remove' },
+          authorize: async () => {
+            await writer.write(edited, 0, edited.length, 0)
+            await writer.utimes(1, 1)
+            return true
+          },
+        })
+      ).toBe(false)
+      expect(await fs.read('file.bin')).toEqual(edited)
+      await fs.recoverConditionalFiles()
+      expect(await fs.read('file.bin')).toEqual(edited)
+    } finally {
+      await writer.close()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 it.each(['deny', 'throw', 'occupant'] as const)(
   'preserves the captured removal victim when ownership check returns %s',

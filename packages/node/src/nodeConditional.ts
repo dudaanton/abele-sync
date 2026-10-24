@@ -217,6 +217,12 @@ export async function conditionalFile(
           await restore()
           return false
         }
+        // The callback can yield to an open writer of the captured inode.
+        // Its authority result does not refresh the earlier content proof.
+        if (!(await matchesVictim(victim, op.expected))) {
+          await restore()
+          return false
+        }
         verified = true
       }
       await unlink(victim)
@@ -311,6 +317,13 @@ export async function conditionalFile(
       return false
     }
     check()
+    // Preparing the destination/data yielded after capture. Do not publish
+    // against a baseline that changed while those operations were pending.
+    if (captured && op.expected !== null && !(await matchesVictim(victim, op.expected))) {
+      verified = false
+      await restore()
+      return false
+    }
     try {
       await link(data, destination)
       published = true
