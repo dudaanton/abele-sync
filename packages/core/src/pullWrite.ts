@@ -1,3 +1,4 @@
+import { hostPathRefusal, pathAdmission } from './pathAdmission.js'
 import type { ChangeItem } from '@abele/sync-protocol'
 import { EngineError } from './errors.js'
 import type { StateEntry, StateStore } from './state.js'
@@ -56,12 +57,23 @@ export class PendingPullWrites {
   async refused(
     fileId: string,
     extra: Array<string | null | undefined> = [],
-    base?: StateEntry | null
+    base?: StateEntry | null,
+    admit = true
   ) {
     // Most runs have no directory refusals. Revalidate that durable image once
     // per boundary before loading intent/ledger/decision names unnecessarily.
-    if (!this.client.pathRefusal && !(await hasStoredDirectoryRefusals(this.state))) return
+    if (
+      !this.fs?.[pathAdmission] &&
+      !this.client.pathRefusal &&
+      !(await hasStoredDirectoryRefusals(this.state))
+    )
+      return
     const pending = await this.read(fileId)
+    const destination = extra[0] ?? pending?.target
+    if (admit && this.fs && destination) {
+      const host = hostPathRefusal(this.fs, destination)
+      if (host) return host
+    }
     const current = await this.state.byFileId(fileId)
     const paths = [
       ...extra,

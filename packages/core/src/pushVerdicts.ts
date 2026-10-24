@@ -1,3 +1,4 @@
+import { assertHostPath } from './pathAdmission.js'
 import { normalisePath, type CommitOp, type CommitOpResult } from '@abele/sync-protocol'
 import {
   bytesFor,
@@ -150,6 +151,7 @@ export class VerdictPlanner {
           throw new EngineError('protocol', 'the pusher does not send restores')
         // A delete the server took leaves nothing on disk to protect and nothing to write.
         if (result.status === 'applied' && op.op === 'delete') continue
+        assertHostPath(this.fs, result.path)
 
         const previous = await this.state.byFileId(result.file_id)
         const sent = sentBy(op, previous)
@@ -297,6 +299,7 @@ export class VerdictPlanner {
           if (sha === undefined || !wanted.has(sha) || stale.has(at)) continue
           const result = this.results[at]
           if (!result || result.status === 'rejected') continue
+          assertHostPath(this.fs, result.path)
           const target = await disk.targetOf(result.path, result.file_id)
           const previous = await state.byFileId(result.file_id)
           const sourcePath = await disk.whereIs(previous, target)

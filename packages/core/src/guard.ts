@@ -4,6 +4,7 @@ import type { FileSystem } from './fs.js'
 import type { StateStore } from './state.js'
 import type { ChunkSource } from './streaming.js'
 import { checkCancellation } from './cancellation.js'
+import { pathAdmission } from './pathAdmission.js'
 
 /** Check at the port boundary, after any awaited inspection or intent save.
  * An operation already entered may finish; its ledger writes must still settle.
@@ -16,6 +17,7 @@ export function stoppableFileEffects(
   // pause policy. Evidence reads/retirement may finish a completed operation;
   // recovery can publish public bytes and therefore belongs behind the fence.
   const policy = {
+    [pathAdmission]: 'read',
     conditionalOwnership: 'read',
     pathKey: 'read',
     conditionalFile: 'effect',

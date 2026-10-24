@@ -2,10 +2,12 @@ import { expect, it, vi } from 'vitest'
 import type { FileSystem } from '../../src/fs.js'
 import { stoppableFileEffects } from '../../src/guard.js'
 import { SyncCancelled } from '../../src/cancellation.js'
+import { pathAdmission } from '../../src/pathAdmission.js'
 
 // This exhaustive port inventory makes a new FileSystem method a type error until
 // its pause behavior is explicitly classified. Cleanup never publishes public bytes.
 const ports = {
+  [pathAdmission]: 'read',
   conditionalOwnership: 'read',
   pathKey: 'read',
   conditionalFile: 'effect',

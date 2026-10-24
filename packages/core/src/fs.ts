@@ -1,4 +1,5 @@
 import { caseKey } from '@abele/sync-protocol'
+import { pathAdmission, type PathAdmission } from './pathAdmission.js'
 import { EngineError } from './errors.js'
 import type { StreamingFileSystem } from './streaming.js'
 import { fingerprintSource } from './streaming.js'
@@ -37,6 +38,7 @@ export interface FileInfo {
  * the daemon over Node's `fs`; the engine and its tests use `MemoryFileSystem`.
  */
 export interface FileSystem extends Partial<StreamingFileSystem> {
+  [pathAdmission]?(path: string): PathAdmission
   /** conditionalFile enforces operation.authorize at its mutation boundary. */
   readonly conditionalOwnership?: true
   /** Optional durable object identity, stable across rename, different after

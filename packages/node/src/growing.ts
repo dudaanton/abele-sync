@@ -1,5 +1,6 @@
 import { normalisePath } from '@abele/sync-protocol'
 import type { FileInfo, FileSystem, PathMatcher } from '@abele/sync-core'
+import { pathAdmission } from '@abele/sync-core'
 
 /** How many files are asked whether they have settled at once. */
 const POOL = 16
@@ -48,6 +49,7 @@ export class SettlingFileSystem implements FileSystem, PathMatcher {
   /** Present only when the adapter watches, so the engine's `fs.watch !== undefined` is honest. */
   readonly watch?: (cb: (paths: string[]) => void) => () => void
   readonly pathKey?: FileSystem['pathKey']
+  readonly [pathAdmission]?: FileSystem[typeof pathAdmission]
   readonly openRead?: FileSystem['openRead']
   readonly fingerprint?: FileSystem['fingerprint']
   readonly fileIdentity?: FileSystem['fileIdentity']
@@ -66,6 +68,7 @@ export class SettlingFileSystem implements FileSystem, PathMatcher {
   readonly removeDirectory?: FileSystem['removeDirectory']
 
   constructor(private readonly disk: SettleableFileSystem) {
+    if (disk[pathAdmission]) this[pathAdmission] = disk[pathAdmission].bind(disk)
     if (disk.pathKey) this.pathKey = disk.pathKey.bind(disk)
     const watch = disk.watch
     if (watch) this.watch = (cb) => watch.call(disk, cb)

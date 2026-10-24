@@ -8,6 +8,7 @@ import {
 import { pathOccupant } from './pathOccupant.js'
 import { hasStoredDirectoryRefusals } from './v2Directories.js'
 import { placementRefusal } from './placementRefusal.js'
+import { hostPathRefusal } from './pathAdmission.js'
 import { olderPull, recordPull } from './pullHistory.js'
 import { transact } from './stateTransaction.js'
 import { commitAppliedSettlement } from './settlement.js'
@@ -284,6 +285,8 @@ export class Puller {
   }
 
   private async changeRefusal(change: ChangeItem) {
+    const host = change.op === 'delete' ? undefined : hostPathRefusal(this.fs, change.path)
+    if (host) return host
     if (!this.client.pathRefusal && !(await hasStoredDirectoryRefusals(this.state))) return
     const entry = await this.state.byFileId(change.file_id)
     return placementRefusal(this.client, this.state, change, entry)
@@ -658,7 +661,10 @@ export class Puller {
       // A directory hold forbids placement, not recording incoming metadata for
       // review. Approval still takes the ordinary refusal path below.
       try {
-        const stage = await this.staging(change)
+        const stage =
+          change.op !== 'delete' && hostPathRefusal(this.fs, change.path)
+            ? null
+            : await this.staging(change)
         if (stage !== null) {
           staged.push(stage)
           continue
@@ -679,6 +685,7 @@ export class Puller {
         if (this.state.getMeta && this.state.setMeta) {
           this.refused.put({
             change,
+            reason: refusal.message,
             base: (await this.state.byFileId(change.file_id))?.versionId ?? null,
             firstSeq: this.coverage.get(change.file_id) ?? change.seq,
           })

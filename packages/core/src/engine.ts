@@ -24,6 +24,7 @@ import { TransferBudget } from './streaming.js'
 import { requestReconciliation } from './reconciliation.js'
 import { SyncCancelled } from './cancellation.js'
 import { fileErrors } from './fileRetry.js'
+import { waitingSnapshot } from './incomingWaiting.js'
 export type { WaitingFile } from './fileRetry.js'
 
 export { classifyFailure, joinFinished } from './engineTypes.js'
@@ -289,7 +290,7 @@ export class SyncEngine implements ExclusiveOperationPort {
   async waitingFiles(): Promise<import('./fileRetry.js').WaitingFile[]> {
     return this.exclusive(async () => {
       await this.cycle.retries.load()
-      return this.cycle.retries.list()
+      return waitingSnapshot(this.opts.state, this.cycle.retries.list())
     })
   }
 
@@ -498,7 +499,7 @@ export class SyncEngine implements ExclusiveOperationPort {
       throw error
     } finally {
       this.activeCycle = false
-      const waitingFiles = this.cycle.retries.list()
+      const waitingFiles = await waitingSnapshot(this.opts.state, this.cycle.retries.list())
       this.set({ waiting: waitingFiles.length, waitingFiles })
       if (waitingFiles.length) this.log(`sync: ${waitingFiles.length} waiting`)
       // File timers must not bypass network/auth/server failure handling.

@@ -1,5 +1,6 @@
 import { caseKey, normalisePath, type CommitOp } from '@abele/sync-protocol'
 import { EngineError } from './errors.js'
+import { assertHostPath } from './pathAdmission.js'
 import { touchesDeferred } from './defer.js'
 import { fingerprintFile, type FileSystem, type ConditionalFileOperation } from './fs.js'
 import type { ResumeOptions } from './pusher.js'
@@ -36,6 +37,8 @@ export function sentBy(op: CommitOp, previous: StateEntry | null): Content | nul
 /** The adapters one push runs over, and the spellings its scan found. */
 export class PushDisk {
   private async effect(op: ConditionalFileOperation): Promise<boolean> {
+    if (op.effect.kind !== 'remove')
+      assertHostPath(this.fs, op.effect.kind === 'move' ? op.effect.to : op.path)
     await this.state.setMeta?.(`pull-base:${op.path}`, JSON.stringify({ base: op.expected }))
     return (await this.fs.conditionalFile?.(op)) ?? false
   }

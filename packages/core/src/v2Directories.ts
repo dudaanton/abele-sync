@@ -1,3 +1,4 @@
+import { hostPathRefusal } from './pathAdmission.js'
 import { ScanWork, parents } from './scanWork.js'
 import { replayAuthority } from './replayAuthority.js'
 import { transact } from './stateTransaction.js'
@@ -25,6 +26,9 @@ const DocumentSchema = z
   .object({
     schemaVersion: z.literal(2).optional(),
     incoming: z.array(V2ManifestItemSchema).optional(),
+    incomingSeq: z
+      .record(z.string(), z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER))
+      .optional(),
     tombstones: z
       .array(
         z
@@ -43,6 +47,7 @@ const DocumentSchema = z
             code: ErrorCodeSchema,
             message: z.string(),
             direction: z.enum(['push', 'pull']),
+            host: z.literal(true).optional(),
             evidence: z.literal(true).optional(),
             source: PathSchema.optional(),
             candidateIdentity: z.string().min(1).optional(),
@@ -88,6 +93,7 @@ interface LocalDirectory extends DirectoryItem {
   localPath?: string
 }
 interface Document {
+  incomingSeq?: Record<string, number>
   schemaVersion?: 2
   incoming?: V2ManifestItem[]
   tombstones?: Array<{ fileId: string; seq: number }>
@@ -118,6 +124,7 @@ async function parseDocument(raw: string): Promise<Document> {
 }
 
 export interface DirectoryRefusal extends Refusal {
+  host?: true
   path: string
   direction: 'push' | 'pull'
   /** Recomputed on every directory scan, unlike an explicit server refusal. */
@@ -170,6 +177,33 @@ export async function heldDirectoryPaths(state: StateStore): Promise<Set<string>
   return new Set(doc.refused?.filter((row) => row.evidence).map((row) => row.path))
 }
 
+export async function waitingDirectories(
+  state: StateStore
+): Promise<import('./fileRetry.js').WaitingFile[]> {
+  const raw = await state.getMeta?.(KEY)
+  if (raw == null) return []
+  const doc = await parseDocument(raw)
+  return (doc.incoming ?? []).flatMap((item) => {
+    const refusal = doc.refused?.find((row) => row.path === item.path && row.direction === 'pull')
+    return refusal
+      ? [
+          {
+            path: item.path,
+            fileId: item.file_id,
+            versionId: item.version_id,
+            seq: doc.incomingSeq?.[item.file_id] ?? 0,
+            reason: refusal.message,
+            phase: 'pull' as const,
+            attempts: 1,
+            nextAt: 0,
+            quarantined: true,
+            owner: KEY,
+          },
+        ]
+      : []
+  })
+}
+
 // These codes are item refusals in an op result or a host mkdir. HTTP forbidden
 // still revokes connection authority and must abort rather than suppress a path.
 const refusalCodes = new Set([
@@ -213,6 +247,10 @@ export class V2Directories {
     return doc
   }
   private save(doc: Document, state: StateStore = this.state) {
+    if (doc.incomingSeq) {
+      const ids = new Set(doc.incoming?.map((item) => item.file_id))
+      for (const id of Object.keys(doc.incomingSeq)) if (!ids.has(id)) delete doc.incomingSeq[id]
+    }
     doc.schemaVersion = 2
     this.indexRefusals(doc.refused ?? [])
     return state.setMeta!(KEY, JSON.stringify(doc))
@@ -251,18 +289,26 @@ export class V2Directories {
       { path, code: error.code, message: error.message, direction },
     ]
   }
-  async receive(item: DirectoryItem) {
+  async receive(item: DirectoryItem, seq?: number) {
     this.signal?.throwIfAborted()
     if (!this.includes(item.path)) return
     if (!this.fs.mkdir || !this.fs.listDirectories)
       throw new AbeleError('invalid_request', 'host directory filesystem ports are required')
     const doc = await this.read()
+    if (seq !== undefined) {
+      if ((doc.incomingSeq?.[item.file_id] ?? 0) > seq) return
+      ;(doc.incomingSeq ??= {})[item.file_id] = seq
+    }
     const previousIncoming = doc.incoming?.find((directory) => directory.file_id === item.file_id)
     if (previousIncoming && previousIncoming.path !== item.path) {
       doc.refused = doc.refused?.filter((entry) => entry.path !== previousIncoming.path)
       this.indexRefusals(doc.refused ?? [])
     }
-    if (this.refusalFor(item.path)?.direction === 'pull') {
+    const previousRefusal = this.refusalFor(item.path)
+    if (
+      previousRefusal?.direction === 'pull' &&
+      !(previousRefusal.host && !hostPathRefusal(this.fs, item.path))
+    ) {
       // Keep the latest identity without retrying mkdir. A delayed departure of an
       // older directory at this spelling must not retire the replacement's refusal.
       doc.incoming = [
@@ -273,6 +319,14 @@ export class V2Directories {
       return
     }
     const old = doc.directories.find((d) => d.file_id === item.file_id)
+    const admission = hostPathRefusal(this.fs, item.path)
+    if (admission) {
+      this.refuse(doc, item.path, admission, 'pull')
+      doc.refused!.find((row) => row.path === item.path)!.host = true
+      doc.incoming = [...(doc.incoming ?? []).filter((d) => d.file_id !== item.file_id), item]
+      await this.save(doc)
+      return
+    }
     // Place the destination, then let file events move only tracked content. Moving
     // the entire source directory would relocate unsent bytes and local-only folders.
     const inventory = await LocalPaths.forPath(this.fs, item.path, this.state)
@@ -328,6 +382,7 @@ export class V2Directories {
   }
   async departed(fileId: string, keep = false, seq?: number) {
     const doc = await this.read()
+    if (seq !== undefined && (doc.incomingSeq?.[fileId] ?? 0) > seq) return false
     const waiting = doc.incoming?.find((item) => item.file_id === fileId)
     const old = doc.directories.find((d) => d.file_id === fileId)
     if (

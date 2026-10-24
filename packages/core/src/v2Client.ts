@@ -384,7 +384,7 @@ export class V2EngineClient implements EngineClient {
     )
       return null
     if (item.kind === 'directory') {
-      await this.directories?.receive(item)
+      await this.directories?.receive(item, seq)
       return null
     }
     this.departed.delete(item.path)

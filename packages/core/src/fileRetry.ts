@@ -1,4 +1,5 @@
 import { AbeleError } from '@abele/sync-protocol'
+import { HostPathAdmissionError } from './pathAdmission.js'
 import type { FileSystem } from './fs.js'
 import type { StateStore } from './state.js'
 import { isFinalForBatch } from './commitErrors.js'
@@ -6,6 +7,10 @@ import { afterStateCommit, transact } from './stateTransaction.js'
 
 export type RetryPhase = 'pull' | 'push' | 'scan' | 'recovery' | 'departure'
 export interface WaitingFile {
+  /** Exact durable incoming identity, when this row represents a placement refusal. */
+  fileId?: string
+  versionId?: string
+  seq?: number
   path: string
   phase: RetryPhase
   attempts: number
@@ -209,7 +214,10 @@ export class FileRetries {
       attempts,
       nextAt: this.now() + Math.min(300000, 5000 * 2 ** Math.min(attempts - 1, 6)),
       reason: error instanceof Error ? error.message : String(error),
-      quarantined: quarantine || (phase === 'recovery' && attempts >= 3),
+      quarantined:
+        quarantine ||
+        error instanceof HostPathAdmissionError ||
+        (phase === 'recovery' && attempts >= 3),
       local: error instanceof FileOperationError,
       ...((owner ?? prior?.owner) ? { owner: owner ?? prior?.owner } : {}),
       ...(attempt === undefined ? {} : { attempt }),

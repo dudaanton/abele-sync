@@ -1,6 +1,12 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { MemoryStateStore, type EngineClient, type FileSystem } from '@abele/sync-core'
-import { guarded, stoppableListings } from '../../../core/src/guard.js'
+import {
+  MemoryStateStore,
+  pathAdmission,
+  type EngineClient,
+  type FileSystem,
+} from '@abele/sync-core'
+import { guarded, stoppableListings, stoppableFileEffects } from '../../../core/src/guard.js'
+import { fileErrors } from '../../../core/src/fileRetry.js'
 import { scanSnapshot } from '../../../core/src/scanSnapshot.js'
 import { SettlingFileSystem, type SettleableFileSystem } from '../../src/growing.js'
 import { NodeFileSystem } from '../../src/nodeFs.js'
@@ -9,7 +15,7 @@ const info = { path: 'file.bin', size: 1, mtime: 2 }
 const base = { size: 1, mtime: 2, sha: 'a'.repeat(64) }
 const stamp = { size: 1, mtime: 2, generation: 'source' }
 const signal = new AbortController().signal
-const beforeCreate = async (_id: string) => {}
+const beforeCreate = vi.fn(async (_id: string) => {})
 const bytes = new Uint8Array([1])
 const stop = () => {}
 const stage = { id: 'stage' }
@@ -26,6 +32,11 @@ const methods: Array<{
   result: unknown
   iterable?: boolean
 }> = [
+  {
+    name: pathAdmission,
+    args: ['a:b'],
+    result: { allowed: false, reason: 'unsupported-host-name: colon' },
+  },
   { name: 'pathKey', args: ['NOTE.bin'], result: 'note.bin' },
   { name: 'list', args: [], result: [info], iterable: true },
   {
@@ -56,6 +67,11 @@ const methods: Array<{
 ]
 
 const wrappers = [
+  { name: 'file errors', wrap: (disk: SettleableFileSystem) => fileErrors(disk) },
+  {
+    name: 'file effects',
+    wrap: (disk: SettleableFileSystem) => stoppableFileEffects(disk, () => signal),
+  },
   {
     name: 'settling',
     wrap: (disk: SettleableFileSystem): FileSystem => new SettlingFileSystem(disk),
@@ -81,7 +97,7 @@ for (const wrapper of wrappers)
     `${wrapper.name} forwards $name arguments, receiver and result`,
     async ({ name, args, result, iterable }) => {
       const disk = { sizeStable: async () => true } as unknown as SettleableFileSystem
-      const calls = new Map<string, ReturnType<typeof vi.fn>>()
+      const calls = new Map<PropertyKey, ReturnType<typeof vi.fn>>()
       for (const method of methods) {
         const call = vi.fn(function (this: SettleableFileSystem, ..._args: unknown[]) {
           expect(this).toBe(disk)
@@ -98,20 +114,32 @@ for (const wrapper of wrappers)
       const forward = Reflect.get(fs, name) as (...args: unknown[]) => unknown
       expect(forward).toBeTypeOf('function')
       const returned = Reflect.apply(forward, fs, args)
+      if (name === pathAdmission) expect(returned).toBe(result)
       if (iterable) {
         const items = []
         for await (const item of returned as AsyncIterable<unknown>) items.push(item)
         expect(items).toEqual(result)
       } else if (
-        wrapper.name === 'ownership' &&
+        ['ownership', 'file errors', 'file effects'].includes(wrapper.name) &&
         (name === 'beginAtomicWrite' || name === 'reopenStage')
       ) {
         // Ownership checks intentionally wrap the stage, preserving its identity fields.
         const guardedStage = (await returned) as typeof stage
         expect(guardedStage).not.toBe(result)
         expect(guardedStage.id).toBe(stage.id)
+      } else if (wrapper.name === 'file errors' && name === 'openRead') {
+        expect(await returned).not.toBe(result)
+        expect(await returned).toEqual(result)
       } else expect(await returned).toBe(result)
       const call = calls.get(name)!
+      if (wrapper.name === 'file errors' && name === 'beginAtomicWrite') {
+        expect(call).toHaveBeenCalledTimes(1)
+        expect(call.mock.calls[0]!.slice(0, 3)).toEqual(args.slice(0, 3))
+        const callback = call.mock.calls[0]![3] as (id: string) => Promise<void>
+        await callback('stage-id')
+        expect(beforeCreate).toHaveBeenCalledExactlyOnceWith('stage-id')
+        return
+      }
       expect(call).toHaveBeenCalledExactlyOnceWith(...args)
       for (let i = 0; i < args.length; i++) expect(call.mock.calls[0]![i]).toBe(args[i])
     }
@@ -119,7 +147,9 @@ for (const wrapper of wrappers)
 
 const optional = methods
   .map(({ name }) => name)
-  .filter((name) => !['list', 'read', 'writeAtomic', 'move', 'remove', 'stat'].includes(name))
+  .filter(
+    (name) => !['list', 'read', 'writeAtomic', 'move', 'remove', 'stat'].includes(String(name))
+  )
 for (const wrapper of wrappers)
   it.each(optional)(`${wrapper.name} does not advertise absent optional capability %s`, (name) => {
     const disk = {
@@ -151,7 +181,7 @@ it.each(methods.filter(({ name }) => tracked.has(name)))(
   'Node effect tracker forwards $name arguments and receiver',
   async ({ name, args, result }) => {
     const prototype = NodeFileSystem.prototype as unknown as Record<
-      string,
+      PropertyKey,
       (...args: unknown[]) => unknown
     >
     let disk: NodeFileSystem

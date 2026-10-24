@@ -1,3 +1,4 @@
+import { hostPathRefusal, assertHostPath } from './pathAdmission.js'
 import { pathOccupant } from './pathOccupant.js'
 import { olderPull, pullHistoryKey, recordPull } from './pullHistory.js'
 import { replayAuthority } from './replayAuthority.js'
@@ -353,6 +354,8 @@ export class PullPlacer {
     if (!prepared)
       await this.state.setMeta?.(`pull-base:${op.path}`, JSON.stringify({ base: op.expected }))
     checkCancellation(this.opts.signal)
+    if (op.effect.kind !== 'remove')
+      assertHostPath(this.fs, op.effect.kind === 'move' ? op.effect.to : op.path)
     return (await this.fs.conditionalFile?.(op)) ?? false
   }
 
@@ -549,6 +552,7 @@ export class PullPlacer {
     // The bytes before anything on the disk moves: a server whose blob is not what it says
     // leaves the file where it was, and the change is held with the reason in the log.
     const beforeTarget = state.free
+    assertHostPath(this.fs, target)
     if (!state.removed && !sameStat(firstTarget, beforeTarget)) return false
     const streaming =
       this.fs.beginAtomicWrite &&
@@ -862,10 +866,13 @@ export class PullPlacer {
   }
 
   async refusal(change: ChangeItem, entry: StateEntry | null) {
+    const host = change.op === 'delete' ? undefined : hostPathRefusal(this.fs, change.path)
+    if (host) return host
     const refusal = await this.pending.refused(
       change.file_id,
       [change.path, change.prev_path],
-      entry
+      entry,
+      change.op !== 'delete'
     )
     if (refusal) this.opts.log?.(`pull: holding ${change.path}: ${refusal.message}`)
     return refusal

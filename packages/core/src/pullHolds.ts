@@ -8,6 +8,7 @@ export const HELD_PROGRESS = 'pull-held-progress'
 const PREFIX = 'pull-held:'
 export const pullHoldKey = (id: string) => PREFIX + encodeURIComponent(id)
 export interface HeldChange {
+  reason?: string
   change: ChangeItem
   base: string | null
   firstSeq: number
@@ -117,7 +118,13 @@ export class PullHolds {
     if (old !== undefined) {
       if (held.change.seq < old.change.seq) return
       const firstSeq = Math.min(old.firstSeq, held.firstSeq)
-      if (old.change === held.change && old.base === held.base && old.firstSeq === firstSeq) return
+      if (
+        old.change === held.change &&
+        old.base === held.base &&
+        old.firstSeq === firstSeq &&
+        old.reason === held.reason
+      )
+        return
       this.forgetPath(old.change)
       this.records.set(id, { ...held, firstSeq, next: old.next })
       if (firstSeq !== old.firstSeq) this.push({ id, seq: firstSeq })
