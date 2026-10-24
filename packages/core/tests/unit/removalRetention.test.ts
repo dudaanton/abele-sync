@@ -14,6 +14,39 @@ import {
 
 const DAY = 86400000
 
+it('retains an interrupted receiptless replacement without publishing a spurious conflict', async () => {
+  const { fs, base, bytes } = await fixture()
+  await fs.move(base.path, 'displaced')
+  await fs.writeAtomic(base.path, new Uint8Array([9]), 2)
+  const move = fs.conditionalFile.bind(fs)
+  fs.conditionalFile = async (op) => {
+    const applied = await move(op)
+    if (applied) throw new Error('capture interrupted')
+    return applied
+  }
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(0)
+  try {
+    await expect(retainPublishedVictim(fs, 'displaced', base.path, base)).rejects.toThrow(
+      'capture interrupted'
+    )
+    fs.conditionalFile = move
+    await recoverRemovals(fs, undefined, { now: () => 8 * DAY, maxBytes: 0 })
+    const [row] = await retentionSnapshot(fs)
+    expect(row?.phase).toBe('committed')
+    expect(row?.capturedAt).toBe(8 * DAY)
+    expect(await fs.read(row!.victim)).toEqual(bytes)
+    expect(await fs.stat(`${base.path}.sync-conflict-${row!.id}`)).toBeNull()
+    expect(await fs.read(base.path)).toEqual(new Uint8Array([9]))
+    // Late descriptor writes still become unique visible bytes at reclamation.
+    await fs.writeAtomic(row!.victim, new Uint8Array([7]), 1)
+    await recoverRemovals(fs, undefined, { now: () => 9 * DAY, maxBytes: 0 })
+    expect(await fs.read(`${base.path}.sync-conflict-${row!.id}`)).toEqual(new Uint8Array([7]))
+    expect(await fs.read(base.path)).toEqual(new Uint8Array([9]))
+  } finally {
+    clock.mockRestore()
+  }
+})
+
 it('restarts the minimum age when publication capture acknowledgement was interrupted', async () => {
   const { fs, base } = await fixture()
   const move = fs.conditionalFile.bind(fs)

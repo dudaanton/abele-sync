@@ -26,6 +26,9 @@ interface RetainedRemoval {
   phase: 'prepared' | 'held' | 'committed' | 'restored'
   decision?: string
   publication?: RemovalPublication
+  /** The displaced object was captured after a replacement was published.
+   * Receiptless replacements already have authority to retain their old bytes. */
+  replacement?: true
 }
 interface Decision {
   id: string
@@ -111,6 +114,7 @@ export function decodeRetentionSnapshot(raw: unknown): RetainedRemoval[] {
       (row.decision !== undefined &&
         row.decision !== decisionKey(row.id) &&
         row.decision !== `volatile-removal:${row.id}`) ||
+      (row.replacement !== undefined && row.replacement !== true) ||
       (row.publication !== undefined &&
         (!row.publication ||
           !['installation', 'stage'].includes(row.publication.kind) ||
@@ -372,6 +376,7 @@ export async function retainPublishedVictim(
       expected,
       capturedAt: Date.now(),
       phase: 'prepared',
+      replacement: true,
       ...(publication ? { publication } : {}),
     }
     rows.push(row)
@@ -502,7 +507,19 @@ export async function recoverRemovals(
         // Capture may have finished long after the allocation timestamp, then
         // crashed before acknowledgement. Restart its conservative minimum age.
         if (row.phase === 'prepared') row.capturedAt = now
-        if (live?.committed || (decision?.id === row.id && decision.committed))
+        if (row.replacement) {
+          // A receipt/stage owner was handled above. Without one, publication
+          // preceded capture and needs no further acknowledgement. Keep this
+          // distinction durable across a crash before the phase save; restoring
+          // here would invent a conflict alongside the published replacement.
+          if ((await fs.stat(row.victim)) === null) row.phase = 'restored'
+          else {
+            const identity = await fs.fileIdentity?.(row.victim)
+            if (row.expected.identity === undefined && identity)
+              row.expected = { ...row.expected, identity }
+            row.phase = 'committed'
+          }
+        } else if (live?.committed || (decision?.id === row.id && decision.committed))
           row.phase = 'committed'
         else if (await restore(fs, row)) row.phase = 'restored'
         await save(fs, rows)

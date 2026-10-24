@@ -620,22 +620,24 @@ for (const [caseOnly, fold] of [
     describe(`group ${mode} (${fold ? 'folding case-only' : 'native'}) converges after every lifecycle await and every nested recovery await`, () => {
       let count = 0
       const covered = new Set<number>()
-      // Retained publication ownership adds lifecycle awaits to writes. Keep
-      // every cut and the eight-cuts-per-test bound by adding partitions.
-      const partitions = mode === 'write' ? 80 : 64
+      // Completed retained-write recovery traces are deeper than removal/move
+      // traces. Split their work further, retaining every cut and the original
+      // wall-clock timeout; a write partition now has at most two cuts.
+      const partitions = mode === 'write' ? 512 : 64
+      const maxCuts = mode === 'write' ? 2 : 8
       beforeAll(async () => {
         count = await run(0, '', mode, 0, false, false, caseOnly, fold)
         expect(count).toBeGreaterThan(0)
         expect(
           Math.ceil(count / partitions),
           'bounded lifecycle cuts per test'
-        ).toBeLessThanOrEqual(8)
+        ).toBeLessThanOrEqual(maxCuts)
       }, 60_000)
       for (let part = 0; part < partitions; part++)
         it(`lifecycle partition ${part + 1}/${partitions}`, async ({ signal }) => {
           const first = Math.floor((part * count) / partitions) + 1
           const last = Math.floor(((part + 1) * count) / partitions)
-          expect(last - first + 1, 'bounded lifecycle cuts per test').toBeLessThanOrEqual(8)
+          expect(last - first + 1, 'bounded lifecycle cuts per test').toBeLessThanOrEqual(maxCuts)
           for (let cut = first; cut <= last; cut++) {
             try {
               await run(cut, '', mode, 0, true, false, caseOnly, fold, false, signal)
