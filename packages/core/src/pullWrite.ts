@@ -165,10 +165,7 @@ export class PendingPullWrites {
   async settled(change: ChangeItem, discard?: (id: string) => Promise<void>): Promise<void> {
     if (await this.refused(change.file_id, [change.path, change.prev_path])) return
     const pending = await this.read(change.file_id)
-    if (pending?.versionId === change.version_id) {
-      if (pending.stageId !== undefined && discard) await discard(pending.stageId)
-      await this.clear(change.file_id)
-    }
+    if (pending?.versionId === change.version_id) await this.retire(pending, discard)
   }
 
   async clear(fileId: string): Promise<void> {
@@ -179,9 +176,12 @@ export class PendingPullWrites {
   /** Private byte cleanup (also used by cache eviction, which keeps its decision).
    * Retire bytes before their ownership record. An interrupted retirement is
    * resumed, never interpreted as permission to install or fetch the old stage. */
-  private async retire(pending: PendingPullWrite): Promise<void> {
+  private async retire(
+    pending: PendingPullWrite,
+    discard?: (id: string) => Promise<void>
+  ): Promise<void> {
     if (await this.refused(pending.fileId)) return
-    if (!this.fs)
+    if (!this.fs && (pending.stageId || pending.receiptId))
       throw new EngineError('io', 'host cannot retire a held pull stage without its filesystem')
     const original = JSON.stringify(pending)
     const retiring = JSON.stringify({ ...pending, retiring: true })
@@ -205,8 +205,11 @@ export class PendingPullWrites {
       }
     )
     if (!owned) return
-    if (pending.stageId) await discardPullStage(this.fs, pending.stageId)
-    if (pending.receiptId) await this.fs.discardInstallation?.(pending.receiptId)
+    if (pending.stageId) {
+      if (discard) await discard(pending.stageId)
+      else await discardPullStage(this.fs!, pending.stageId)
+    }
+    if (pending.receiptId) await this.fs!.discardInstallation?.(pending.receiptId)
     await commitAppliedSettlement(
       this.state,
       async () => ({ reached: await this.state.getCursor(), firstUnresolved: null }),

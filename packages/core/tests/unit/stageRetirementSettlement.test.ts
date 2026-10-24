@@ -1,8 +1,88 @@
 import { expect, it, vi } from 'vitest'
-import { MemoryFileSystem, MemoryStateStore, StagedChanges } from '../../src/index.js'
+import {
+  MemoryFileSystem,
+  MemoryStateStore,
+  StagedChanges,
+  ExpectedWrites,
+  sha256,
+} from '../../src/index.js'
+import { PullPlacer } from '../../src/pullPlace.js'
 import { PendingPullWrites } from '../../src/pullWrite.js'
 import { change } from './holdFixture.js'
 import { decorateStateTransactions } from '../helpers/stateTransactions.js'
+
+it('keeps installation receipt evidence through raw outer rollback of successful cleanup', async () => {
+  const f = await fixture()
+  const discardInstallation = vi.fn(async (_id: string) => {})
+  const fs = Object.assign(f.fs, { discardInstallation })
+  await f.pending.prepare(f.item, null, f.item.path, null, 'old-stage', 'old-receipt')
+  const original = await f.state.getMeta(f.key)
+  await expect(
+    f.state.transaction(async (outer) => {
+      const placer = new PullPlacer(
+        {
+          getBlob: async () => {
+            throw new Error('cleanup must not download')
+          },
+        },
+        fs,
+        outer,
+        {
+          dirty: new Set(),
+          expected: new ExpectedWrites(),
+          filter: { excluded: () => false },
+        },
+        sha256
+      )
+      await placer.settled(f.item)
+      throw new Error('outer rollback')
+    })
+  ).rejects.toThrow('outer rollback')
+  expect(discardInstallation).not.toHaveBeenCalled()
+  expect(f.discard).not.toHaveBeenCalled()
+  expect(await f.state.getMeta(f.key)).toBe(original)
+})
+
+it('does not discard a successfully installed stage before its owning outer commit', async () => {
+  const f = await fixture()
+  await expect(
+    f.state.transaction(async (outer) => {
+      await new PendingPullWrites(outer, f.fs).settled(f.item, f.discard)
+      throw new Error('outer rollback')
+    })
+  ).rejects.toThrow('outer rollback')
+  expect(f.discard).not.toHaveBeenCalled()
+  expect(await f.state.getMeta(f.key)).toBe(f.original)
+})
+
+it('keeps a replacement intent arriving during successful stage cleanup', async () => {
+  const f = await fixture()
+  const replacement = JSON.stringify({
+    ...JSON.parse(f.original),
+    versionId: 'newer',
+    stageId: 'new-stage',
+  })
+  f.discard.mockImplementation(async () => {
+    await f.state.setMeta(f.key, replacement)
+  })
+  await f.pending.settled(f.item, f.discard)
+  expect(await f.state.getMeta(f.key)).toBe(replacement)
+})
+
+it('publishes successful cleanup ownership with the frontier before discarding bytes', async () => {
+  const f = await fixture()
+  const transaction = f.state.transaction.bind(f.state)
+  f.state.transaction = (work) =>
+    transaction(async (tx) => {
+      tx.setCursor = async () => {
+        throw new Error('frontier failed')
+      }
+      return work(tx)
+    })
+  await expect(f.pending.settled(f.item, f.discard)).rejects.toThrow('frontier failed')
+  expect(await f.state.getMeta(f.key)).toBe(f.original)
+  expect(f.discard).not.toHaveBeenCalled()
+})
 
 async function fixture() {
   const state = new MemoryStateStore()

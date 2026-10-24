@@ -121,8 +121,6 @@ export class PullPlacer {
   }
   async settled(change: ChangeItem): Promise<void> {
     if (await this.refusal(change, await this.state.byFileId(change.file_id))) return
-    const receipt = await this.pending.receiptId(change)
-    if (receipt !== undefined) await this.fs.discardInstallation?.(receipt)
     await this.pending.settled(change, (id) => discardPullStage(this.fs, id))
   }
 
