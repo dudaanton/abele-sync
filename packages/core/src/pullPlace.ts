@@ -317,7 +317,7 @@ export class PullPlacer {
       )
     }
     if (!(await authorized(this.state))) return false
-    if (!(await this.clearPath(entry.path, entry))) return false
+    if (!(await this.clearPath(entry.path, entry, () => authorized(this.state)))) return false
     if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
     let recorded = false
     await commitAppliedSettlement(
@@ -366,9 +366,31 @@ export class PullPlacer {
     return saved.base === null || saved.base.sha !== sha
   }
 
-  private async clearPath(path: string, base: StateEntry): Promise<boolean> {
+  private async clearPath(
+    path: string,
+    base: StateEntry,
+    authorize = async () =>
+      replayAuthority(
+        base.fileId,
+        base,
+        await this.state.byFileId(base.fileId),
+        await pathOccupant(this.fs, this.state, path, base.fileId)
+      ) && !(await this.pending.refused(base.fileId, [path], base))
+  ): Promise<boolean> {
     try {
-      return await this.effect({ path, expected: base, effect: { kind: 'remove' } })
+      const identity = await this.fs.fileIdentity?.(path)
+      const expected = { ...base, ...(identity != null ? { identity } : {}) }
+      if (!(await authorize())) return false
+      if (this.fs.conditionalOwnership)
+        return await this.effect({ path, expected, authorize, effect: { kind: 'remove' } })
+      // Older hosts cannot enforce ledger authority at capture. Keep the captured
+      // bytes as an ordinary, visible conflict copy, including on success. Such a
+      // copy needs no private cleanup owner and must never be silently retired.
+      if ((await this.fs.stat(path)) === null) return await authorize()
+      const to = `${path}.sync-conflict-${crypto.randomUUID()}`
+      if (!(await this.effect({ path, expected, effect: { kind: 'move', to } }))) return false
+      this.opts.log?.(`pull: retained removal at ${to}`)
+      return await authorize()
     } catch (error) {
       if (!this.inTheWay(error)) throw error
       this.opts.log?.(`pull: ${path} cannot be removed: ${(error as Error).message}`)

@@ -35,6 +35,70 @@ async function fixture() {
   return { fs, state, base, placer, clear }
 }
 
+it('preserves an equal-byte replacement installed before conditional removal', async () => {
+  const { fs, state, base, placer } = await fixture()
+  const bytes = await fs.read(base.path)
+  const replacement = { ...base, fileId: 'replacement', versionId: 'new' }
+  const conditional = fs.conditionalFile.bind(fs)
+  fs.conditionalFile = async (operation) => {
+    await fs.writeAtomic(base.path, bytes, base.mtime)
+    await state.put(replacement)
+    return conditional(operation)
+  }
+  expect(await placer.drop(base)).toBe(false)
+  expect(await state.get(base.path)).toEqual(replacement)
+  expect(await fs.read(base.path)).toEqual(bytes)
+})
+
+it('rechecks ledger ownership inside conditional removal even without an object replacement', async () => {
+  const { fs, state, base, placer } = await fixture()
+  const replacement = { ...base, fileId: 'replacement', versionId: 'new' }
+  const conditional = fs.conditionalFile.bind(fs)
+  fs.conditionalFile = async (operation) => {
+    await state.put(replacement)
+    return conditional(operation)
+  }
+  expect(await placer.drop(base)).toBe(false)
+  expect(await state.get(base.path)).toEqual(replacement)
+  expect(await fs.read(base.path)).toEqual(new Uint8Array([1]))
+})
+
+it('carries object identity when equal bytes replace the file without a ledger change', async () => {
+  const { fs, state, base, placer } = await fixture()
+  const bytes = await fs.read(base.path)
+  const conditional = fs.conditionalFile.bind(fs)
+  fs.conditionalFile = async (operation) => {
+    expect(operation.expected?.identity).toBe(await fs.fileIdentity(base.path))
+    await fs.writeAtomic(base.path, bytes, base.mtime)
+    return conditional(operation)
+  }
+  expect(await placer.drop(base)).toBe(false)
+  expect(await state.get(base.path)).toEqual(base)
+  expect(await fs.read(base.path)).toEqual(bytes)
+})
+
+it('retains a racing replacement when the host cannot enforce identity or ownership', async () => {
+  const { fs, state, base, placer } = await fixture()
+  Object.defineProperty(fs, 'fileIdentity', { value: undefined })
+  Object.defineProperty(fs, 'conditionalOwnership', { value: undefined })
+  const bytes = await fs.read(base.path)
+  const replacement = { ...base, fileId: 'replacement', versionId: 'new' }
+  const conditional = fs.conditionalFile.bind(fs)
+  fs.conditionalFile = async (operation) => {
+    await fs.writeAtomic(base.path, bytes, base.mtime)
+    await state.put(replacement)
+    // A legacy host does not interpret a new optional callback.
+    return conditional({ ...operation, authorize: undefined })
+  }
+  expect(await placer.drop(base)).toBe(false)
+  expect(await state.get(base.path)).toEqual(replacement)
+  const retained = [...fs.snapshot()].filter(([path]) =>
+    path.startsWith(`${base.path}.sync-conflict-`)
+  )
+  expect(retained).toHaveLength(1)
+  expect(retained[0]![1]).toEqual(bytes)
+})
+
 it.each(['identity', 'version', 'case', 'unicode'])(
   'does not publish a completed incoming deletion over a replacement %s owner',
   async (mode) => {

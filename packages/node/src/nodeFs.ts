@@ -94,6 +94,7 @@ export interface NodeFileSystemOptions {
  * is swept by `sweepTemp`, which the daemon calls once it holds the lock and nobody else does.
  */
 export class NodeFileSystem implements FileSystem {
+  readonly conditionalOwnership = true as const
   readonly pathKey: (path: string) => string
   async conditionalFile(operation: ConditionalFileOperation): Promise<boolean> {
     const applied = await conditionalFile(this.base, operation, () => this.checkEffect())

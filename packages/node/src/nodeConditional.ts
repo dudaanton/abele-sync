@@ -135,6 +135,8 @@ export async function conditionalFile(
   op: ConditionalFileOperation,
   check: () => void
 ): Promise<boolean> {
+  if (op.authorize && op.effect.kind !== 'remove')
+    throw new Error('conditional ownership is only supported for removal')
   const id = valid(
     op.effect.kind === 'write' && op.effect.receipt
       ? op.effect.receipt
@@ -206,9 +208,23 @@ export async function conditionalFile(
         await restore()
         return false
       }
+      // A ledger replacement can leave exactly the same filesystem object.
+      // Never discard a denied victim, even when a newer public occupant has
+      // matching bytes. A throwing check follows the same conservative restore.
+      if (op.authorize) {
+        verified = false
+        if (!(await op.authorize())) {
+          await restore()
+          return false
+        }
+        verified = true
+      }
       await unlink(victim)
       captured = false
       await syncParents(victim, root)
+    } else if (op.authorize && !(await op.authorize())) {
+      await retire()
+      return false
     }
     if (op.effect.kind !== 'write' || !op.effect.receipt) {
       await retire()

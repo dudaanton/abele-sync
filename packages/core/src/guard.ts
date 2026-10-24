@@ -16,6 +16,7 @@ export function stoppableFileEffects(
   // pause policy. Evidence reads/retirement may finish a completed operation;
   // recovery can publish public bytes and therefore belongs behind the fence.
   const policy = {
+    conditionalOwnership: 'read',
     pathKey: 'read',
     conditionalFile: 'effect',
     installedFile: 'read',

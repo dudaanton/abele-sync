@@ -6,6 +6,50 @@ import { expect, it } from 'vitest'
 import { sha256 } from '@abele/sync-core'
 import { NodeFileSystem } from '../../src/nodeFs.js'
 
+it.each(['deny', 'throw', 'occupant'] as const)(
+  'preserves the captured removal victim when ownership check returns %s',
+  async (mode) => {
+    const root = await mkdtemp(join(tmpdir(), 'conditional-owner-'))
+    try {
+      const fs = new NodeFileSystem(root)
+      const bytes = new Uint8Array([1])
+      await fs.writeAtomic('file.bin', bytes, 1000)
+      const expected = {
+        ...(await fs.stat('file.bin'))!,
+        sha: await sha256(bytes),
+        identity: (await fs.fileIdentity('file.bin'))!,
+      }
+      let calls = 0
+      const result = fs.conditionalFile({
+        path: 'file.bin',
+        expected,
+        effect: { kind: 'remove' },
+        authorize: async () => {
+          calls++
+          expect(await fs.stat('file.bin')).toBeNull()
+          if (mode === 'occupant') await fs.writeAtomic('file.bin', bytes, 1000)
+          if (mode === 'throw') throw new Error('ownership read failed')
+          return false
+        },
+      })
+      if (mode === 'throw') await expect(result).rejects.toThrow('ownership read failed')
+      else expect(await result).toBe(false)
+      expect(calls).toBe(1)
+      expect(await fs.read('file.bin')).toEqual(bytes)
+      const copies = (await readdir(root)).filter((path) =>
+        path.startsWith('file.bin.sync-conflict-')
+      )
+      expect(copies).toHaveLength(mode === 'occupant' ? 1 : 0)
+      if (copies.length) expect(await fs.read(copies[0])).toEqual(bytes)
+      await fs.recoverConditionalFiles()
+      expect(await fs.read('file.bin')).toEqual(bytes)
+      expect(await readdir(join(root, '.abele-sync/conditional'))).toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }
+)
+
 it.each(['remove', 'move', 'write'] as const)(
   'quarantines and refuses a same-stat changed victim for %s',
   async (kind) => {

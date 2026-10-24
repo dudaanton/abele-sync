@@ -318,8 +318,21 @@ These are automated core/server observations, not live Obsidian or phone evidenc
 ## Filesystem host contract
 
 Core supports two implementations of `FileSystem.conditionalFile`. The host
-chooses the implementation behind the existing port; no additional core API or
-runtime capability flag is required.
+chooses the implementation behind the existing port.
+
+Incoming deletion additionally uses `conditionalOwnership: true` to negotiate a
+removal authority callback, `operation.authorize(): Promise<boolean>`. Such hosts
+must call it after capturing/comparing the victim and before retiring its bytes.
+False or an exception preserves the captured bytes, restoring without overwriting
+a newer public occupant (a visible conflict copy is valid retention). A callback
+is live authority only, never a durable recovery permission. Hosts must also enforce
+`expected.identity` when they provide `fileIdentity`. The final host mutation
+interval retains the limits of the conditional implementation described below.
+Hosts without `conditionalOwnership` remain supported: core uses an exclusive move
+to a visible `path.sync-conflict-<uuid>` copy and rechecks ownership afterward.
+These hosts retain even successful removals; core never automatically deletes those
+copies. This conservative fallback avoids assuming an older adapter implements a
+new optional callback. It introduces no private resource requiring cleanup recovery.
 
 1. **Exclusive or checked conditional effects.** Exclusive hosts compare the
    displaced regular file at the mutation boundary and publish into an exclusive

@@ -25,6 +25,7 @@ interface Disk {
 
 /** Durable disk and stage table; handles belong to one process epoch. */
 export class MemoryStreamingFS {
+  readonly conditionalOwnership = true as const
   readonly epoch: number
   readonly stages: Map<string, Stage>
   constructor(

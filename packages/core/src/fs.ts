@@ -14,6 +14,10 @@ export interface FileVersion {
 export interface ConditionalFileOperation {
   path: string
   expected: FileVersion | null
+  /** Removal-only. Hosts advertising conditionalOwnership check this after capturing/comparing
+   * the victim, before retiring its bytes. False preserves it without overwriting
+   * a newer public occupant. The callback is not a durable replay permission. */
+  authorize?: () => Promise<boolean>
   effect:
     | { kind: 'remove' }
     | { kind: 'move'; to: string }
@@ -33,6 +37,8 @@ export interface FileInfo {
  * the daemon over Node's `fs`; the engine and its tests use `MemoryFileSystem`.
  */
 export interface FileSystem extends Partial<StreamingFileSystem> {
+  /** conditionalFile enforces operation.authorize at its mutation boundary. */
+  readonly conditionalOwnership?: true
   /** Optional durable object identity, stable across rename, different after
    * replacement even for equal bytes/stat. Hosts exposing this MUST enforce
    * expected.identity in conditionalFile at the captured-object boundary. */
@@ -140,6 +146,7 @@ export interface MemoryFileSystemOptions {
  * are copied in and out, so no caller can reach into the store through an array it still holds.
  */
 export class MemoryFileSystem implements FileSystem {
+  readonly conditionalOwnership = true as const
   private nextIdentity = 0
   async fileIdentity(path: string): Promise<string | null> {
     return this.files.get(this.fold(path))?.identity ?? null
@@ -199,6 +206,9 @@ export class MemoryFileSystem implements FileSystem {
   }
 
   async conditionalFile(op: ConditionalFileOperation): Promise<boolean> {
+    if (op.authorize && op.effect.kind !== 'remove')
+      throw new Error('conditional ownership is only supported for removal')
+    if (op.authorize && !(await op.authorize())) return false
     // No await between comparison and mutation: one indivisible in-memory operation.
     const key = this.fold(op.path),
       current = this.files.get(key)
