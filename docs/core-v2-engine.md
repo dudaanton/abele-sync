@@ -66,7 +66,9 @@ Startup inventory uses cooperative task checkpoints, including cached scope,
 scanner and reconciliation loops: at most 256 paths or approximately 8 ms per
 checkpoint. Hosts may supply `EngineOptions.yieldTask` (also available on scan
 options); it must yield a host task, not just resolve a promise. The default uses
-`setTimeout(0)`. Cancellation is checked after yielding and before new effects;
+posted `MessageChannel` tasks, closing both ports after each checkpoint, with
+`setTimeout(0)` only on hosts without that capability. This avoids accumulating
+browser nested-timer delays across cached passes. Cancellation is checked after yielding and before new effects;
 an issued scheduler task is awaited before cancellation returns. This changes
 neither path order nor transfer concurrency. Cached content fingerprints remain
 valid inputs; yielding does not request extra content reads.

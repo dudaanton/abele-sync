@@ -45,11 +45,17 @@ export function wirePath(local: string): string {
 }
 
 /** Refresh only local keys; pending pull provenance remains immutable. */
-export async function refreshLocalPaths(fs: FileSystem, state: StateStore): Promise<void> {
-  const inventory = await LocalPaths.read(fs, state)
-  await inventory.rememberDirectories(state)
+export async function refreshLocalPaths(
+  fs: FileSystem,
+  state: StateStore,
+  opts: ScanScheduling = {}
+): Promise<void> {
+  const work = new ScanWork(opts)
+  const inventory = await LocalPaths.read(fs, state, opts)
+  await inventory.rememberDirectories(state, opts)
   const known = await rememberedCollisions(state)
   for await (const entry of state.all()) {
+    await work.step()
     if (await state.getMeta?.(`pull-write:${entry.fileId}`)) continue
     if (inventory.blocked(entry.wirePath)) continue
     let path: string
@@ -177,14 +183,16 @@ export class LocalPaths {
       parents(file.path)
       await work.step()
     }
-    if (state) await result.loadDirectoryHolds(state)
+    if (state) await result.loadDirectoryHolds(state, opts)
     return result
   }
-  private async loadDirectoryHolds(state: StateStore) {
+  private async loadDirectoryHolds(state: StateStore, opts: ScanScheduling = {}) {
+    const work = new ScanWork(opts)
     const holds = DirectoryHoldSchema.parse(
       JSON.parse((await state.getMeta?.('normalization-directory-collisions')) ?? '[]')
     )
     for (const hold of holds) {
+      await work.step()
       const candidates = this.entries.get(hold.path) ?? []
       if (hold.winner && !candidates.some((c) => c.path === hold.winner))
         for (const candidate of candidates)
@@ -197,7 +205,8 @@ export class LocalPaths {
     }
   }
   /** A tracked physical directory never yields its canonical subtree to a former twin. */
-  async rememberDirectories(state: StateStore) {
+  async rememberDirectories(state: StateStore, opts: ScanScheduling = {}) {
+    const work = new ScanWork(opts)
     const previous = DirectoryHoldSchema.parse(
       JSON.parse((await state.getMeta?.('normalization-directory-collisions')) ?? '[]')
     )
@@ -206,6 +215,7 @@ export class LocalPaths {
       (await state.getMeta?.('v2-directories')) ?? '{"directories":[]}'
     ) as { directories: Array<{ path: string; identity: string }> }
     for (const [path, candidates] of this.entries) {
+      await work.step()
       if (candidates.length < 2 || !candidates.some((c) => c.kind === 'directory')) continue
       const identity = ledger.directories.find((d) => d.path === path)?.identity
       const winner =
@@ -215,6 +225,7 @@ export class LocalPaths {
       holds.set(path, { path, winner, aliases: candidates.map((c) => c.path) })
     }
     for (const [path, hold] of holds) {
+      await work.step()
       const candidates = this.entries.get(path) ?? []
       if (candidates.length > 1) continue
       if (

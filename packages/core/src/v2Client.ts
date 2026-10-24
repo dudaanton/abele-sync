@@ -173,7 +173,8 @@ export class V2EngineClient implements EngineClient {
     this.http.generation = undefined
     await this.connection(signal)
     const generation = this.http.observedGeneration
-    if (await reconcileGeneration(state, generation)) {
+    const work = new ScanWork({ signal })
+    if (await reconcileGeneration(state, generation, { signal })) {
       this.files.clear()
       this.byteSources.clear()
       this.localNoteCache.clear()
@@ -204,14 +205,18 @@ export class V2EngineClient implements EngineClient {
     await this.directories.retireRecreatedDelete()
     const members = JSON.parse((await state.getMeta(MEMBERS_KEY)) ?? '[]') as StateEntry[]
     this.restoreAssets.clear()
-    for (const entry of members)
+    for (const entry of members) {
+      await work.step()
       if (!entry.wirePath.toLowerCase().endsWith('.md')) this.restoreAssets.add(entry.wirePath)
+    }
     const current: StateEntry[] = []
     for await (const entry of state.all()) {
+      await work.step()
       signal?.throwIfAborted()
       current.push(entry)
     }
-    for (const entry of [...members, ...current])
+    for (const entry of [...members, ...current]) {
+      await work.step()
       if (!this.departed.has(entry.wirePath)) {
         const item = {
           file_id: entry.fileId,
@@ -225,6 +230,7 @@ export class V2EngineClient implements EngineClient {
         this.files.set(entry.wirePath, item)
         this.byteSources.set(entry.sha, item)
       }
+    }
     if (!deferLocalScan) await this.scanLocal(fs, signal)
   }
   async scanLocal(fs: FileSystem, signal?: AbortSignal, changed?: ReadonlySet<string>) {
@@ -1017,3 +1023,4 @@ export class V2EngineClient implements EngineClient {
     return () => socket.close()
   }
 }
+import { ScanWork } from './scanWork.js'

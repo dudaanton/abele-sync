@@ -25,10 +25,13 @@ export async function pathOccupant(
   const key = hostKey(fs)
   const target = key(path)
   let own: StateEntry | null = null
+  const work = new ScanWork()
   for await (const entry of state.pathCandidates?.(path, key) ?? state.all()) {
+    await work.step()
     if (key(entry.path) !== target) continue
     if (entry.fileId !== fileId) return entry
     own = entry
   }
   return own
 }
+import { ScanWork } from './scanWork.js'

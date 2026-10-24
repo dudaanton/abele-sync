@@ -34,14 +34,22 @@ const RESET_KEYS = [
 /** Retire old authority, never disk bytes. A fresh manifest adopts identical files,
  * preserves divergent local copies and publishes files absent from the restored server.
  * The old journal is evidence, never a replay into the restored receipt namespace. */
-export async function reconcileGeneration(state: StateStore, generation: string | undefined) {
+export async function reconcileGeneration(
+  state: StateStore,
+  generation: string | undefined,
+  opts: ScanScheduling = {}
+) {
   if (generation === undefined) return false // old server: unchanged behavior
   if (!state.getMeta || !state.setMeta)
     throw new Error('restore generation requires durable metadata')
   const old = await state.getMeta(GENERATION_KEY)
   if (old === generation) return false
   const entries: StateEntry[] = []
-  for await (const entry of state.all()) entries.push(entry)
+  const work = new ScanWork(opts)
+  for await (const entry of state.all()) {
+    await work.step()
+    entries.push(entry)
+  }
   const pullKeys = new Set([
     ...entries.map((entry) => `pull-write:${entry.fileId}`),
     ...entries.map((entry) => `pull-source-recreated:${entry.fileId}`),
@@ -84,7 +92,10 @@ export async function reconcileGeneration(state: StateStore, generation: string 
       const resetKeys = new Set([...RESET_KEYS, ...pullKeys])
       for (const prefix of [DEPARTURE_MARK, AUTHORED_MARK])
         for (const key of await departureMarkKeys(tx, prefix)) resetKeys.add(key)
-      for (const key of resetKeys) metadata[key] = await tx.getMeta!(key)
+      for (const key of resetKeys) {
+        await work.step()
+        metadata[key] = await tx.getMeta!(key)
+      }
       await tx.setMeta!(
         `retired-generation:${old ?? 'legacy'}`,
         JSON.stringify({
@@ -94,15 +105,26 @@ export async function reconcileGeneration(state: StateStore, generation: string 
           metadata,
         })
       )
-      for (const entry of entries) await tx.delete(entry.path)
+      for (const entry of entries) {
+        await work.step()
+        await tx.delete(entry.path)
+      }
       await tx.setJournal(null)
       await tx.setCursor(0)
-      for (const key of resetKeys) await tx.setMeta!(key, null)
+      for (const key of resetKeys) {
+        await work.step()
+        await tx.setMeta!(key, null)
+      }
       await tx.setMeta!(RECONCILING_KEY, generation)
       const members = new Map<string, StateEntry>()
-      for (const entry of JSON.parse(metadata[MEMBERS_KEY] ?? '[]') as StateEntry[])
+      for (const entry of JSON.parse(metadata[MEMBERS_KEY] ?? '[]') as StateEntry[]) {
+        await work.step()
         members.set(entry.wirePath, entry)
-      for (const entry of entries) members.set(entry.wirePath, entry)
+      }
+      for (const entry of entries) {
+        await work.step()
+        members.set(entry.wirePath, entry)
+      }
       await tx.setMeta!(MEMBERS_KEY, JSON.stringify([...members.values()]))
       await requestReconciliation(
         tx,
@@ -117,3 +139,4 @@ export async function reconcileGeneration(state: StateStore, generation: string 
   })
   return recovering
 }
+import { ScanWork, type ScanScheduling } from './scanWork.js'

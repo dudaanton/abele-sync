@@ -929,7 +929,11 @@ export class V2Directories {
       return false
     const within = (path: string) => path === old.path || path.startsWith(old.path + '/')
     const entries: StateEntry[] = []
-    for await (const entry of this.state.all()) if (within(entry.wirePath)) entries.push(entry)
+    const work = new ScanWork({ signal: this.signal })
+    for await (const entry of this.state.all()) {
+      await work.step()
+      if (within(entry.wirePath)) entries.push(entry)
+    }
     const review = JSON.parse(
       (await this.state.getMeta!('v2-directory-review')) ?? '[]'
     ) as unknown[]

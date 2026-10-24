@@ -234,7 +234,9 @@ export class SyncCycle {
     const { client, fs, state } = this.ctx.opts
     await this.retries.load()
     if (this.retryRefusedDirectories) this.rewind = true
-    const inventory = scanSnapshot(fs, () => this.ctx.signal?.())
+    const scheduling = { signal: this.ctx.signal?.(), yieldTask: this.ctx.opts.yieldTask }
+    const work = new ScanWork(scheduling)
+    const inventory = scanSnapshot(fs, () => this.ctx.signal?.(), scheduling)
     const scanningFs = stoppableListings(inventory.fs, () => this.ctx.signal?.())
     const generationBefore = await state.getMeta?.(GENERATION_KEY)
     await client.prepare?.(
@@ -275,7 +277,11 @@ export class SyncCycle {
         key.slice('pull-write:'.length)
       )
     )
-    if (!state.metadataKeys) for await (const entry of state.all()) pendingFiles.add(entry.fileId)
+    if (!state.metadataKeys)
+      for await (const entry of state.all()) {
+        await work.step()
+        pendingFiles.add(entry.fileId)
+      }
     await recoverPendingPullWrites(fs, state, [...pendingFiles], client, {
       log,
       expected: this.ctx.expected,
@@ -370,7 +376,12 @@ export class SyncCycle {
       // their old local spellings for newly created local directories.
       await client.finishPull?.()
     }
-    await this.scanWork(() => refreshLocalPaths(scanningFs, state))
+    await this.scanWork(() =>
+      refreshLocalPaths(scanningFs, state, {
+        signal: this.ctx.signal?.(),
+        yieldTask: this.ctx.opts.yieldTask,
+      })
+    )
     if (reconciling || (priorReconciliation && priorReconciliation.phase !== 'complete'))
       await this.scanWork(
         () => client.scanLocal?.(scanningFs, this.ctx.signal?.()) ?? Promise.resolve()
@@ -443,8 +454,10 @@ export class SyncCycle {
     await this.ctx.watch.examine()
     const holding = await this.holds.held()
     const protect = new Set([...this.kept, ...reported, ...this.unsettled, ...holding])
-    for await (const entry of state.all())
+    for await (const entry of state.all()) {
+      await work.step()
       if (inspection.found.dirty.has(entry.wirePath)) protect.add(entry.wirePath)
+    }
     const first = earlyPull ?? (await this.pull(protect, scope.recheck, holding))
     if (earlyPull === null && first.applied > 0) inventory.invalidate()
     if (reconciling)
@@ -804,3 +817,4 @@ export class SyncCycle {
     return report
   }
 }
+import { ScanWork } from './scanWork.js'

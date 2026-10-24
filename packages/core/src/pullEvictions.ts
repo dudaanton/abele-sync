@@ -20,9 +20,14 @@ export async function recoverPullEvictions(
   client: Pick<EngineClient, 'pathRefusal'> = {}
 ): Promise<void> {
   const keys = (await state.metadataKeys?.('pull-evict:')) ?? []
+  const work = new ScanWork({ signal })
   if (!state.metadataKeys)
-    for await (const entry of state.all()) keys.push(evictionKey(entry.fileId))
+    for await (const entry of state.all()) {
+      await work.step()
+      keys.push(evictionKey(entry.fileId))
+    }
   for (const key of keys) {
+    await work.step()
     checkCancellation(signal)
     const raw = await state.getMeta?.(key)
     if (!raw) continue
@@ -73,3 +78,4 @@ export async function recoverPullEvictions(
     }
   }
 }
+import { ScanWork } from './scanWork.js'

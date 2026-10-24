@@ -457,6 +457,7 @@ export async function recoverRemovals(
 ): Promise<void> {
   await exclusive(async () => {
     let rows = await retentionSnapshot(fs)
+    const work = new ScanWork()
     const now = timestamp(policy.now?.() ?? Date.now()),
       cap = policy.maxBytes ?? 1024 * 1024 * 1024
     if (!Number.isSafeInteger(cap) || cap < 0)
@@ -466,11 +467,13 @@ export async function recoverRemovals(
     const allocations = new Set((await state?.metadataKeys?.('removal-decision:')) ?? [])
     if (state?.getMeta && !state.metadataKeys)
       for await (const base of state.all()) {
+        await work.step()
         if (onlyPath !== undefined && base.path !== onlyPath) continue
         const id = await state.getMeta(pointerKey(base))
         if (id) allocations.add(decisionKey(id))
       }
     for (const key of allocations) {
+      await work.step()
       const raw = await state!.getMeta!(key)
       if (!raw) continue
       const decision = JSON.parse(raw) as Decision
@@ -555,3 +558,4 @@ export async function recoverRemovals(
       )
   })
 }
+import { ScanWork } from './scanWork.js'
