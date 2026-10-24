@@ -244,6 +244,7 @@ export class Puller {
       await transact(this.state, (tx) => this.refused.persist(cursor, cursor > 0, tx))
     })
     this.syncHeld()
+    await this.placer.pending.flushCleanup()
   }
 
   async run(): Promise<void> {
@@ -282,6 +283,7 @@ export class Puller {
     }
     if (this.report.bootstrapped) await this.recheck()
     this.syncHeld()
+    await this.placer.pending.flushCleanup()
   }
 
   private async changeRefusal(change: ChangeItem) {

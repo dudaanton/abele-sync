@@ -9,6 +9,7 @@ import type { StateEntry, StateStore } from './state.js'
 import { checkCancellation } from './cancellation.js'
 import { discardPullStage, stageMissing } from './pullStages.js'
 import { isFileFailure, type FileRetries } from './fileRetry.js'
+import { PendingPullWrites } from './pullWrite.js'
 
 interface Intent {
   sourceIdentity?: string
@@ -121,6 +122,10 @@ export async function recoverPendingPullWrites(
   } = {}
 ): Promise<{ held: ChangeItem[] }> {
   const report: { held: ChangeItem[] } = { held: [] }
+  const cleanup = new PendingPullWrites(state, fs, true, client, opts.signal)
+  await cleanup.recoverCleanup()
+  checkCancellation(opts.signal)
+  await cleanup.flushCleanup()
   const placerFor = (sequenceKnown: boolean) =>
     new PullPlacer(
       client ?? {

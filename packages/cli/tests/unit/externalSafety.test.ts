@@ -43,6 +43,20 @@ beforeEach(async () => {
   dir = await mkdtemp(join(scratch, 'external-safety-'))
   writeConfig(dir, cfg)
 })
+it.each([
+  'pull-cleanup:owner',
+  'pull-cleanup-head',
+  'scoped-placement:pull-cleanup:owner',
+  'scoped-placement:pull-cleanup-head',
+])('preserves unfinished cleanup ownership during connection retirement (%s)', (key) => {
+  const state = SqliteStateStore.open(dbFile())
+  try {
+    state.setMeta(key, 'retained cleanup owner')
+  } finally {
+    state.close()
+  }
+  expect(() => assertLocalSafety(dir, true)).toThrow(/unfinished.*pull cleanup/)
+})
 it.each([undefined, 'other-state'])(
   'retirement preserves private removal retention (state=%s)',
   async (other) => {

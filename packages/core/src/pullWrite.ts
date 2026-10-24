@@ -1,3 +1,6 @@
+import { ScanWork } from './scanWork.js'
+import { checkCancellation } from './cancellation.js'
+import { decodePullIntent } from './pullRecovery.js'
 import { hostPathRefusal, pathAdmission } from './pathAdmission.js'
 import type { ChangeItem } from '@abele/sync-protocol'
 import { EngineError } from './errors.js'
@@ -46,11 +49,16 @@ export interface DecisionRetirement {
 /** A store without durable metadata cannot prove a previous process's write; never infer it. */
 export class PendingPullWrites {
   private decisionIndex?: { image: string | null; versions: Set<string> }
+  private cleanups = new Map<
+    string,
+    Array<{ key: string; pending: PendingPullWrite; acknowledged: boolean; done: boolean }>
+  >()
   constructor(
     private readonly state: StateStore,
     private readonly fs?: FileSystem,
     private readonly sequenceKnown = true,
-    private readonly client: Pick<EngineClient, 'pathRefusal'> = {}
+    private readonly client: Pick<EngineClient, 'pathRefusal'> = {},
+    private readonly signal?: AbortSignal
   ) {}
 
   /** Include durable intent names even when the caller no longer has its old base. */
@@ -177,8 +185,139 @@ export class PendingPullWrites {
   }
   async settled(change: ChangeItem, discard?: (id: string) => Promise<void>): Promise<void> {
     if (await this.refused(change.file_id, [change.path, change.prev_path])) return
+    for (const cleanup of this.cleanups.get(change.file_id) ?? []) {
+      if (
+        cleanup.pending.fileId !== change.file_id ||
+        cleanup.pending.versionId !== change.version_id ||
+        !cleanup.acknowledged ||
+        cleanup.done
+      )
+        continue
+      checkCancellation(this.signal)
+      if (cleanup.pending.stageId) {
+        if (discard) await discard(cleanup.pending.stageId)
+        else await discardPullStage(this.fs!, cleanup.pending.stageId)
+      }
+      checkCancellation(this.signal)
+      if (cleanup.pending.receiptId) await this.fs!.discardInstallation?.(cleanup.pending.receiptId)
+      cleanup.done = true
+    }
     const pending = await this.read(change.file_id)
     if (pending?.versionId === change.version_id) await this.retire(pending, discard)
+  }
+
+  /** Transfer private-byte ownership in the ledger's existing durable commit.
+   * Nested savepoints may clear the installation intent, but cannot authorize
+   * byte cleanup until their outermost host commit acknowledges this record. */
+  async publishCleanup(tx: StateStore, change: ChangeItem): Promise<void> {
+    const current = new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client)
+    if (await current.refused(change.file_id, [change.path, change.prev_path])) return
+    const pending = await current.read(change.file_id)
+    if (!pending || pending.versionId !== change.version_id) return
+    const key = `pull-cleanup:${crypto.randomUUID()}`
+    const next = await tx.getMeta!('pull-cleanup-head')
+    await tx.setMeta!(key, JSON.stringify({ pending, next }))
+    await tx.setMeta!('pull-cleanup-head', key)
+    await current.clear(pending.fileId)
+    const cleanup = { key, pending, acknowledged: false, done: false }
+    const group = this.cleanups.get(pending.fileId) ?? []
+    group.push(cleanup)
+    this.cleanups.set(pending.fileId, group)
+    afterStateCommit(tx, () => {
+      cleanup.acknowledged = true
+    })
+  }
+
+  /** One acknowledgement batch per pull, never two extra commits per file. */
+  async flushCleanup(): Promise<void> {
+    const done = new Map<string, PendingPullWrite>()
+    const work = new ScanWork({ signal: this.signal })
+    for (const group of this.cleanups.values()) {
+      await work.step()
+      for (const row of group)
+        if (
+          row.done &&
+          !(await this.refused(row.pending.fileId, [
+            row.pending.wirePath,
+            row.pending.target,
+            row.pending.from,
+          ]))
+        )
+          done.set(row.key, row.pending)
+    }
+    if (!done.size) return
+    await commitAppliedSettlement(
+      this.state,
+      async () => ({ reached: await this.state.getCursor(), firstUnresolved: null }),
+      async (tx) => {
+        let previous: { key: string; pending: PendingPullWrite; next: string | null } | null = null
+        for await (const row of this.cleanupRecords(tx)) {
+          checkCancellation(this.signal)
+          if (
+            JSON.stringify(done.get(row.key)) !== JSON.stringify(row.pending) ||
+            (await new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client).refused(
+              row.pending.fileId,
+              [row.pending.wirePath, row.pending.target, row.pending.from]
+            ))
+          ) {
+            done.delete(row.key)
+            previous = row
+            continue
+          }
+          await tx.setMeta!(row.key, null)
+          if (previous) {
+            previous.next = row.next
+            await tx.setMeta!(
+              previous.key,
+              JSON.stringify({ pending: previous.pending, next: previous.next })
+            )
+          } else await tx.setMeta!('pull-cleanup-head', row.next)
+        }
+      }
+    )
+    for (const [id, group] of this.cleanups) {
+      await work.step()
+      const remaining = group.filter((row) => !done.has(row.key))
+      if (remaining.length) this.cleanups.set(id, remaining)
+      else this.cleanups.delete(id)
+    }
+  }
+
+  private async *cleanupRecords(state: StateStore) {
+    let key = await state.getMeta?.('pull-cleanup-head')
+    const visited = new Set<string>(),
+      work = new ScanWork({ signal: this.signal })
+    while (key) {
+      await work.step()
+      if (!/^pull-cleanup:[a-f0-9-]{36}$/.test(key) || visited.has(key))
+        throw new EngineError('io', 'invalid pull cleanup chain')
+      visited.add(key)
+      const raw = await state.getMeta!(key)
+      if (!raw) throw new EngineError('io', 'missing pull cleanup owner')
+      const row = JSON.parse(raw) as { pending: PendingPullWrite; next: string | null }
+      if (row.next !== null && typeof row.next !== 'string')
+        throw new EngineError('io', 'invalid pull cleanup link')
+      const pending = decodePullIntent(JSON.stringify(row.pending), row.pending?.fileId)
+      yield { key, pending, next: row.next }
+      key = row.next
+    }
+  }
+
+  /** Root recovery supplies committed owner images after reload. The linked
+   * metadata index works even on hosts without metadata enumeration. */
+  async recoverCleanup(): Promise<void> {
+    for await (const row of this.cleanupRecords(this.state)) {
+      const { pending } = row
+      if (await this.refused(pending.fileId, [pending.wirePath, pending.target, pending.from]))
+        continue
+      checkCancellation(this.signal)
+      if (pending.stageId) await discardPullStage(this.fs!, pending.stageId)
+      checkCancellation(this.signal)
+      if (pending.receiptId) await this.fs!.discardInstallation?.(pending.receiptId)
+      const group = this.cleanups.get(pending.fileId) ?? []
+      group.push({ key: row.key, pending, acknowledged: true, done: true })
+      this.cleanups.set(pending.fileId, group)
+    }
   }
 
   async clear(fileId: string): Promise<void> {

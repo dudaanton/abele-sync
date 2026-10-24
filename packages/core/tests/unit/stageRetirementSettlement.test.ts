@@ -12,6 +12,65 @@ import { change } from './holdFixture.js'
 import { decorateStateTransactions } from '../helpers/stateTransactions.js'
 import { recoverPendingPullWrites } from '../../src/pullRecovery.js'
 
+it.each([false, true])(
+  'batches published cleanup after commit or reload without enumeration (noAck=%s)',
+  async (noAck) => {
+    const f = await fixture()
+    Object.defineProperty(f.state, 'metadataKeys', { value: undefined })
+    if (noAck)
+      decorateStateTransactions(f.state, (tx) => {
+        tx.afterCommit = undefined
+      })
+    await f.state.transaction(async (tx) => {
+      await f.pending.publishCleanup(tx, f.item)
+      expect(await tx.getMeta!(f.key)).toBeNull()
+      await new PendingPullWrites(tx, f.fs).settled(f.item)
+      expect(f.discard).not.toHaveBeenCalled()
+    })
+    expect(await f.state.getMeta(f.key)).toBeNull()
+    expect(await f.state.getMeta('pull-cleanup-head')).not.toBeNull()
+    if (!noAck) {
+      await f.pending.settled(f.item)
+      expect(f.discard).toHaveBeenCalledExactlyOnceWith('old-stage')
+      await f.pending.flushCleanup()
+    } else {
+      await f.pending.settled(f.item)
+      expect(f.discard).not.toHaveBeenCalled()
+      // The old file identity need not remain in the ledger to find its cleanup.
+      await recoverPendingPullWrites(f.fs, f.state, [])
+      expect(f.discard).toHaveBeenCalledExactlyOnceWith('old-stage')
+    }
+    expect(await f.state.getMeta('pull-cleanup-head')).toBeNull()
+  }
+)
+
+it('rolls back published cleanup ownership without discarding the installation evidence', async () => {
+  const f = await fixture()
+  await expect(
+    f.state.transaction(async (tx) => {
+      await f.pending.publishCleanup(tx, f.item)
+      throw new Error('rollback')
+    })
+  ).rejects.toThrow('rollback')
+  expect(await f.state.getMeta(f.key)).toBe(f.original)
+  expect(await f.state.getMeta('pull-cleanup-head')).toBeNull()
+  expect(f.discard).not.toHaveBeenCalled()
+})
+
+it('replays interrupted published cleanup without installing or losing its owner', async () => {
+  const f = await fixture()
+  await f.state.transaction((tx) => f.pending.publishCleanup(tx, f.item))
+  const owner = await f.state.getMeta('pull-cleanup-head')
+  f.discard.mockRejectedValueOnce(new Error('cleanup interrupted'))
+  await expect(f.pending.settled(f.item)).rejects.toThrow('cleanup interrupted')
+  expect(await f.state.getMeta('pull-cleanup-head')).toBe(owner)
+  await recoverPendingPullWrites(f.fs, f.state, [])
+  expect(f.discard).toHaveBeenCalledTimes(2)
+  expect(await f.state.getMeta('pull-cleanup-head')).toBeNull()
+  expect(await f.state.getMeta(owner!)).toBeNull()
+  expect(await f.fs.stat(f.item.path)).toBeNull()
+})
+
 it('reloads committed retirement without afterCommit and preserves raw outer rollback', async () => {
   const f = await fixture()
   decorateStateTransactions(f.state, (tx) => {

@@ -186,6 +186,17 @@ export function assertLocalSafety(
             if (retirement || ((scan || observer) && !allowPullRecovery && !live))
               hold('unfinished pull installation intent')
           }
+          if (
+            retirement &&
+            (row.key.startsWith('daemon:pull-cleanup:') || row.key === 'daemon:pull-cleanup-head')
+          )
+            hold('unfinished pull cleanup ownership')
+          if (
+            retirement &&
+            (row.key.startsWith('daemon:scoped-placement:pull-cleanup:') ||
+              row.key === 'daemon:scoped-placement:pull-cleanup-head')
+          )
+            hold('unfinished scoped pull cleanup ownership')
           if ((scan || retirement) && row.key.startsWith('daemon:scoped-placement:pull-write:'))
             hold('unfinished scoped pull installation intent')
           if (row.key === 'daemon:deferred-changes') {

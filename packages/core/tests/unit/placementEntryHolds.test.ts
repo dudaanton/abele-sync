@@ -122,6 +122,9 @@ const pendingEffects = {
   retireDecisions: true,
   finishRetirement: true,
   recoverRetirement: true,
+  publishCleanup: true,
+  flushCleanup: true,
+  recoverCleanup: true,
   retain: true,
 } satisfies Record<
   Exclude<keyof PendingPullWrites, 'refused' | 'matching' | 'authorizes' | 'stageId' | 'receiptId'>,
@@ -148,6 +151,9 @@ const entries: Record<string, (f: Fixture) => Promise<unknown>> = {
   recoverRetirement: async (f) =>
     f.pending.recoverRetirement('f', (await f.state.getMeta('pull-write:f'))!),
   retain: (f) => f.pending.retain('f', { count: 0, bytes: 0 }),
+  publishCleanup: (f) => f.pending.publishCleanup(f.state, f.change),
+  flushCleanup: (f) => f.pending.flushCleanup(),
+  recoverCleanup: (f) => f.pending.recoverCleanup(),
   recoverPending: (f) => recoverPendingPullWrites(f.fs, f.state, ['f'], f.client),
   recoverEvictions: (f) => recoverPullEvictions(f.fs, f.state, undefined, undefined, f.client),
 }

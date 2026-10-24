@@ -77,7 +77,8 @@ export class PullPlacer {
     shared?: PullPlacer,
     private readonly drainCompletedSerial = true
   ) {
-    this.pending = shared?.pending ?? new PendingPullWrites(state, fs, sequenceKnown, client)
+    this.pending =
+      shared?.pending ?? new PendingPullWrites(state, fs, sequenceKnown, client, opts.signal)
     this.paths = shared?.paths ?? LocalPaths.filePass(fs, state)
     this.budget = shared?.budget ?? opts.transferBudget ?? new TransferBudget()
     this.lying = shared?.lying ?? new Set<string>()
@@ -1125,6 +1126,7 @@ export class PullPlacer {
           await new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client).clear(
             change.file_id
           )
+        else await this.pending.publishCleanup(tx, change)
         if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
         recorded = true
       }
