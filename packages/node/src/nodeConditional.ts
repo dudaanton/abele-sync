@@ -78,10 +78,26 @@ function valid(id: string) {
   return id
 }
 
-export async function restoreVictim(root: string, path: string, victim: string, id: string) {
+export async function restoreVictim(
+  root: string,
+  path: string,
+  victim: string,
+  id: string,
+  removal = false
+) {
   const target = await containedIn(root, path),
     info = await lstat(victim)
   let destination = target
+  const retainedPath = async (suffix = '') => {
+    const name = await containedIn(
+      root,
+      removal
+        ? `.abele-sync/retained-removals/${id}${suffix}/${path}`
+        : `${path}.sync-conflict-${id}${suffix}`
+    )
+    if (removal) await mkdir(dirname(name), { recursive: true })
+    return name
+  }
   if (info.isDirectory()) {
     // Recovery of old adapters which could capture a directory. Reserve an empty
     // destination exclusively; rename cannot replace a directory containing a save.
@@ -89,7 +105,7 @@ export async function restoreVictim(root: string, path: string, victim: string, 
       await mkdir(destination)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-      destination = await containedIn(root, `${path}.sync-conflict-${id}`)
+      destination = await retainedPath()
       await mkdir(destination)
     }
     await rename(victim, destination)
@@ -101,7 +117,7 @@ export async function restoreVictim(root: string, path: string, victim: string, 
       const named = await lstat(destination)
       if (named.dev !== info.dev || named.ino !== info.ino) {
         for (let n = 0; ; n++) {
-          destination = await containedIn(root, `${path}.sync-conflict-${id}${n ? `-${n}` : ''}`)
+          destination = await retainedPath(n ? `-${n}` : '')
           try {
             await link(victim, destination)
             break
@@ -197,7 +213,7 @@ export async function conditionalFile(
       }
     }
     await restoring(directory, root)
-    await restoreVictim(root, op.path, victim, id)
+    await restoreVictim(root, op.path, victim, id, op.effect.kind === 'remove')
     captured = false
     await retire()
   }
@@ -433,7 +449,7 @@ async function recoverFolder(root: string, location: string, check: () => void):
           // A restore-intent marker does not prove a public link ever existed.
           // Exclusive restoration retries the original name; occupied names are
           // preserved by restoreVictim's inode/conflict-copy handling.
-          await restoreVictim(root, intent.path, victim, id)
+          await restoreVictim(root, intent.path, victim, id, intent.effect === 'remove')
         }
       }
       // Preserve only a receipt for a proven installed object, never a victim.

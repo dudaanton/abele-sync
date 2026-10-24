@@ -106,11 +106,15 @@ it.each(['deny', 'throw', 'occupant'] as const)(
       else expect(await result).toBe(false)
       expect(calls).toBe(1)
       expect(await fs.read('file.bin')).toEqual(bytes)
-      const copies = (await readdir(root)).filter((path) =>
-        path.startsWith('file.bin.sync-conflict-')
-      )
+      const retained = join(root, '.abele-sync/retained-removals')
+      const copies = await readdir(retained).catch((error) => {
+        if (error.code === 'ENOENT') return [] as string[]
+        throw error
+      })
       expect(copies).toHaveLength(mode === 'occupant' ? 1 : 0)
-      for (const copy of copies) expect(await fs.read(copy)).toEqual(bytes)
+      for (const copy of copies)
+        expect(new Uint8Array(await readFile(join(retained, copy, 'file.bin')))).toEqual(bytes)
+      expect((await readdir(root)).filter((path) => path.includes('sync-conflict-'))).toEqual([])
       await fs.recoverConditionalFiles()
       expect(await fs.read('file.bin')).toEqual(bytes)
       expect(await readdir(join(root, '.abele-sync/conditional'))).toEqual([])
@@ -119,6 +123,35 @@ it.each(['deny', 'throw', 'occupant'] as const)(
     }
   }
 )
+
+it('recovers an interrupted removal into private retention when its path has a new owner', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'conditional-retained-removal-'))
+  try {
+    const directory = join(root, '.abele-sync/conditional/interrupted')
+    await mkdir(directory, { recursive: true })
+    await writeFile(
+      join(directory, 'intent.json'),
+      JSON.stringify({ path: 'file.bin', effect: 'remove' })
+    )
+    await writeFile(join(directory, 'victim'), new Uint8Array([1]))
+    await writeFile(join(root, 'file.bin'), new Uint8Array([2]))
+    const fs = new NodeFileSystem(root)
+    await fs.recoverConditionalFiles()
+    await fs.recoverConditionalFiles()
+    expect(await fs.read('file.bin')).toEqual(new Uint8Array([2]))
+    expect(
+      new Uint8Array(
+        await readFile(join(root, '.abele-sync/retained-removals/interrupted/file.bin'))
+      )
+    ).toEqual(new Uint8Array([1]))
+    const listed = []
+    for await (const file of fs.list()) listed.push(file.path)
+    expect(listed).toEqual(['file.bin'])
+    expect(await readdir(join(root, '.abele-sync/conditional'))).toEqual([])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 it.each(['remove', 'move', 'write'] as const)(
   'quarantines and refuses a same-stat changed victim for %s',
