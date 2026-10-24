@@ -54,6 +54,10 @@ it('rolls back published cleanup ownership without discarding the installation e
   await expect(
     f.state.transaction(async (tx) => {
       await f.pending.publishCleanup(tx, f.item)
+      const replay = new PendingPullWrites(tx, f.fs)
+      await replay.recoverCleanup(false)
+      await replay.flushCleanup()
+      expect(f.discard).not.toHaveBeenCalled()
       throw new Error('rollback')
     })
   ).rejects.toThrow('rollback')
