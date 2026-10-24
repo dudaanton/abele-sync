@@ -248,6 +248,8 @@ export class Puller {
   }
 
   async run(): Promise<void> {
+    await this.placer.pending.recoverCleanup(false)
+    await this.placer.pending.flushCleanup()
     await dispatchDepartures(this.state, this.client, this.opts.signal, 1000, this.opts.retries)
     await importLegacyPullHolds(this.state, this.client)
     this.reached = this.report.cursor

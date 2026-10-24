@@ -342,10 +342,15 @@ recovery, metadata-only enumeration and connection handover.
 
 Successful pull placement transfers stage/receipt cleanup into `pull-cleanup:*`
 records in the same transaction as its ledger update. `pull-cleanup-head` links
-these owners, including on stores without metadata enumeration. The old pull-write
-intent disappears in that transaction; it cannot authorize another installation.
+these owners, including on stores without metadata enumeration. Buffered pull-write
+intents disappear in that transaction. Staged pulls keep a retirement-only intent
+through stage disposal and remove it in the cleanup batch; held installations keep
+their decision-order intent until decision retirement. Neither retirement record
+authorizes another installation.
 Byte cleanup waits for the outer commit acknowledgement, or for root recovery to
-reload the committed owner. Completed owners retire in one batch per pull.
+reload the committed owner. Direct pull replay acknowledges the saved cleanup
+chain in a transaction before disposal, and defers disposal if an outer transaction
+has not acknowledged it. Completed owners retire in one batch per pull.
 Connection retirement must preserve this chain until cleanup drains; it must not
 drop these records merely because no installation intent remains. Cancellation
 defers cleanup while still acknowledging already-issued file placements.

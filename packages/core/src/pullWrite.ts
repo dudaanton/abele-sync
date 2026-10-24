@@ -206,6 +206,10 @@ export class PendingPullWrites {
       cleanup.done = true
     }
     const pending = await this.read(change.file_id)
+    if (
+      this.cleanups.get(change.file_id)?.some((row) => row.pending.versionId === change.version_id)
+    )
+      return
     if (pending?.versionId === change.version_id) await this.retire(pending, discard)
   }
 
@@ -217,11 +221,19 @@ export class PendingPullWrites {
     if (await current.refused(change.file_id, [change.path, change.prev_path])) return
     const pending = await current.read(change.file_id)
     if (!pending || pending.versionId !== change.version_id) return
+    // Held installations retain their exact decision order until recovery has
+    // retired the decision and its stage together. Ordinary first pulls can
+    // transfer ownership to the batched cleanup chain instead.
+    if (pending.heldOrder !== undefined) return
+    if (pending.stageId) pending.retiring = true
     const key = `pull-cleanup:${crypto.randomUUID()}`
     const next = await tx.getMeta!('pull-cleanup-head')
     await tx.setMeta!(key, JSON.stringify({ pending, next }))
     await tx.setMeta!('pull-cleanup-head', key)
-    await current.clear(pending.fileId)
+    // Stage adapters and direct pull replay retain the installation alias
+    // through discard. Retire it with the same acknowledgement batch.
+    if (pending.stageId) await tx.setMeta!(keyFor(pending.fileId), JSON.stringify(pending))
+    else await current.clear(pending.fileId)
     const cleanup = { key, pending, acknowledged: false, done: false }
     const group = this.cleanups.get(pending.fileId) ?? []
     group.push(cleanup)
@@ -269,6 +281,11 @@ export class PendingPullWrites {
             continue
           }
           await tx.setMeta!(row.key, null)
+          if (
+            row.pending.stageId &&
+            (await tx.getMeta!(keyFor(row.pending.fileId))) === JSON.stringify(row.pending)
+          )
+            await tx.setMeta!(keyFor(row.pending.fileId), null)
           if (previous) {
             previous.next = row.next
             await tx.setMeta!(
@@ -309,8 +326,34 @@ export class PendingPullWrites {
 
   /** Root recovery supplies committed owner images after reload. The linked
    * metadata index works even on hosts without metadata enumeration. */
-  async recoverCleanup(): Promise<void> {
-    for await (const row of this.cleanupRecords(this.state)) {
+  async recoverCleanup(reloaded = true): Promise<void> {
+    const records: Array<{ key: string; pending: PendingPullWrite; next: string | null }> = []
+    for await (const row of this.cleanupRecords(this.state)) records.push(row)
+    if (!reloaded && records.length) {
+      // Direct pull can run inside a caller's transaction. A read alone is
+      // not a reload acknowledgement: certify this exact chain in a commit.
+      let acknowledged = false
+      await commitAppliedSettlement(
+        this.state,
+        async () => ({ reached: await this.state.getCursor(), firstUnresolved: null }),
+        async (tx) => {
+          const work = new ScanWork({ signal: this.signal })
+          for (const row of records) {
+            await work.step()
+            if (
+              (await tx.getMeta!(row.key)) !==
+              JSON.stringify({ pending: row.pending, next: row.next })
+            )
+              return
+          }
+          afterStateCommit(tx, () => {
+            acknowledged = true
+          })
+        }
+      )
+      if (!acknowledged) return
+    }
+    for (const row of records) {
       const { pending } = row
       if (await this.refused(pending.fileId, [pending.wirePath, pending.target, pending.from]))
         continue

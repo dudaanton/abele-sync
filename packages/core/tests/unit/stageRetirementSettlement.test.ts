@@ -23,11 +23,15 @@ it.each([false, true])(
       })
     await f.state.transaction(async (tx) => {
       await f.pending.publishCleanup(tx, f.item)
-      expect(await tx.getMeta!(f.key)).toBeNull()
+      expect(await tx.getMeta!(f.key)).toBe(
+        JSON.stringify({ ...JSON.parse(f.original), retiring: true })
+      )
       await new PendingPullWrites(tx, f.fs).settled(f.item)
       expect(f.discard).not.toHaveBeenCalled()
     })
-    expect(await f.state.getMeta(f.key)).toBeNull()
+    expect(await f.state.getMeta(f.key)).toBe(
+      JSON.stringify({ ...JSON.parse(f.original), retiring: true })
+    )
     expect(await f.state.getMeta('pull-cleanup-head')).not.toBeNull()
     if (!noAck) {
       await f.pending.settled(f.item)
@@ -41,6 +45,7 @@ it.each([false, true])(
       expect(f.discard).toHaveBeenCalledExactlyOnceWith('old-stage')
     }
     expect(await f.state.getMeta('pull-cleanup-head')).toBeNull()
+    expect(await f.state.getMeta(f.key)).toBeNull()
   }
 )
 
