@@ -20,6 +20,11 @@ export function retentionHandedOver(directory: string): boolean {
     const ids = new Set(rows.map((row) => row.id))
     return readdirSync(directory).every((name) => {
       if (name === 'summary.json') return true
+      if (name === 'legacy-migrated') {
+        const marker = join(directory, name),
+          info = lstatSync(marker)
+        return info.isFile() && !info.isSymbolicLink() && readFileSync(marker, 'utf8') === '1'
+      }
       const folder = join(directory, name),
         info = lstatSync(folder)
       if (!info.isDirectory() || info.isSymbolicLink()) return false

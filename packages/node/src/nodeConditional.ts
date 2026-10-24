@@ -15,6 +15,7 @@ import {
 } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { ConditionalFileOperation, FileVersion, RemovalPublication } from '@abele/sync-core'
+import { decodeRetentionSnapshot } from '@abele/sync-core'
 import { containedIn, isMissing } from './nodeFsGuard.js'
 import { syncParents, syncPath } from './nodeFsDurability.js'
 
@@ -351,8 +352,85 @@ export async function recoverConditionalFiles(
   check: () => void,
   retain?: RetainVictim
 ): Promise<void> {
-  for (const location of ['conditional', 'conditional-complete'])
-    await recoverFolder(root, location, check, retain)
+  // A capture may itself be captured by a retention move. Resolve children
+  // before their source owner can relocate/delete its journal, across both
+  // journal generations. Directory enumeration order is not an ownership order.
+  const journals = new Map<string, { location: string; id: string; children: string[] }>()
+  const sources = new Map<string, string>()
+  for (const location of ['conditional', 'conditional-complete']) {
+    const directory = await containedIn(root, `.abele-sync/${location}`)
+    let ids: string[]
+    try {
+      ids = await readdir(directory)
+    } catch (error) {
+      if (isMissing(error)) continue
+      throw error
+    }
+    for (const id of ids) {
+      const key = `.abele-sync/${location}/${valid(id)}`
+      journals.set(key, { location, id, children: [] })
+      try {
+        const intent = JSON.parse(
+          await readFile(`${await containedIn(root, key)}/intent.json`, 'utf8')
+        )
+        if (typeof intent.path === 'string') sources.set(key, intent.path)
+      } catch (error) {
+        if (!isMissing(error)) throw error
+      }
+    }
+  }
+  for (const [key, source] of sources) {
+    const owner = journals.get(source.slice(0, source.lastIndexOf('/')))
+    if (owner) owner.children.push(key)
+  }
+  const visited = new Set<string>(),
+    visiting = new Set<string>()
+  const recover = async (key: string): Promise<void> => {
+    if (visited.has(key)) return
+    if (visiting.has(key)) throw new Error('cyclic conditional journal ownership')
+    visiting.add(key)
+    const journal = journals.get(key)!
+    for (const child of journal.children) await recover(child)
+    await recoverFolder(root, journal.location, check, retain, [journal.id])
+    visiting.delete(key)
+    visited.add(key)
+  }
+  for (const key of journals.keys()) await recover(key)
+}
+
+async function recoverVictim(root: string, path: string, victim: string, id: string) {
+  try {
+    await restoreVictim(root, path, victim, id)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (!isMissing(error) && code !== 'EACCES' && code !== 'EPERM') throw error
+    const owner =
+      /^\.abele-sync\/(?:conditional|conditional-complete)\/([a-zA-Z0-9-]{1,128})\/victim$/.exec(
+        path
+      )
+    if (owner) {
+      // Older recovery may already have relocated the outer journal. Its
+      // receipt still names the public owner; preserve unique bytes beside it.
+      let original: unknown
+      try {
+        const receipt = await containedIn(root, `.abele-sync/installations/${owner[1]}/intent.json`)
+        original = JSON.parse(await readFile(receipt, 'utf8')).path
+      } catch (readError) {
+        if (!isMissing(readError)) throw readError
+      }
+      if (typeof original === 'string' && !original.startsWith('.abele-sync/')) {
+        await recoverVictim(root, original, victim, id)
+        console.warn(`Recovered retained bytes from relocated owner ${path} beside ${original}`)
+        return
+      }
+    }
+    // A parent can disappear (including an outer journal moved by an older
+    // recovery). Never recreate an abandoned private owner or retry forever.
+    // Public conflict copies are user-owned and cannot be retention-collected.
+    const recovered = `Recovered.sync-conflict-${valid(id)}`
+    await restoreVictim(root, recovered, victim, id)
+    console.warn(`Recovered retained bytes from ${path} as ${recovered}: ${code}`)
+  }
 }
 
 /** One-time adoption of the pre-owner retention layout. These bytes have no
@@ -360,8 +438,18 @@ export async function recoverConditionalFiles(
 export async function recoverLegacyRetention(root: string, check: () => void): Promise<void> {
   const directory = await containedIn(root, '.abele-sync/retained-removals')
   try {
-    await lstat(`${directory}/summary.json`)
+    await lstat(`${directory}/legacy-migrated`)
     return
+  } catch (error) {
+    if (!isMissing(error)) throw error
+  }
+  let owned = new Set<string>()
+  try {
+    owned = new Set(
+      decodeRetentionSnapshot(JSON.parse(await readFile(`${directory}/summary.json`, 'utf8'))).map(
+        (row) => row.id
+      )
+    )
   } catch (error) {
     if (!isMissing(error)) throw error
   }
@@ -373,6 +461,7 @@ export async function recoverLegacyRetention(root: string, check: () => void): P
     throw error
   }
   for (const id of ids) {
+    if (id === 'summary.json' || owned.has(id)) continue
     valid(id)
     const walk = async (relative: string): Promise<void> => {
       const folder = await containedIn(
@@ -389,28 +478,38 @@ export async function recoverLegacyRetention(root: string, check: () => void): P
         check()
         if (stat.isDirectory() && !stat.isSymbolicLink()) await walk(path)
         else if (stat.isFile() && !stat.isSymbolicLink())
-          await restoreVictim(root, path, victim, id)
+          await recoverVictim(root, path, victim, id)
         else throw new Error('invalid legacy retained object')
       }
       await rmdir(folder)
     }
     await walk('')
   }
-  await writeFile(`${directory}/summary.json`, '[]', { flag: 'wx' })
+  try {
+    await writeFile(`${directory}/summary.json`, '[]', { flag: 'wx' })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+  }
   await syncPath(`${directory}/summary.json`)
   await syncParents(`${directory}/summary.json`, root)
+  // Only this marker proves migration completed; new capture can create the
+  // summary before legacy adoption starts. Never overwrite its owner records.
+  await writeFile(`${directory}/legacy-migrated`, '1')
+  await syncPath(`${directory}/legacy-migrated`)
+  await syncParents(`${directory}/legacy-migrated`, root)
 }
 
 async function recoverFolder(
   root: string,
   location: string,
   check: () => void,
-  retain?: RetainVictim
+  retain?: RetainVictim,
+  selected?: string[]
 ): Promise<void> {
   const directory = await containedIn(root, `.abele-sync/${location}`)
   let ids: string[]
   try {
-    ids = await readdir(directory)
+    ids = selected ?? (await readdir(directory))
   } catch (error) {
     if (isMissing(error)) return
     throw error
@@ -505,7 +604,7 @@ async function recoverFolder(
           // A restore-intent marker does not prove a public link ever existed.
           // Exclusive restoration retries the original name; occupied names are
           // preserved by restoreVictim's inode/conflict-copy handling.
-          await restoreVictim(root, intent.path, victim, id)
+          await recoverVictim(root, intent.path, victim, id)
         }
       }
       // Preserve only a receipt for a proven installed object, never a victim.

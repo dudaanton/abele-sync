@@ -205,8 +205,13 @@ it('preserves a captured edit if restoration fails because its public parent dis
     await mkdir(folder, { recursive: true })
     await writeFile(join(folder, 'victim'), new Uint8Array([3]))
     await writeFile(join(folder, 'intent.json'), JSON.stringify({ path: 'missing/file' }))
-    await new NodeFileSystem(root).recoverConditionalFiles().catch(() => {})
-    expect(new Uint8Array(await readFile(join(folder, 'victim')))).toEqual(new Uint8Array([3]))
+    const fs = new NodeFileSystem(root)
+    await fs.recoverConditionalFiles()
+    await fs.recoverConditionalFiles()
+    expect(
+      new Uint8Array(await readFile(join(root, 'Recovered.sync-conflict-failed-restore')))
+    ).toEqual(new Uint8Array([3]))
+    expect(await readdir(join(root, '.abele-sync/conditional'))).toEqual([])
   } finally {
     await rm(root, { recursive: true, force: true })
   }
