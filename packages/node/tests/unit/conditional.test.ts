@@ -40,7 +40,7 @@ it.each(['deny', 'throw', 'occupant'] as const)(
         path.startsWith('file.bin.sync-conflict-')
       )
       expect(copies).toHaveLength(mode === 'occupant' ? 1 : 0)
-      if (copies.length) expect(await fs.read(copies[0])).toEqual(bytes)
+      for (const copy of copies) expect(await fs.read(copy)).toEqual(bytes)
       await fs.recoverConditionalFiles()
       expect(await fs.read('file.bin')).toEqual(bytes)
       expect(await readdir(join(root, '.abele-sync/conditional'))).toEqual([])
