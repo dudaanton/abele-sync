@@ -15,7 +15,7 @@ import {
 } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { ConditionalFileOperation, FileVersion, RemovalPublication } from '@abele/sync-core'
-import { decodeRetentionSnapshot } from '@abele/sync-core'
+import { decodeRetentionSnapshot, EngineError } from '@abele/sync-core'
 import { containedIn, isMissing } from './nodeFsGuard.js'
 import { syncParents, syncPath } from './nodeFsDurability.js'
 
@@ -403,7 +403,13 @@ async function recoverVictim(root: string, path: string, victim: string, id: str
     await restoreVictim(root, path, victim, id)
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code
-    if (!isMissing(error) && code !== 'EACCES' && code !== 'EPERM') throw error
+    if (
+      !isMissing(error) &&
+      code !== 'EACCES' &&
+      code !== 'EPERM' &&
+      !(error instanceof EngineError && error.code === 'conflict')
+    )
+      throw error
     const owner =
       /^\.abele-sync\/(?:conditional|conditional-complete)\/([a-zA-Z0-9-]{1,128})\/victim$/.exec(
         path
@@ -433,28 +439,62 @@ async function recoverVictim(root: string, path: string, victim: string, id: str
   }
 }
 
+const migrationTemporary = /^(?:summary\.json|legacy-migrated)-[a-f0-9]{32}\.tmp$/
+async function publishMigrationMetadata(
+  root: string,
+  directory: string,
+  name: string,
+  contents: string,
+  check: () => void
+) {
+  const temporary = `${directory}/${name}-${randomBytes(16).toString('hex')}.tmp`
+  check()
+  await writeFile(temporary, contents, { flag: 'wx' })
+  await syncPath(temporary)
+  check()
+  await rename(temporary, `${directory}/${name}`)
+  await syncParents(`${directory}/${name}`, root)
+}
+
 /** One-time adoption of the pre-owner retention layout. These bytes have no
  * committed reclamation authority, so restore/expose them instead of deleting. */
 export async function recoverLegacyRetention(root: string, check: () => void): Promise<void> {
   const directory = await containedIn(root, '.abele-sync/retained-removals')
+  let owned = new Set<string>(),
+    validSummary = false
   try {
-    const marker = await lstat(`${directory}/legacy-migrated`)
-    if (!marker.isFile() || marker.isSymbolicLink())
-      throw new Error('invalid legacy migration marker')
-    if (marker.size === 1 && (await readFile(`${directory}/legacy-migrated`, 'utf8')) === '1')
-      return
-    // Creation can survive a crash before its byte does. An incomplete marker
-    // does not certify migration; replay adoption and repair it below.
-  } catch (error) {
-    if (!isMissing(error)) throw error
-  }
-  let owned = new Set<string>()
-  try {
+    const info = await lstat(`${directory}/summary.json`)
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error('invalid retention summary file')
     owned = new Set(
       decodeRetentionSnapshot(JSON.parse(await readFile(`${directory}/summary.json`, 'utf8'))).map(
         (row) => row.id
       )
     )
+    validSummary = true
+  } catch (error) {
+    if (!isMissing(error))
+      console.warn('Rebuilding unreadable removal retention summary; preserving all captured bytes')
+  }
+  try {
+    const marker = await lstat(`${directory}/legacy-migrated`)
+    if (!marker.isFile() || marker.isSymbolicLink())
+      throw new Error('invalid legacy migration marker')
+    if (
+      validSummary &&
+      marker.size === 1 &&
+      (await readFile(`${directory}/legacy-migrated`, 'utf8')) === '1'
+    )
+      return
+    if (!validSummary) {
+      // Rebuilding the summary invalidates an older completion marker. Retire
+      // it durably first, so a crash after summary publication must still visit
+      // unfinished migration/temp files on the next startup.
+      check()
+      await unlink(`${directory}/legacy-migrated`)
+      await syncParents(`${directory}/legacy-migrated`, root)
+    }
+    // Creation can survive a crash before its byte does. An incomplete marker
+    // does not certify migration; replay adoption and repair it below.
   } catch (error) {
     if (!isMissing(error)) throw error
   }
@@ -465,9 +505,10 @@ export async function recoverLegacyRetention(root: string, check: () => void): P
     if (isMissing(error)) return
     throw error
   }
+  let incomplete = false
   for (const id of ids) {
+    if (migrationTemporary.test(id)) continue
     if (id === 'summary.json' || id === 'legacy-migrated' || owned.has(id)) continue
-    valid(id)
     const walk = async (relative: string): Promise<void> => {
       const folder = await containedIn(
         root,
@@ -483,25 +524,34 @@ export async function recoverLegacyRetention(root: string, check: () => void): P
         check()
         if (stat.isDirectory() && !stat.isSymbolicLink()) await walk(path)
         else if (stat.isFile() && !stat.isSymbolicLink())
-          await recoverVictim(root, path, victim, id)
+          await recoverVictim(
+            root,
+            !validSummary && path === 'victim' ? `Recovered.sync-conflict-${id}` : path,
+            victim,
+            id
+          )
         else throw new Error('invalid legacy retained object')
       }
       await rmdir(folder)
     }
-    await walk('')
+    try {
+      valid(id)
+      await walk('')
+    } catch (error) {
+      check()
+      incomplete = true
+      console.warn(`Retained removal ${id} needs recovery; continuing with other captures`, error)
+    }
   }
-  try {
-    await writeFile(`${directory}/summary.json`, '[]', { flag: 'wx' })
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-  }
-  await syncPath(`${directory}/summary.json`)
-  await syncParents(`${directory}/summary.json`, root)
-  // Only this marker proves migration completed; new capture can create the
-  // summary before legacy adoption starts. Never overwrite its owner records.
-  await writeFile(`${directory}/legacy-migrated`, '1')
-  await syncPath(`${directory}/legacy-migrated`)
-  await syncParents(`${directory}/legacy-migrated`, root)
+  if (!validSummary) await publishMigrationMetadata(root, directory, 'summary.json', '[]', check)
+  for (const name of ids)
+    if (migrationTemporary.test(name)) {
+      check()
+      await unlink(`${directory}/${name}`)
+    }
+  if (incomplete) return
+  // A valid summary alone never certifies adoption of legacy captures.
+  await publishMigrationMetadata(root, directory, 'legacy-migrated', '1', check)
 }
 
 async function recoverFolder(

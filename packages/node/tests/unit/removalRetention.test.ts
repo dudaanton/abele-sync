@@ -1,10 +1,81 @@
-import { mkdtemp, rm, open, mkdir, writeFile, readFile } from 'node:fs/promises'
+import { mkdtemp, rm, open, mkdir, writeFile, readFile, symlink, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { expect, it } from 'vitest'
 import { sha256, retentionSnapshot, recoverRemovals } from '@abele/sync-core'
 import { NodeFileSystem } from '../../src/nodeFs.js'
 import { retentionHandedOver } from '../../src/removalSafety.js'
+
+it('D-233 exposes an ownerless modern capture as a visible conflict when its summary is unreadable', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'removal-modern-summary-'))
+  try {
+    const fs = new NodeFileSystem(root),
+      bytes = new Uint8Array([7])
+    await fs.writeAtomic('a.md', bytes, 1)
+    await fs.conditionalFile({
+      path: 'a.md',
+      expected: { ...(await fs.stat('a.md'))!, sha: await sha256(bytes) },
+      effect: { kind: 'remove' },
+    })
+    const [owner] = await retentionSnapshot(fs)
+    await writeFile(join(root, '.abele-sync/retained-removals/summary.json'), '{')
+    await fs.recoverConditionalFiles()
+    expect(await fs.read(`Recovered.sync-conflict-${owner!.id}`)).toEqual(bytes)
+    expect(await fs.stat('victim')).toBeNull()
+    expect(await retentionSnapshot(fs)).toEqual([])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it.each([false, true])(
+  'D-233 rebuilds an interrupted summary even with a migration marker (marker=%s)',
+  async (marker) => {
+    const root = await mkdtemp(join(tmpdir(), 'removal-summary-cut-'))
+    try {
+      const retained = join(root, '.abele-sync/retained-removals')
+      await mkdir(join(root, 'docs'))
+      await mkdir(join(retained, 'legacy/docs'), { recursive: true })
+      await writeFile(join(retained, 'legacy/docs/a.md'), 'unique retained bytes')
+      await writeFile(join(retained, 'summary.json'), marker ? '[{"id":' : '')
+      await writeFile(join(retained, `summary.json-${'a'.repeat(32)}.tmp`), '')
+      if (marker) await writeFile(join(retained, 'legacy-migrated'), '1')
+      for (let restart = 0; restart < 3; restart++)
+        await new NodeFileSystem(root).recoverConditionalFiles()
+      expect(await readFile(join(root, 'docs/a.md'), 'utf8')).toBe('unique retained bytes')
+      expect(JSON.parse(await readFile(join(retained, 'summary.json'), 'utf8'))).toEqual([])
+      expect(await readFile(join(retained, 'legacy-migrated'), 'utf8')).toBe('1')
+      expect(retentionHandedOver(retained)).toBe(true)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }
+)
+
+it('D-234 recovers around a symlink parent without touching its target or blocking another item', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'removal-parent-link-'))
+  const root = join(base, 'vault'),
+    outside = join(base, 'outside')
+  try {
+    await mkdir(outside)
+    const retained = join(root, '.abele-sync/retained-removals')
+    await mkdir(join(retained, 'legacy/docs'), { recursive: true })
+    await mkdir(join(retained, 'other'), { recursive: true })
+    await writeFile(join(retained, 'legacy/docs/a.md'), 'unique retained bytes')
+    await writeFile(join(retained, 'other/b.md'), 'other retained bytes')
+    await symlink(outside, join(root, 'docs'))
+    for (let restart = 0; restart < 3; restart++)
+      await new NodeFileSystem(root).recoverConditionalFiles()
+    expect(await readFile(join(root, 'Recovered.sync-conflict-legacy'), 'utf8')).toBe(
+      'unique retained bytes'
+    )
+    expect(await readFile(join(root, 'b.md'), 'utf8')).toBe('other retained bytes')
+    expect(await readdir(outside)).toEqual([])
+    expect(retentionHandedOver(retained)).toBe(true)
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
 
 it('refuses an expected-absent removal of an occupied name without recursive capture', async () => {
   const root = await mkdtemp(join(tmpdir(), 'removal-absence-'))

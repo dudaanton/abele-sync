@@ -180,12 +180,14 @@ export class NodeFileSystem implements FileSystem {
     return acknowledgePublication(this, publication)
   }
   async recoverConditionalFiles(): Promise<void> {
+    // Repair interrupted migration metadata before a journal can append a new
+    // retained owner to the summary.
+    await recoverLegacyRetention(this.base, () => this.checkEffect())
     await recoverConditionalFiles(
       this.base,
       () => this.checkEffect(),
       this.retainCaptured.bind(this)
     )
-    await recoverLegacyRetention(this.base, () => this.checkEffect())
     await recoverRemovals(this, undefined, this.removalRetention)
   }
   private readonly ignoreDirs: ReadonlySet<string>
