@@ -276,7 +276,8 @@ async function replay(
   caseOnly = false,
   fold = false,
   invalidJournal = false,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  recoveryPartition = { index: 0, count: 1 }
 ) {
   signal?.throwIfAborted()
   crash.signal = signal
@@ -500,7 +501,8 @@ async function replay(
     if (nested && failed) {
       const snapshot = await recoverySnapshot(dir, state, mode)
       try {
-        if (!recoveryImages.has(snapshot.signature)) {
+        const imagePartition = `${snapshot.signature}/${recoveryPartition.index}/${recoveryPartition.count}`
+        if (!recoveryImages.has(imagePartition)) {
           state.close()
           // A closed SQLite image includes the rolled-back transaction, not a live WAL.
           await snapshot.raw.copyFile(
@@ -531,7 +533,12 @@ async function replay(
           await recover(() => true)
           const recoveryCount = crash.points.length
           crash.armed = false
-          for (let second = 1; second <= recoveryCount; second++) {
+          const firstRecovery =
+            Math.floor((recoveryPartition.index * recoveryCount) / recoveryPartition.count) + 1
+          const lastRecovery = Math.floor(
+            ((recoveryPartition.index + 1) * recoveryCount) / recoveryPartition.count
+          )
+          for (let second = firstRecovery; second <= lastRecovery; second++) {
             signal?.throwIfAborted()
             await restore()
             crash.points = []
@@ -560,7 +567,7 @@ async function replay(
             }
           }
           // A cancelled/failed replay must not mark an image as covered.
-          recoveryImages.add(snapshot.signature)
+          recoveryImages.add(imagePartition)
         }
       } finally {
         await snapshot.raw.rm(snapshot.backup, { recursive: true, force: true })
@@ -634,14 +641,18 @@ for (const [caseOnly, fold] of [
   for (const mode of ['write', 'remove', 'move'] as const)
     describe(`group ${mode} (${fold ? 'folding case-only' : 'native'}) converges after every lifecycle await and every nested recovery await`, () => {
       let count = 0
-      const covered = new Set<number>()
+      const recoveryPartitions = mode === 'write' ? 8 : 1
+      const covered = Array.from({ length: recoveryPartitions }, () => new Set<number>())
       // Completed retained-write recovery traces are deeper than removal/move
       // traces. Split their work further, retaining every cut and the original
-      // wall-clock timeout; a write partition now has at most two cuts.
+      // wall-clock timeout. A single folding write cut can itself exceed that
+      // budget, so partition its nested replay too. Every lifecycle cut runs in
+      // every recovery partition; their disjoint ranges cover the entire trace.
       const partitions = mode === 'write' ? 512 : 64
       const maxCuts = mode === 'write' ? 2 : 8
       beforeAll(async () => {
         count = await run(0, '', mode, 0, false, false, caseOnly, fold)
+        console.info(`Group ${mode} (${fold ? 'folding' : 'native'}): ${count} lifecycle awaits`)
         expect(count).toBeGreaterThan(0)
         expect(
           Math.ceil(count / partitions),
@@ -649,26 +660,33 @@ for (const [caseOnly, fold] of [
         ).toBeLessThanOrEqual(maxCuts)
       }, 60_000)
       for (let part = 0; part < partitions; part++)
-        it(`lifecycle partition ${part + 1}/${partitions}`, async ({ signal }) => {
-          const first = Math.floor((part * count) / partitions) + 1
-          const last = Math.floor(((part + 1) * count) / partitions)
-          expect(last - first + 1, 'bounded lifecycle cuts per test').toBeLessThanOrEqual(maxCuts)
-          for (let cut = first; cut <= last; cut++) {
-            try {
-              await run(cut, '', mode, 0, true, false, caseOnly, fold, false, signal)
-              covered.add(cut)
-            } catch (error) {
-              throw new Error(`group restart failed at await ${cut}/${count}`, { cause: error })
+        for (let recoveryPart = 0; recoveryPart < recoveryPartitions; recoveryPart++)
+          it(`lifecycle partition ${part + 1}/${partitions}, recovery partition ${recoveryPart + 1}/${recoveryPartitions}`, async ({
+            signal,
+          }) => {
+            const first = Math.floor((part * count) / partitions) + 1
+            const last = Math.floor(((part + 1) * count) / partitions)
+            expect(last - first + 1, 'bounded lifecycle cuts per test').toBeLessThanOrEqual(maxCuts)
+            for (let cut = first; cut <= last; cut++) {
+              try {
+                await run(cut, '', mode, 0, true, false, caseOnly, fold, false, signal, {
+                  index: recoveryPart,
+                  count: recoveryPartitions,
+                })
+                covered[recoveryPart]!.add(cut)
+              } catch (error) {
+                throw new Error(`group restart failed at await ${cut}/${count}`, { cause: error })
+              }
             }
-          }
-        }, 60_000)
+          }, 60_000)
       afterAll(() => {
-        expect(
-          [...covered].sort((a, b) => a - b),
-          'every lifecycle await remains covered'
-        ).toEqual(Array.from({ length: count }, (_, i) => i + 1))
+        for (const [part, cuts] of covered.entries())
+          expect(
+            [...cuts].sort((a, b) => a - b),
+            `every lifecycle await remains covered in recovery partition ${part + 1}`
+          ).toEqual(Array.from({ length: count }, (_, i) => i + 1))
         console.info(
-          `Group ${mode} recovery replayed ${count} lifecycle awaits; ${recoveryImages.size} distinct recovery images`
+          `Group ${mode} recovery replayed ${count} lifecycle awaits in each of ${recoveryPartitions} recovery partitions; ${recoveryImages.size} distinct recovery image partitions`
         )
       })
     })
