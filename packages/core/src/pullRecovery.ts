@@ -225,6 +225,7 @@ export async function recoverPendingPullWrites(
       }
       // adopt either recorded the completed installation or preserved both local bytes
       // and the earlier base, retiring only a definite not-written intent.
+      await placer.pending.flushCleanup()
       const remaining = await state.getMeta?.(`pull-write:${fileId}`)
       if (remaining != null && decodePullIntent(remaining, fileId).heldOrder === undefined)
         throw new ExternalStateError('recovery-required')
