@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest'
 import { serverHarness, type Harness } from '../helpers/harness.js'
-import { Device, converge } from '../helpers/device.js'
+import { Device, converge, publicSnapshot } from '../helpers/device.js'
 import { blob, seed, shaOf } from '../helpers/seed.js'
 
 let h: Harness, account: string, v: string, laptop: Device, phone: Device
@@ -12,7 +12,7 @@ const device = async (name: string, vaultId = v): Promise<Device> => {
 }
 
 const listing = (d: Device): Array<[string, string]> =>
-  [...d.fs.snapshot()]
+  [...publicSnapshot(d.fs)]
     .map(([path, bytes]): [string, string] => [path, Buffer.from(bytes).toString('hex')])
     .sort()
 

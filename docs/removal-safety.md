@@ -1,7 +1,7 @@
 # Removal safety: capture, decide, retire
 
-Design for the removal review of the 0.3.5 candidate. This is a proposed
-implementation contract, not a claim that the current implementation provides it.
+Design for the removal review of the 0.3.5 candidate, updated with the manager's
+D-152/D-163 decisions. Implementation and verification are recorded in the report.
 
 ## Findings
 
@@ -84,17 +84,13 @@ tests already exercise a write through such a descriptor during authorization.
 Private path ownership excludes name replacement; it does not make content
 immutable. Stat/hash/stat followed by unlink cannot provide that stronger claim.
 
-For an absolute content-preservation guarantee, a host needs a writer barrier
-covering capture through finalization, or must retain the captured object until
-the approved retention policy permits disposal. The latter bounds preservation
-in time, rather than proving no writer exists. Copying or reflinking a snapshot
-does not preserve later writes through the original descriptor. Node currently
-has no enforceable barrier against arbitrary external writers.
-
-Consequently, the implementation must not advertise that rename alone eliminates
-every content-write race. The manager must settle which host guarantee is
-intended before the destructive path is implemented. The ledger-owner race can
-be eliminated by the durable transfer above independently of this OS limitation.
+The approved guarantee is bounded retention, not exclusion of external writers.
+Every authorized victim remains private for at least 24 hours. Immediately before
+reclamation compare identity (when available), size/mtime and content hash with
+the authorized content. Changed bytes restore exclusively, or become a visible
+conflict copy beside an occupied original. They are never deleted by retention.
+Writes through a descriptor held past final reclamation are the explicitly
+accepted D-163 residual.
 
 ## Cleanup without afterCommit
 
@@ -114,20 +110,13 @@ boundary after their outer transaction has returned.
 
 ## Retention and connection retirement
 
-Successfully committed, safely disposable captures retire immediately. Uncertain
-captures and conflict copies retain their owner and summary accounting. Apply
-the approved age and byte policy to these entries, with oldest-first selection,
-an explicit durable disposal decision and resumable cleanup. Uncommitted
-operations cannot be evicted as if they were acknowledged cache entries. If a
-hard byte cap cannot accommodate an unresolved victim, refuse new captures
-before moving public content rather than silently lose that victim.
-
-The available local held-stage policy currently bounds reproducible remote
-stages to 64 entries / 256 MiB by order. It has no age limit, and it is not a
-policy for deleting unique local conflict bytes. Server history retention is a
-different owner and is not automatically a local-file deletion authorization.
-The intended local age/byte policy, including disposition of unique conflict
-copies and quota exhaustion, must therefore be supplied or explicitly selected.
+Committed captures remain for a minimum of 24 hours and are reclaimed at seven
+days, or oldest-first when the host-configurable byte cap (default 1 GiB per
+vault) is exceeded. Younger captures are never reclaimed to satisfy the cap;
+report the excess. Each reclamation first verifies the authorized content.
+Unique conflict bytes restore exclusively or become visible conflict copies;
+they are never retention garbage. Uncommitted captures restore rather than
+become eligible merely through age or quota pressure.
 
 Connection retirement must drain committed cleanup and transfer still-retained
 conflict ownership to a durable local retention owner before removing connection

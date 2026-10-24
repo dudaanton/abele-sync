@@ -303,7 +303,11 @@ describe('the puller over the device facet', () => {
 
     // The move carried the bytes the file already had, so only the modify went down the wire.
     expect(d.gets).toEqual([second.sha])
-    expect(d.writes).toEqual(['a.md'])
+    expect(d.writes).toEqual([
+      'a.md',
+      '.abele-sync/retained-removals/summary.json',
+      '.abele-sync/retained-removals/summary.json',
+    ])
   })
 
   it('holds a change on a path with a local edit, and applies it once on the pull after', async () => {
@@ -689,7 +693,10 @@ describe('the puller over the device facet', () => {
     expect(await d.fs.stat('a.md')).toBeNull()
     expect(await d.fs.stat('big/a.md')).toBeNull()
     expect(await d.state.byFileId(a.file_id)).toBeNull()
-    expect(d.writes).toEqual([])
+    expect(d.writes).toEqual([
+      '.abele-sync/retained-removals/summary.json',
+      '.abele-sync/retained-removals/summary.json',
+    ])
     expect(report.cursor).toBe(await headOf(vault))
     // The entry went with it, so the scan has no missing file to push back as a delete.
     expect((await scan(d.fs, d.state, filter)).ops).toEqual([])

@@ -1,4 +1,5 @@
 import type { StateStore } from './state.js'
+import { recoverRemovals } from './removalRetention.js'
 import { transact } from './stateTransaction.js'
 import type { CommitOp } from '@abele/sync-protocol'
 import { fetchChecked } from './apply.js'
@@ -267,6 +268,7 @@ export class SyncCycle {
           .map((row) => row.path)
       )
     await fs.recoverConditionalFiles?.()
+    await recoverRemovals(fs, state, { ...this.ctx.opts.removalRetention, log })
     await recoverPullEvictions(fs, state, this.ctx.signal?.(), this.retries, client)
     const pendingFiles = new Set(
       ((await state.metadataKeys?.('pull-write:')) ?? []).map((key) =>
@@ -627,6 +629,7 @@ export class SyncCycle {
       )
         await this.retries.succeeded(row.path, row.phase)
     }
+    await recoverRemovals(fs, state, { ...this.ctx.opts.removalRetention, log })
     return {
       pull: before,
       push: pushed,

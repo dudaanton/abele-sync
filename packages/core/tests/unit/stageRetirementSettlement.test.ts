@@ -77,6 +77,34 @@ it('does not discard a successfully installed stage before its owning outer comm
   expect(await f.state.getMeta(f.key)).toBe(f.original)
 })
 
+it('does not acknowledge publication retention when live adoption rolls back', async () => {
+  const f = await fixture()
+  await f.fs.conditionalFile({
+    path: f.item.path,
+    expected: null,
+    effect: { kind: 'write', bytes: new Uint8Array([1]), mtime: 1, receipt: 'old-receipt' },
+  })
+  await f.pending.prepare(f.item, null, f.item.path, null, 'old-stage', 'old-receipt')
+  const discard = vi.spyOn(f.fs, 'discardInstallation')
+  const original = await f.state.getMeta(f.key)
+  await expect(
+    f.state.transaction(async (tx) => {
+      const placer = new PullPlacer(
+        { getBlob: async () => new Uint8Array([1]) },
+        f.fs,
+        tx,
+        { dirty: new Set(), expected: new ExpectedWrites(), filter: { excluded: () => false } },
+        sha256
+      )
+      expect(await placer.adopt(f.item, null)).toBe(true)
+      throw new Error('outer rollback')
+    })
+  ).rejects.toThrow('outer rollback')
+  expect(f.discard).not.toHaveBeenCalled()
+  expect(discard).not.toHaveBeenCalled()
+  expect(await f.state.getMeta(f.key)).toBe(original)
+})
+
 it('keeps a replacement intent arriving during successful stage cleanup', async () => {
   const f = await fixture()
   const replacement = JSON.stringify({

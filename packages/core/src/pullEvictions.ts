@@ -1,4 +1,5 @@
 import { pathOccupant } from './pathOccupant.js'
+import { commitRemoval } from './removalRetention.js'
 import { commitAppliedSettlement } from './settlement.js'
 import { replayAuthority } from './replayAuthority.js'
 import { normalisePath, validatePath } from '@abele/sync-protocol'
@@ -58,6 +59,7 @@ export async function recoverPullEvictions(
           if (!same || (await fs.stat(base.path)) !== null) return
           checkCancellation(signal)
           await tx.delete(base.path)
+          await commitRemoval(tx, base, fs)
           await tx.setMeta?.(key, null)
           await retries?.succeeded(base.wirePath, 'recovery', tx, key)
           await retries?.succeeded(key, 'recovery', tx, key)

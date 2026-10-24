@@ -1,4 +1,7 @@
 import { caseKey, normalisePath, type CommitOp } from '@abele/sync-protocol'
+import { captureRemoval, commitRemoval } from './removalRetention.js'
+import { replayAuthority } from './replayAuthority.js'
+import { pathOccupant } from './pathOccupant.js'
 import { EngineError } from './errors.js'
 import { assertHostPath } from './pathAdmission.js'
 import { touchesDeferred } from './defer.js'
@@ -142,7 +145,21 @@ export class PushDisk {
           if (!(await this.respell(previous.path, target, old, there, expected))) return false
         } else {
           if (
-            !(await this.effect({ path: previous.path, expected, effect: { kind: 'remove' } })) &&
+            !(await captureRemoval(
+              this.fs,
+              this.state,
+              previous,
+              async () =>
+                replayAuthority(
+                  previous.fileId,
+                  previous,
+                  await this.state.byFileId(previous.fileId),
+                  await pathOccupant(this.fs, this.state, previous.path, previous.fileId)
+                ),
+              undefined,
+              undefined,
+              expected
+            )) &&
             !retainOldCopy
           )
             return false
@@ -155,6 +172,7 @@ export class PushDisk {
     }
     this.opts.expected.clear(previous.path)
     await this.state.delete(previous.path)
+    await commitRemoval(this.state, previous, this.fs)
     return true
   }
 

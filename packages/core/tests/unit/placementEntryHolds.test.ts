@@ -121,6 +121,7 @@ const pendingEffects = {
   retireDecision: true,
   retireDecisions: true,
   finishRetirement: true,
+  recoverRetirement: true,
   retain: true,
 } satisfies Record<
   Exclude<keyof PendingPullWrites, 'refused' | 'matching' | 'authorizes' | 'stageId' | 'receiptId'>,
@@ -144,6 +145,8 @@ const entries: Record<string, (f: Fixture) => Promise<unknown>> = {
   retireDecision: (f) => f.pending.retireDecision(f.change),
   retireDecisions: (f) => f.pending.retireDecisions([f.change]),
   finishRetirement: (f) => f.pending.finishRetirement(f.change),
+  recoverRetirement: async (f) =>
+    f.pending.recoverRetirement('f', (await f.state.getMeta('pull-write:f'))!),
   retain: (f) => f.pending.retain('f', { count: 0, bytes: 0 }),
   recoverPending: (f) => recoverPendingPullWrites(f.fs, f.state, ['f'], f.client),
   recoverEvictions: (f) => recoverPullEvictions(f.fs, f.state, undefined, undefined, f.client),
@@ -156,7 +159,11 @@ it('covers every public effectful placer and intent method', () => {
 it.each(Object.keys(entries).flatMap((name) => [false, true].map((live) => ({ name, live }))))(
   'D-206/D-207 $name has no effects under a directory hold (live=$live)',
   async ({ name, live }) => {
-    const f = await fixture(name !== 'adoptExisting', live, name === 'finishRetirement')
+    const f = await fixture(
+      name !== 'adoptExisting',
+      live,
+      name === 'finishRetirement' || name === 'recoverRetirement'
+    )
     expect(await f.placer.refusal(f.change, f.entry)).toBeTruthy()
     await entries[name]!(f)
     for (const effect of f.effects) expect(effect).not.toHaveBeenCalled()

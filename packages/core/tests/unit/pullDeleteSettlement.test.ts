@@ -94,11 +94,10 @@ it.each([false, true])(
     }
     expect(await placer.drop(base)).toBe(false)
     expect(await state.get(base.path)).toEqual(replacement)
-    const retained = [...fs.snapshot()].filter(([path]) =>
-      path.startsWith('.abele-sync/retained-removals/')
-    )
-    expect(retained).toHaveLength(1)
-    expect(retained[0]![1]).toEqual(bytes)
+    // The new owner has no public occupant yet: restore exclusively rather
+    // than leave its bytes in anonymous private retention.
+    expect(await fs.read(base.path)).toEqual(bytes)
+    expect([...fs.snapshot()].filter(([path]) => path.endsWith('/victim'))).toEqual([])
   }
 )
 

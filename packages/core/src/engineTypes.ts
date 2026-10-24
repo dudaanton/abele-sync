@@ -61,6 +61,8 @@ export interface EngineStatus {
 }
 
 export interface EngineOptions {
+  /** Local removal retention; 24 h minimum and 7 day maximum are fixed safety bounds. */
+  removalRetention?: import('./removalRetention.js').RemovalRetentionPolicy
   /** Cooperative inventory scheduler: yield a host task; defaults to setTimeout(0). */
   yieldTask?: () => Promise<void>
   /** Independent pull placements prepared at once (1..32, default 1). */

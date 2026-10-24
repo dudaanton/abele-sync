@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { retentionHandedOver } from './removalSafety.js'
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import SqliteDatabase from 'better-sqlite3'
@@ -257,6 +258,7 @@ export function assertLocalSafety(
         )
         if (
           existsSync(path) &&
+          !(name === 'retained-removals' && retentionHandedOver(path)) &&
           (name === 'scoped-outbox' || name === 'retained-removals'
             ? hasRetainedFiles(path)
             : !lstatSync(path).isDirectory() || readdirSync(path).length)

@@ -1,4 +1,5 @@
 import { expect } from 'vitest'
+import { decodeRetentionSnapshot } from '../../src/removalRetention.js'
 import {
   encodeText,
   MemoryFileSystem,
@@ -127,9 +128,9 @@ export class Device {
     return this.fs.snapshot().has(path)
   }
 
-  /** Every path on the disk, in code-unit order. */
+  /** Every public path; private retention must have an exact owner. */
   paths(): string[] {
-    return [...this.fs.snapshot().keys()].sort()
+    return [...publicSnapshot(this.fs).keys()].sort()
   }
 
   /** The feed position the state holds. */
@@ -191,10 +192,26 @@ function counted(client: VaultClient, stats: DeviceStats): VaultClient {
 /** Every path with its bytes, in path order, as latin1 so the diff of a mismatch reads. */
 const listing = (device: Device): Record<string, string> =>
   Object.fromEntries(
-    [...device.fs.snapshot()]
+    [...publicSnapshot(device.fs)]
       .sort(([a], [b]) => (a < b ? -1 : 1))
       .map(([path, bytes]) => [path, Buffer.from(bytes).toString('latin1')])
   )
+
+/** Devices converge public content, while retention intentionally differs. Do
+ * not hide arbitrary private bytes: assert each excluded file has an owner. */
+export function publicSnapshot(fs: MemoryFileSystem): Map<string, Uint8Array> {
+  const snapshot = fs.snapshot(),
+    key = '.abele-sync/retained-removals/summary.json'
+  const raw = snapshot.get(key)
+  const rows = raw ? decodeRetentionSnapshot(JSON.parse(new TextDecoder().decode(raw))) : []
+  const owned = new Set(rows.map((row) => row.victim))
+  for (const path of [...snapshot.keys()])
+    if (path.startsWith('.abele-sync/retained-removals/')) {
+      expect(path === key || owned.has(path), `unowned private bytes: ${path}`).toBe(true)
+      snapshot.delete(path)
+    }
+  return snapshot
+}
 
 /**
  * Sync each device twice in order, then assert every disk is byte-equal to the first, and

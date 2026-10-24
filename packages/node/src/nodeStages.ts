@@ -8,6 +8,8 @@ import {
   type AtomicStage,
   type ContentIdentity,
   type ConditionalFileOperation,
+  type FileVersion,
+  type RemovalPublication,
 } from '@abele/sync-core'
 import { containedIn, isMissing, ownTempFolder } from './nodeFsGuard.js'
 import { syncParents, syncPath } from './nodeFsDurability.js'
@@ -25,6 +27,13 @@ interface Metadata {
 interface Host {
   fingerprint(path: string): Promise<ContentIdentity>
   conditionalFile(operation: ConditionalFileOperation): Promise<boolean>
+  retainCaptured(
+    source: string,
+    path: string,
+    expected: FileVersion,
+    publication?: RemovalPublication
+  ): Promise<void>
+  acknowledgePublication(publication: RemovalPublication): Promise<void>
 }
 const same = (a: ContentIdentity, b: ContentIdentity) => a.size === b.size && a.sha === b.sha
 
@@ -48,8 +57,12 @@ export class NodeStages {
         mtime: meta.base.mtime ?? Math.max(0, Math.round(info.mtimeMs)),
       }))
     ) {
-      await unlink(backup)
-      await syncParents(backup, this.root)
+      await this.host.retainCaptured(
+        `.abele-sync/stages/${meta.id}/base`,
+        meta.target,
+        { ...meta.base, mtime: meta.base.mtime ?? Math.max(0, Math.round(info.mtimeMs)) },
+        { kind: 'stage', id: meta.id }
+      )
     } else {
       await restoreVictim(this.root, `${meta.target}.sync-conflict-${meta.id}`, backup, meta.id)
     }
@@ -329,6 +342,7 @@ export class NodeStages {
       } catch (error) {
         if (!isMissing(error)) throw error
       }
+      await this.host.acknowledgePublication({ kind: 'stage', id })
       for (const name of ['data', 'meta.next', 'meta.json']) {
         this.check()
         await unlink(await this.path(id, name)).catch((error) => {

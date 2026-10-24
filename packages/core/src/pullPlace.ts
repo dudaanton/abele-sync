@@ -1,4 +1,5 @@
 import { hostPathRefusal, assertHostPath } from './pathAdmission.js'
+import { captureRemoval, commitRemoval } from './removalRetention.js'
 import { pathOccupant } from './pathOccupant.js'
 import { olderPull, pullHistoryKey, recordPull } from './pullHistory.js'
 import { replayAuthority } from './replayAuthority.js'
@@ -325,6 +326,7 @@ export class PullPlacer {
       async (tx) => {
         if (!(await authorized(tx)) || (await this.fs.stat(entry.path)) !== null) return
         await tx.delete(entry.path)
+        await commitRemoval(tx, entry, this.fs)
         if (change) await recordPull(tx, change, true)
         await tx.setMeta?.(scanHintKey(entry.path), null)
         await new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client).clear(
@@ -385,20 +387,8 @@ export class PullPlacer {
     }
   ): Promise<boolean> {
     try {
-      const identity = await this.fs.fileIdentity?.(path)
-      const expected =
-        identity === null ? null : { ...base, ...(identity !== undefined ? { identity } : {}) }
-      if (!(await authorize())) return false
-      if (this.fs.conditionalOwnership && identity !== undefined)
-        return await this.effect({ path, expected, authorize, effect: { kind: 'remove' } })
-      // Older hosts cannot enforce ledger authority at capture. Retain the
-      // uncertain object in the engine namespace: exposing it as a vault file
-      // would upload it again and resurrect a remote deletion.
-      if ((await this.fs.stat(path)) === null) return await authorize()
-      const to = `.abele-sync/retained-removals/${crypto.randomUUID()}/${path}`
-      if (!(await this.effect({ path, expected, effect: { kind: 'move', to } }))) return false
-      this.opts.log?.(`pull: retained removal at ${to}`)
-      return await authorize()
+      checkCancellation(this.opts.signal)
+      return await captureRemoval(this.fs, this.state, base, authorize)
     } catch (error) {
       if (!this.inTheWay(error)) throw error
       this.opts.log?.(`pull: ${path} cannot be removed: ${(error as Error).message}`)
@@ -1023,6 +1013,7 @@ export class PullPlacer {
             return
           await tx.delete(occupant.path)
           await tx.setMeta?.(intent, null)
+          await commitRemoval(tx, occupant, this.fs)
           if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
           afterStateCommit(tx, () => this.opts.expected.clear(occupant.path))
           recorded = true
@@ -1112,7 +1103,10 @@ export class PullPlacer {
           occupant = await pathOccupant(this.fs, tx, target, change.file_id)
         }
         if (!replayAuthority(change.file_id, base, current, occupant)) return
-        if (from !== null) await tx.delete(from)
+        if (from !== null) {
+          await tx.delete(from)
+          if (base) await commitRemoval(tx, base, this.fs)
+        }
         await tx.put({
           path: target,
           wirePath: change.path,
@@ -1127,7 +1121,7 @@ export class PullPlacer {
         await tx.setMeta?.(scanHintKey(target), null)
         await tx.setMeta?.(`pull-base:${target}`, null)
         if (from !== null) await tx.setMeta?.(scanHintKey(from), null)
-        if (stageId === undefined)
+        if (stageId === undefined && receiptId === undefined)
           await new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client).clear(
             change.file_id
           )
@@ -1136,12 +1130,11 @@ export class PullPlacer {
       }
     )
     if (!recorded) return false
-    if (stageId !== undefined) {
-      if (liveStage?.id === stageId) await liveStage.discard()
-      else await discardPullStage(this.fs, stageId)
-      await this.pending.clear(change.file_id)
-    }
-    if (receiptId !== undefined) await this.fs.discardInstallation?.(receiptId)
+    if (stageId !== undefined || receiptId !== undefined)
+      await this.pending.settled(change, async (id) => {
+        if (liveStage?.id === id) await liveStage.discard()
+        else await discardPullStage(this.fs, id)
+      })
     if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
     const source = change.prev_path ?? (from === null ? undefined : from.normalize('NFC'))
     if (!this.opts.signal?.aborted)

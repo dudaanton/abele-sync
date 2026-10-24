@@ -320,19 +320,20 @@ These are automated core/server observations, not live Obsidian or phone evidenc
 Core supports two implementations of `FileSystem.conditionalFile`. The host
 chooses the implementation behind the existing port.
 
-Incoming deletion additionally uses `conditionalOwnership: true` to negotiate a
-removal authority callback, `operation.authorize(): Promise<boolean>`. Such hosts
-must call it after capturing/comparing the victim and before retiring its bytes.
-False or an exception preserves the captured bytes, restoring without overwriting
-a newer public occupant (a visible conflict copy is valid retention). A callback
-is live authority only, never a durable recovery permission. Hosts must also enforce
-`expected.identity` when they provide `fileIdentity`. The final host mutation
-interval retains the limits of the conditional implementation described below.
-Hosts without `conditionalOwnership` or object identity remain supported: core uses an exclusive move
-to a visible `path.sync-conflict-<uuid>` copy and rechecks ownership afterward.
-These hosts retain even successful removals; core never automatically deletes those
-copies. This conservative fallback avoids assuming an older adapter implements a
-new optional callback. It introduces no private resource requiring cleanup recovery.
+File removals use an owned private capture through the conditional move primitive.
+The exact removal decision commits with its ledger transition; an asynchronous
+authorization callback alone never grants reclamation authority. Older hosts
+without object identity use the same lifecycle, rather than accumulating anonymous
+retention copies. Native Node removal also uses this protocol; its low-level
+primitive only acknowledges expected absence.
+
+The local summary owns committed captures for at least 24 hours, reclaims verified
+authorized bytes at seven days or oldest-first over the configurable 1 GiB cap,
+and never deletes unique conflict bytes. Restore those exclusively or publish a
+visible conflict copy. D-163 accepts descriptors held beyond final reclamation.
+Installation/stage retirement acknowledges displaced publication victims only
+after the owning decision commits. See [removal safety](removal-safety.md) for
+recovery, metadata-only enumeration and connection handover.
 
 1. **Exclusive or checked conditional effects.** Exclusive hosts compare the
    displaced regular file at the mutation boundary and publish into an exclusive
@@ -351,9 +352,9 @@ new optional callback. It introduces no private resource requiring cleanup recov
    intent before capture. Preserve displaced bytes in durable quarantine before
    destructive publication. On mismatch restore without overwriting another
    occupant, retaining a visible conflict copy if necessary. Persist restoration
-   progress so interruption can be recovered idempotently. Retire verified victims
-   after successful publication; retire restored quarantine records once the public
-   restoration is durable. Retain uncertain evidence. Exclusive hosts fence capture
+   progress so interruption can be recovered idempotently. Transfer verified victims
+   into owned retention after successful publication; retire restored quarantine
+   records once the public restoration is durable. Retain uncertain evidence. Exclusive hosts fence capture
    against directories and symlinks at the operation boundary and distinguish
    allocation sentinels by identity. Checked hosts inspect path type before capture,
    use no allocation sentinel, and preserve unexpected captured occupants during

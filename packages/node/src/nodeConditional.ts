@@ -11,9 +11,10 @@ import {
   readFile,
   unlink,
   rm,
+  rmdir,
 } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import type { ConditionalFileOperation, FileVersion } from '@abele/sync-core'
+import type { ConditionalFileOperation, FileVersion, RemovalPublication } from '@abele/sync-core'
 import { containedIn, isMissing } from './nodeFsGuard.js'
 import { syncParents, syncPath } from './nodeFsDurability.js'
 
@@ -142,6 +143,12 @@ async function restoring(folder: string, root: string) {
   await syncPath(`${folder}/restoring`)
   await syncParents(`${folder}/restoring`, root)
 }
+export type RetainVictim = (
+  source: string,
+  path: string,
+  expected: FileVersion,
+  publication?: RemovalPublication
+) => Promise<void>
 
 /** Never rename over a public name. Capture first, validate the displaced inode,
  * publish/restore exclusively. Victims are dropped on success or restored and retired
@@ -149,8 +156,13 @@ async function restoring(folder: string, root: string) {
 export async function conditionalFile(
   root: string,
   op: ConditionalFileOperation,
-  check: () => void
+  check: () => void,
+  retain?: RetainVictim
 ): Promise<boolean> {
+  // Captured removals are owned by retainRemoval through NodeFileSystem. This
+  // low-level primitive may only acknowledge absence; never unlink a victim
+  // based on an async authorization callback.
+  if (op.effect.kind === 'remove' && op.expected !== null) return false
   if (op.authorize && op.effect.kind !== 'remove')
     throw new Error('conditional ownership is only supported for removal')
   const id = valid(
@@ -186,7 +198,6 @@ export async function conditionalFile(
   await syncPath(`${directory}/intent.json`)
   await syncParents(`${directory}/intent.json`, root)
   let captured = false
-  let verified = false
   let published = false
   const retire = async () => {
     await rm(directory, { recursive: true, force: true })
@@ -198,20 +209,6 @@ export async function conditionalFile(
       return
     }
     check()
-    if (verified && op.expected !== null) {
-      try {
-        await lstat(target)
-        if (await matchesVictim(victim, op.expected)) {
-          await unlink(victim)
-          captured = false
-          await syncParents(victim, root)
-          await retire()
-          return
-        }
-      } catch (error) {
-        if (!isMissing(error)) throw error
-      }
-    }
     await restoring(directory, root)
     await restoreVictim(root, op.path, victim, id, op.effect.kind === 'remove')
     captured = false
@@ -220,28 +217,23 @@ export async function conditionalFile(
   const completed = async () => {
     if (captured) {
       if (op.expected === null || !(await matchesVictim(victim, op.expected))) {
-        verified = false
         await restore()
         return false
       }
-      // A ledger replacement can leave exactly the same filesystem object.
-      // Never discard a denied victim, even when a newer public occupant has
-      // matching bytes. A throwing check follows the same conservative restore.
-      if (op.authorize) {
-        verified = false
-        if (!(await op.authorize())) {
-          await restore()
-          return false
-        }
-        // The callback can yield to an open writer of the captured inode.
-        // Its authority result does not refresh the earlier content proof.
-        if (!(await matchesVictim(victim, op.expected))) {
-          await restore()
-          return false
-        }
-        verified = true
-      }
-      await unlink(victim)
+      // Captured removals cannot reach this publication-only retirement path.
+      // Their bytes and durable decision belong to removalRetention instead.
+      if (retain && op.effect.kind !== 'move')
+        await retain(
+          `.abele-sync/conditional/${id}/victim`,
+          op.path,
+          op.expected,
+          op.effect.kind === 'write' && op.effect.receipt
+            ? { kind: 'installation', id: op.effect.receipt }
+            : op.effect.kind === 'install'
+              ? { kind: 'stage', id: op.effect.stageId }
+              : undefined
+        )
+      else await unlink(victim)
       captured = false
       await syncParents(victim, root)
     } else if (op.authorize && !(await op.authorize())) {
@@ -303,7 +295,6 @@ export async function conditionalFile(
         await restore()
         return false
       }
-      verified = true
     } else {
       try {
         await lstat(target)
@@ -336,7 +327,6 @@ export async function conditionalFile(
     // Preparing the destination/data yielded after capture. Do not publish
     // against a baseline that changed while those operations were pending.
     if (captured && op.expected !== null && !(await matchesVictim(victim, op.expected))) {
-      verified = false
       await restore()
       return false
     }
@@ -356,12 +346,67 @@ export async function conditionalFile(
   }
 }
 
-export async function recoverConditionalFiles(root: string, check: () => void): Promise<void> {
+export async function recoverConditionalFiles(
+  root: string,
+  check: () => void,
+  retain?: RetainVictim
+): Promise<void> {
   for (const location of ['conditional', 'conditional-complete'])
-    await recoverFolder(root, location, check)
+    await recoverFolder(root, location, check, retain)
 }
 
-async function recoverFolder(root: string, location: string, check: () => void): Promise<void> {
+/** One-time adoption of the pre-owner retention layout. These bytes have no
+ * committed reclamation authority, so restore/expose them instead of deleting. */
+export async function recoverLegacyRetention(root: string, check: () => void): Promise<void> {
+  const directory = await containedIn(root, '.abele-sync/retained-removals')
+  try {
+    await lstat(`${directory}/summary.json`)
+    return
+  } catch (error) {
+    if (!isMissing(error)) throw error
+  }
+  let ids: string[]
+  try {
+    ids = await readdir(directory)
+  } catch (error) {
+    if (isMissing(error)) return
+    throw error
+  }
+  for (const id of ids) {
+    valid(id)
+    const walk = async (relative: string): Promise<void> => {
+      const folder = await containedIn(
+        root,
+        `.abele-sync/retained-removals/${id}${relative ? `/${relative}` : ''}`
+      )
+      const info = await lstat(folder)
+      if (!info.isDirectory() || info.isSymbolicLink())
+        throw new Error('invalid legacy retention folder')
+      for (const name of await readdir(folder)) {
+        const path = relative ? `${relative}/${name}` : name
+        const victim = await containedIn(root, `.abele-sync/retained-removals/${id}/${path}`)
+        const stat = await lstat(victim)
+        check()
+        if (stat.isDirectory() && !stat.isSymbolicLink()) await walk(path)
+        else if (stat.isFile() && !stat.isSymbolicLink())
+          await restoreVictim(root, path, victim, id)
+        else throw new Error('invalid legacy retained object')
+      }
+      await rmdir(folder)
+    }
+    await walk('')
+  }
+  await writeFile(`${directory}/summary.json`, '[]', { flag: 'wx' })
+  await syncPath(`${directory}/summary.json`)
+  await syncParents(`${directory}/summary.json`, root)
+}
+
+async function recoverFolder(
+  root: string,
+  location: string,
+  check: () => void,
+  retain?: RetainVictim
+): Promise<void> {
   const directory = await containedIn(root, `.abele-sync/${location}`)
   let ids: string[]
   try {
@@ -442,14 +487,25 @@ async function recoverFolder(root: string, location: string, check: () => void):
           intent.expected &&
           (await matchesVictim(victim, intent.expected))
         ) {
-          await unlink(victim)
+          if (retain)
+            await retain(
+              `.abele-sync/${location}/${id}/victim`,
+              intent.path,
+              intent.expected,
+              intent.receipt
+                ? { kind: 'installation', id: intent.receipt }
+                : intent.stageId
+                  ? { kind: 'stage', id: intent.stageId }
+                  : undefined
+            )
+          else await unlink(victim)
           await syncParents(victim, root)
         } else {
           await restoring(folder, root)
           // A restore-intent marker does not prove a public link ever existed.
           // Exclusive restoration retries the original name; occupied names are
           // preserved by restoreVictim's inode/conflict-copy handling.
-          await restoreVictim(root, intent.path, victim, id, intent.effect === 'remove')
+          await restoreVictim(root, intent.path, victim, id)
         }
       }
       // Preserve only a receipt for a proven installed object, never a victim.

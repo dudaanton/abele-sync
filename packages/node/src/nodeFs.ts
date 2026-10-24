@@ -19,6 +19,13 @@ import {
   isHidden,
   MAX_CHUNK_BYTES,
   fingerprintSource,
+  retainRemoval,
+  retainPublishedVictim,
+  acknowledgePublication,
+  type RemovalPublication,
+  type FileVersion,
+  recoverRemovals,
+  type RemovalRetentionPolicy,
   type ChunkSource,
   type SourceStamp,
   type ContentIdentity,
@@ -33,6 +40,7 @@ import {
   fileObjectIdentity,
   installedFile,
   recoverConditionalFiles,
+  recoverLegacyRetention,
   discardInstallation,
 } from './nodeConditional.js'
 import type { ConditionalFileOperation } from '@abele/sync-core'
@@ -57,6 +65,7 @@ const WATCH_MAX_WAIT_MS = 2000
 const STABLE_GAP_MS = 200
 
 export interface NodeFileSystemOptions {
+  removalRetention?: RemovalRetentionPolicy
   /** Volume's name-equivalence key when known. Without a volume capability probe,
    * conservatively fold case/Unicode; platform alone does not determine APFS rules. */
   pathKey?: (path: string) => string
@@ -97,9 +106,21 @@ export class NodeFileSystem implements FileSystem {
   readonly conditionalOwnership = true as const
   readonly pathKey: (path: string) => string
   async conditionalFile(operation: ConditionalFileOperation): Promise<boolean> {
-    const applied = await conditionalFile(this.base, operation, () => this.checkEffect())
-    if (applied && (operation.effect.kind === 'remove' || operation.effect.kind === 'move'))
-      await this.pruneAbove(operation.path)
+    if (operation.effect.kind === 'remove') {
+      this.checkEffect()
+      if (operation.expected === null || (await this.stat(operation.path)) === null)
+        return conditionalFile(this.base, { ...operation, expected: null }, () =>
+          this.checkEffect()
+        )
+      return retainRemoval(this, operation, { clock: this.removalRetention.now })
+    }
+    const applied = await conditionalFile(
+      this.base,
+      operation,
+      () => this.checkEffect(),
+      this.retainCaptured.bind(this)
+    )
+    if (applied && operation.effect.kind === 'move') await this.pruneAbove(operation.path)
     return applied
   }
   async fileIdentity(path: string): Promise<string | null> {
@@ -108,11 +129,31 @@ export class NodeFileSystem implements FileSystem {
   installedFile(receipt: string, path: string, sha: string): Promise<boolean> {
     return installedFile(this.base, receipt, path, sha)
   }
-  discardInstallation(receipt: string): Promise<void> {
-    return discardInstallation(this.base, receipt, () => this.checkEffect())
+  async discardInstallation(receipt: string): Promise<void> {
+    await this.acknowledgePublication({ kind: 'installation', id: receipt })
+    await discardInstallation(this.base, receipt, () => this.checkEffect())
   }
-  recoverConditionalFiles(): Promise<void> {
-    return recoverConditionalFiles(this.base, () => this.checkEffect())
+  retainCaptured(
+    source: string,
+    path: string,
+    expected: FileVersion,
+    publication?: RemovalPublication
+  ): Promise<void> {
+    this.checkEffect()
+    return retainPublishedVictim(this, source, path, expected, publication)
+  }
+  acknowledgePublication(publication: RemovalPublication): Promise<void> {
+    this.checkEffect()
+    return acknowledgePublication(this, publication)
+  }
+  async recoverConditionalFiles(): Promise<void> {
+    await recoverConditionalFiles(
+      this.base,
+      () => this.checkEffect(),
+      this.retainCaptured.bind(this)
+    )
+    await recoverLegacyRetention(this.base, () => this.checkEffect())
+    await recoverRemovals(this, undefined, this.removalRetention)
   }
   private readonly ignoreDirs: ReadonlySet<string>
   private readonly skipHidden: boolean
@@ -130,11 +171,13 @@ export class NodeFileSystem implements FileSystem {
   private readonly base: string
   private readonly effectGuard?: () => void
   private readonly stages: NodeStages
+  private readonly removalRetention: RemovalRetentionPolicy
 
   constructor(
     private readonly root: string,
     options: NodeFileSystemOptions = {}
   ) {
+    this.removalRetention = options.removalRetention ?? {}
     this.pathKey = options.pathKey ?? caseKey
     this.base = resolve(root)
     this.effectGuard = options.effectGuard

@@ -1,3 +1,4 @@
+import { captureRemoval, commitRemoval } from './removalRetention.js'
 import {
   AbeleError,
   decodeAccessToken,
@@ -588,11 +589,14 @@ export class V2EngineClient implements EngineClient {
       if (!(await allowed(state))) return false as const
       signal?.throwIfAborted()
       if (
-        !(await fs.conditionalFile?.({
-          path: base.path,
-          expected: row.sourceIdentity === null ? null : { ...base, identity: row.sourceIdentity },
-          effect: { kind: 'remove' },
-        }))
+        !(await captureRemoval(
+          fs,
+          state,
+          base,
+          () => allowed(state),
+          undefined,
+          row.sourceIdentity
+        ))
       )
         return false as const
     }
@@ -602,7 +606,10 @@ export class V2EngineClient implements EngineClient {
       if (this.authoredDepartures.has(event.path))
         await writeDepartureMark(tx, AUTHORED_MARK, event.path, false)
       await writeDepartureMark(tx, DEPARTURE_MARK, event.path, true)
-      if (base) await tx.delete(base.path)
+      if (base) {
+        await tx.delete(base.path)
+        await commitRemoval(tx, base, fs)
+      }
       afterStateCommit(tx, () => {
         this.authoredDepartures.delete(event.path)
         this.departed.add(event.path)

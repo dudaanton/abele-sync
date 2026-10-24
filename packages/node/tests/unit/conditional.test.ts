@@ -3,7 +3,7 @@ import { writeFileSync, existsSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { expect, it } from 'vitest'
-import { sha256 } from '@abele/sync-core'
+import { sha256, retentionSnapshot } from '@abele/sync-core'
 import { NodeFileSystem } from '../../src/nodeFs.js'
 import { conditionalFile } from '../../src/nodeConditional.js'
 
@@ -106,15 +106,13 @@ it.each(['deny', 'throw', 'occupant'] as const)(
       else expect(await result).toBe(false)
       expect(calls).toBe(1)
       expect(await fs.read('file.bin')).toEqual(bytes)
-      const retained = join(root, '.abele-sync/retained-removals')
-      const copies = await readdir(retained).catch((error) => {
-        if (error.code === 'ENOENT') return [] as string[]
-        throw error
-      })
+      // Manager decision: a denied capture beside an occupant is a visible
+      // conflict copy, never an unowned private file.
+      const copies = (await readdir(root)).filter((path) => path.includes('sync-conflict-'))
       expect(copies).toHaveLength(mode === 'occupant' ? 1 : 0)
       for (const copy of copies)
-        expect(new Uint8Array(await readFile(join(retained, copy, 'file.bin')))).toEqual(bytes)
-      expect((await readdir(root)).filter((path) => path.includes('sync-conflict-'))).toEqual([])
+        expect(new Uint8Array(await readFile(join(root, copy)))).toEqual(bytes)
+      expect(await retentionSnapshot(fs)).toEqual([])
       await fs.recoverConditionalFiles()
       expect(await fs.read('file.bin')).toEqual(bytes)
       expect(await readdir(join(root, '.abele-sync/conditional'))).toEqual([])
@@ -124,7 +122,7 @@ it.each(['deny', 'throw', 'occupant'] as const)(
   }
 )
 
-it('recovers an interrupted removal into private retention when its path has a new owner', async () => {
+it('recovers an uncommitted removal into a visible conflict copy when its path has a new owner', async () => {
   const root = await mkdtemp(join(tmpdir(), 'conditional-retained-removal-'))
   try {
     const directory = join(root, '.abele-sync/conditional/interrupted')
@@ -140,13 +138,11 @@ it('recovers an interrupted removal into private retention when its path has a n
     await fs.recoverConditionalFiles()
     expect(await fs.read('file.bin')).toEqual(new Uint8Array([2]))
     expect(
-      new Uint8Array(
-        await readFile(join(root, '.abele-sync/retained-removals/interrupted/file.bin'))
-      )
+      new Uint8Array(await readFile(join(root, 'file.bin.sync-conflict-interrupted')))
     ).toEqual(new Uint8Array([1]))
     const listed = []
     for await (const file of fs.list()) listed.push(file.path)
-    expect(listed).toEqual(['file.bin'])
+    expect(listed.sort()).toEqual(['file.bin', 'file.bin.sync-conflict-interrupted'])
     expect(await readdir(join(root, '.abele-sync/conditional'))).toEqual([])
   } finally {
     await rm(root, { recursive: true, force: true })
