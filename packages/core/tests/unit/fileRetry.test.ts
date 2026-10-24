@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest'
 import { AbeleError } from '@abele/sync-protocol'
-import { SyncEngine } from '../../src/engine.js'
+import { SyncEngine, retryPathsCapability } from '../../src/engine.js'
 import { MemoryFileSystem, type FileSystem } from '../../src/fs.js'
 import { MemoryStateStore } from '../../src/state.js'
 import { selectiveDefaults } from '../../src/selective.js'
@@ -238,6 +238,95 @@ async function fixture() {
     },
   }
 }
+
+it('selectively retries one refused push even when another path has identical bytes', async () => {
+  const f = await fixture()
+  f.client.changes = async () => ({ items: [], next_since: 1, head_seq: 1 })
+  f.client.state = async () =>
+    ({ head_seq: 1, settings: { max_file_bytes: 1e9, quota_bytes: null } }) as Awaited<
+      ReturnType<EngineClient['state']>
+    >
+  for (const path of ['broken.bin', 'healthy.bin'])
+    await f.fs.writeAtomic(path, new Uint8Array([2]), 1)
+  f.client.hasBlob = async () => false
+  const upload = vi.fn(async () => {
+    throw new AbeleError('too_large', 'denied')
+  })
+  f.client.putBlob = upload
+  const engine = new SyncEngine(f.options)
+  try {
+    await engine.sync()
+    const before = await f.state.getMeta('file-retry:healthy.bin')
+    expect(upload).toHaveBeenCalledTimes(1)
+    await engine.retryPaths(['broken.bin'])
+    expect(upload).toHaveBeenCalledTimes(2)
+    expect(await f.state.getMeta('file-retry:healthy.bin')).toBe(before)
+    expect((await engine.waitingFiles()).map((row) => row.path).sort()).toEqual([
+      'broken.bin',
+      'healthy.bin',
+    ])
+  } finally {
+    await engine.stop()
+  }
+})
+
+it('resets only exact selected retry schedules and retains durable owners', async () => {
+  const state = new MemoryStateStore()
+  const retries = new FileRetries(
+    state,
+    () => 0,
+    () => {}
+  )
+  await retries.failed('folder/a', 'pull', new Error('a'), true)
+  await retries.failed('folder/b', 'pull', new Error('b'), true)
+  await state.setMeta('pull-refused:a', 'immutable obligation')
+  const before = await state.getMeta('file-retry:folder%2Fb')
+  await retries.retryPaths(['folder/a'])
+  expect(retries.ready('folder/a')).toBe(true)
+  expect(retries.ready('folder/b')).toBe(false)
+  expect(await state.getMeta('file-retry:folder%2Fb')).toBe(before)
+  expect(await state.getMeta('pull-refused:a')).toBe('immutable obligation')
+})
+
+it('queues symbol selective retry behind the active run and snapshots caller paths', async () => {
+  const f = await fixture()
+  let release!: () => void, entered!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const reached = new Promise<void>((resolve) => {
+    entered = resolve
+  })
+  const changes = f.client.changes
+  let first = true
+  f.client.changes = async (...args) => {
+    if (first) {
+      first = false
+      entered()
+      await gate
+    }
+    return changes(...args)
+  }
+  const retry = vi.fn(async (_paths?: readonly string[]) => {})
+  f.client.retryRefusedDirectories = retry
+  const engine = new SyncEngine(f.options)
+  const running = engine.sync()
+  await reached
+  const paths = ['broken.bin']
+  const selected = engine[retryPathsCapability](paths)
+  paths.push('healthy.bin')
+  await Promise.resolve()
+  expect(retry).not.toHaveBeenCalled()
+  release()
+  try {
+    await running
+    await selected
+    expect(retry).toHaveBeenCalledExactlyOnceWith(['broken.bin'])
+  } finally {
+    release()
+    await engine.stop()
+  }
+})
 
 it.each(['EACCES', 'forbidden'])(
   'a refused file write (%s) waits durably while other files converge, then retries explicitly',

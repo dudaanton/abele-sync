@@ -53,7 +53,8 @@ export class VerdictRecorder {
 
   /** Write a refusal down, once. */
   refuse(sha: string, refusal: Refusal): void {
-    if (this.refused.has(sha)) return
+    // A new verdict replaces the observed object so an explicit path retry cannot
+    // bypass a fresh refusal later in the same upload/commit attempt.
     this.refused.set(sha, {
       code: refusal.code,
       message: refusal.message,

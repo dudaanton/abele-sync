@@ -55,6 +55,7 @@ export type {
  */
 
 const DEFAULT_DEBOUNCE_MS = 300
+export const retryPathsCapability: unique symbol = Symbol.for('abele.sync.retry-paths-v1')
 const DEFAULT_BACKOFF_MS: readonly [number, number] = [2_000, 60_000]
 const DEFAULT_FALLBACK_MS = 5 * 60 * 1_000
 
@@ -292,6 +293,26 @@ export class SyncEngine implements ExclusiveOperationPort {
       await this.cycle.retries.load()
       return waitingSnapshot(this.opts.state, this.cycle.retries.list())
     })
+  }
+
+  /** Retry exact canonical wire paths as one scheduler operation; never retire incoming owners. */
+  retryPaths(paths: readonly string[]): Promise<SyncReport> {
+    const selected = [...new Set(paths)]
+    return this.exclusive(async () => {
+      await this.cycle.retries.retryPaths(selected)
+      await this.opts.client.loadPathRefusals?.(this.opts.fs, this.opts.state)
+      await this.opts.client.retryRefusedDirectories?.(selected)
+      this.cycle.retryRefusedPaths = new Set(selected)
+      try {
+        return await this.beginRun()
+      } finally {
+        this.cycle.retryRefusedPaths = undefined
+      }
+    })
+  }
+
+  [retryPathsCapability](paths: readonly string[]): Promise<SyncReport> {
+    return this.retryPaths(paths)
   }
 
   /** Verify all local content once and review every outgoing delete, in the sync queue. */

@@ -100,6 +100,7 @@ export class SyncCycle {
   /** Set by `rescan`: the next run winds the cursor back to 0 before it pulls. */
   rewind = false
   retryRefusedDirectories = false
+  retryRefusedPaths: ReadonlySet<string> | undefined
   /** Set once a run has started or ended with the cursor above 0: no preference is sent again. */
   private joined = false
   /** Only a batch this live engine just sent is known not to originate in a restored profile. */
@@ -287,6 +288,7 @@ export class SyncCycle {
       expected: this.ctx.expected,
       onApplied: this.ctx.opts.onApplied,
       refused: this.refused,
+      retryRefusedPaths: this.retryRefusedPaths,
       maxFileBytes: undefined as number | undefined,
       filter: this.filter,
       // A push answered with the server's bytes for a staged path stages them, as a pull would

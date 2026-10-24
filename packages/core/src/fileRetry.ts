@@ -258,8 +258,15 @@ export class FileRetries {
     else await persist(state)
   }
   async retryNow(): Promise<void> {
+    return this.reset()
+  }
+  async retryPaths(paths: readonly string[]): Promise<void> {
+    return this.reset(new Set(paths))
+  }
+  private async reset(paths?: ReadonlySet<string>): Promise<void> {
     await this.load()
     for (const row of this.rows.values()) {
+      if (paths && !paths.has(row.path)) continue
       if (row.reason.startsWith('invalid retry metadata: ')) {
         const raw = await this.state.getMeta?.(key(row.path))
         if (raw) await this.state.setMeta!(`file-retry-review:${encodeURIComponent(row.path)}`, raw)
