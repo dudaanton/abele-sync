@@ -209,6 +209,9 @@ export async function recoverPendingPullWrites(
       if ((await placer.pending.matching(change, entry)) === null)
         throw new ExternalStateError('recovery-required')
       await placer.adopt(change, entry)
+      // Adoption may have settled the ledger and discarded the stage. Retire
+      // its acknowledged alias before deciding whether installation needs replay.
+      await placer.pending.flushCleanup()
       if (
         (intent.stageId !== undefined || (intent.from !== null && client !== undefined)) &&
         (await state.getMeta?.(`pull-write:${fileId}`)) != null

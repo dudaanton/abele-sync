@@ -5,6 +5,7 @@ import {
   recoverPendingPullWrites,
   sha256,
   decodePullIntent,
+  type FileSystem,
 } from '../../src/index.js'
 
 async function fixture() {
@@ -44,6 +45,50 @@ async function fixture() {
   return { fs, state, intent, base }
 }
 describe('normal-pull recovery before engine activation', () => {
+  it.each([false, true])(
+    'adopts an installed stage without replaying it when no streaming client is available (buffered=%s)',
+    async (buffered) => {
+      const f = await fixture()
+      const fs: FileSystem = f.fs
+      const { receiptId, ...intent } = f.intent
+      await f.state.setMeta(
+        'pull-write:file',
+        JSON.stringify({ ...intent, stageId: 'installed-stage' })
+      )
+      let discarded = false
+      const unexpected = vi.fn(async () => {
+        throw new Error('installed stage must not be replayed')
+      })
+      const discard = vi.fn(async () => {
+        discarded = true
+        await f.fs.discardInstallation(receiptId)
+      })
+      fs.reopenStage = vi.fn(async (id) => {
+        expect(id).toBe('installed-stage')
+        if (discarded) throw Object.assign(new Error('stage is gone'), { code: 'ENOENT' })
+        return {
+          id,
+          offset: f.intent.size,
+          append: unexpected,
+          seal: unexpected,
+          commit: unexpected,
+          discard,
+          installed: () => f.fs.installedFile(receiptId, intent.target, intent.sha),
+        }
+      })
+      const client = buffered ? { getBlob: unexpected } : undefined
+      const bytes = await fs.read(intent.target)
+      await recoverPendingPullWrites(fs, f.state, ['file'], client)
+      expect(await f.state.byFileId('file')).toMatchObject({ versionId: 'new', sha: intent.sha })
+      expect(await fs.read(intent.target)).toEqual(bytes)
+      expect(discard).toHaveBeenCalledExactlyOnceWith()
+      expect(unexpected).not.toHaveBeenCalled()
+      expect(await f.state.getMeta('pull-write:file')).toBeNull()
+      expect(await f.state.getMeta('pull-cleanup-head')).toBeNull()
+      await recoverPendingPullWrites(fs, f.state, ['file'], client)
+      expect(discard).toHaveBeenCalledTimes(1)
+    }
+  )
   it('keeps host stage ids opaque while rejecting empty or unbounded ids', async () => {
     const { intent } = await fixture()
     expect(
