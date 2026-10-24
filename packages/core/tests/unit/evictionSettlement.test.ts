@@ -4,6 +4,20 @@ import { evictionKey, recoverPullEvictions } from '../../src/pullEvictions.js'
 import { FileRetries } from '../../src/fileRetry.js'
 import { PullPlacer } from '../../src/pullPlace.js'
 import type { ChangeItem } from '@abele/sync-protocol'
+import type { StateStore } from '../../src/state.js'
+
+function withoutMetadata(state: StateStore): StateStore {
+  return new Proxy(state, {
+    get(target, key) {
+      if (key === 'getMeta' || key === 'setMeta' || key === 'metadataKeys') return undefined
+      if (key === 'transaction')
+        return <T>(fn: (tx: StateStore) => Promise<T>) =>
+          target.transaction((tx) => fn(withoutMetadata(tx)))
+      const value = Reflect.get(target, key)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+}
 
 async function fixture() {
   const fs = new MemoryFileSystem({ caseInsensitive: true, normalizing: true })
@@ -34,7 +48,7 @@ async function fixture() {
   return { fs, state, base, key, raw, retries }
 }
 
-async function liveFixture() {
+async function liveFixture(metadata = true) {
   const f = await fixture()
   await f.fs.writeAtomic(f.base.path, new Uint8Array([1]), 1)
   const bytes = new Uint8Array([2])
@@ -70,7 +84,7 @@ async function liveFixture() {
           : undefined,
     },
     f.fs,
-    f.state,
+    metadata ? f.state : withoutMetadata(f.state),
     { dirty: new Set(), expected, filter: { excluded: () => false } },
     sha256
   )
@@ -84,6 +98,14 @@ async function liveFixture() {
     },
   }
 }
+
+it('settles live eviction on a store without optional metadata ports', async () => {
+  const f = await liveFixture(false)
+  expect(await f.place()).toBe(true)
+  expect(await f.state.byFileId(f.base.fileId)).toBeNull()
+  expect(await f.state.get(f.base.path)).toMatchObject({ fileId: 'incoming', versionId: 'v2' })
+  expect(await f.fs.read(f.base.path)).toEqual(new Uint8Array([2]))
+})
 
 it('does not remove the old path after its owner moved before conditional capture', async () => {
   const f = await liveFixture()

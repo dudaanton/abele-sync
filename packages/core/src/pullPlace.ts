@@ -984,6 +984,7 @@ export class PullPlacer {
       }
       const intent = evictionKey(occupant.fileId)
       const raw = JSON.stringify(occupant)
+      const durableIntent = !!(this.state.getMeta && this.state.setMeta)
       await this.state.setMeta?.(intent, raw)
       if (!(await this.clearPath(occupant.path, occupant))) return 'held'
       let recorded = false
@@ -991,7 +992,10 @@ export class PullPlacer {
         this.state,
         async () => ({ reached: await this.state.getCursor(), firstUnresolved: null }),
         async (tx) => {
-          if ((await tx.getMeta?.(intent)) !== raw) return
+          // Metadata-less stores still settle the captured live baseline under
+          // the same owner/refusal/absence checks. There is no durable intent to
+          // compare on that compatibility path.
+          if (durableIntent && (await tx.getMeta?.(intent)) !== raw) return
           const current = await tx.byFileId(occupant.fileId)
           if (
             !replayAuthority(
