@@ -9,6 +9,7 @@ import { DurableStateStore } from './durableState.js'
 import { SimScheduler, EpochError } from './scheduler.js'
 
 // Keep every crash cut, with an independent budget for each deterministic seed.
+// Busy four-core CI measured 21.5s per seed; allow replay and GC headroom.
 it.each([1, 2, 3, 4, 5, 6, 7, 8])(
   'identity heads match raw feed application across random pages and every crash boundary (seed %i)',
   async (seed) => {
@@ -148,5 +149,5 @@ it.each([1, 2, 3, 4, 5, 6, 7, 8])(
       expect((await execute(false, cut)).image, `seed ${seed}, ${cut}`).toEqual(raw.image)
     }
   },
-  20000
+  60000
 )

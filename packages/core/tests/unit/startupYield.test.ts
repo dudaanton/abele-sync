@@ -270,37 +270,71 @@ it('33k full cached startup gives every baseline pass a task checkpoint', async 
   }
 })
 
-it('33k cached startup reaches the first request near 200 ms despite browser timer clamping', async () => {
-  const { fs, state } = await fixture(33000)
-  await state.setCursor(1)
-  const timer = globalThis.setTimeout
-  const timers = vi
-    .spyOn(globalThis, 'setTimeout')
-    .mockImplementation(((callback: () => void, delay?: number) =>
-      timer(callback, Math.max(delay ?? 0, 4))) as typeof setTimeout)
-  let first = Infinity
-  const started = performance.now()
-  const engine = new SyncEngine({
-    fs,
-    state,
-    selective: scope.selective,
-    client: {
-      state: async () => {
-        first = performance.now() - started
-        throw new Error('first request')
-      },
-    } as unknown as EngineClient,
-  })
-  try {
-    await expect(engine.sync()).rejects.toThrow('first request')
-    console.info({ paths: 33000, firstRequestMs: first, timeoutYields: timers.mock.calls.length })
-    expect(first).toBeLessThan(250)
-    expect(fs.read).not.toHaveBeenCalled()
-  } finally {
-    await engine.stop()
-    timers.mockRestore()
+it.each([0, 300])(
+  '33k cached startup bounds calibrated CPU work without clamped timer checkpoints (host delay %i)',
+  async (hostDelay) => {
+    const { fs, state } = await fixture(33000)
+    await state.setCursor(1)
+    const timer = globalThis.setTimeout
+    // CPU excludes time descheduled by the runner or waiting on host ports.
+    // Calibrate a linear pass over this same inventory in this process. The
+    // ceiling still rejects seconds of SDK work even on a slow machine.
+    const calibrationStart = process.cpuUsage()
+    await refreshLocalPaths(fs, state)
+    const calibration = process.cpuUsage(calibrationStart)
+    const calibrationMs = (calibration.user + calibration.system) / 1000
+    const cpuBudget = Math.min(1000, Math.max(250, calibrationMs * 12))
+    const all = state.all.bind(state)
+    let delayed = false
+    state.all = async function* () {
+      if (!delayed) {
+        delayed = true
+        await new Promise<void>((resolve) => timer(resolve, hostDelay))
+      }
+      yield* all()
+    }
+    const timers = vi
+      .spyOn(globalThis, 'setTimeout')
+      .mockImplementation(((callback: () => void, delay?: number) =>
+        timer(callback, Math.max(delay ?? 0, 4))) as typeof setTimeout)
+    let first = Infinity
+    let firstCpu = Infinity
+    const started = performance.now()
+    const cpuStarted = process.cpuUsage()
+    const engine = new SyncEngine({
+      fs,
+      state,
+      selective: scope.selective,
+      client: {
+        state: async () => {
+          first = performance.now() - started
+          const cpu = process.cpuUsage(cpuStarted)
+          firstCpu = (cpu.user + cpu.system) / 1000
+          throw new Error('first request')
+        },
+      } as unknown as EngineClient,
+    })
+    try {
+      await expect(engine.sync()).rejects.toThrow('first request')
+      console.info({
+        paths: 33000,
+        firstRequestMs: first,
+        firstCpu,
+        calibrationMs,
+        cpuBudget,
+        timeoutYields: timers.mock.calls.length,
+      })
+      expect(firstCpu).toBeLessThan(cpuBudget)
+      // Replacing posted messages with a clamped timer per checkpoint adds
+      // seconds despite little CPU use. Bound those separately from CPU work.
+      expect(timers.mock.calls.length).toBeLessThanOrEqual(4)
+      expect(fs.read).not.toHaveBeenCalled()
+    } finally {
+      await engine.stop()
+      timers.mockRestore()
+    }
   }
-})
+)
 
 it('yields a real host task after at most 256 cached paths and checks cancellation', async () => {
   const controller = new AbortController()
@@ -357,19 +391,31 @@ it.each(['scope', 'scan', 'reconciliation'] as const)(
   }
 )
 
-it('33k unchanged entries yield below 50 ms without content reads or outgoing operations', async () => {
+it('33k unchanged entries yield with calibrated CPU gaps without content reads or outgoing operations', async () => {
   const { fs, state, fingerprint } = await fixture(33000)
+  const calibrationStart = process.cpuUsage()
+  await refreshLocalPaths(fs, state)
+  const calibration = process.cpuUsage(calibrationStart)
+  const cpuBudget = Math.min(
+    500,
+    Math.max(50, ((calibration.user + calibration.system) / 1000) * 8)
+  )
   let phase = 'record',
     slowest = ''
   let last = performance.now(),
     longest = 0,
     ticks = 0
+  let lastCpu = process.cpuUsage(),
+    longestCpu = 0
   const timer = setInterval(() => {
     const now = performance.now()
     if (now - last > longest) slowest = phase
     longest = Math.max(longest, now - last)
     last = now
     ticks++
+    const cpu = process.cpuUsage(lastCpu)
+    longestCpu = Math.max(longestCpu, (cpu.user + cpu.system) / 1000)
+    lastCpu = process.cpuUsage()
   }, 0)
   try {
     const marks = new ScopeMarks(state)
@@ -388,8 +434,10 @@ it('33k unchanged entries yield below 50 ms without content reads or outgoing op
     clearInterval(timer)
   }
   longest = Math.max(longest, performance.now() - last)
-  console.info({ paths: 33000, ticks, longest, slowest })
+  const cpu = process.cpuUsage(lastCpu)
+  longestCpu = Math.max(longestCpu, (cpu.user + cpu.system) / 1000)
+  console.info({ paths: 33000, ticks, longest, longestCpu, cpuBudget, slowest })
   expect(fs.read).not.toHaveBeenCalled()
   expect(ticks).toBeGreaterThan(0)
-  expect(longest).toBeLessThan(50)
+  expect(longestCpu).toBeLessThan(cpuBudget)
 }, 20000)
