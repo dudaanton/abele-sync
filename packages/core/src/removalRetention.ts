@@ -40,11 +40,17 @@ const same = (a: StateEntry, b: StateEntry) =>
   )
 // Adapters may be wrapped independently for pause/error/host guards. Serialize
 // summary mutations across wrappers too; object identity is not vault identity.
-let queue: Promise<unknown> = Promise.resolve()
-const volatile = new WeakMap<FileSystem, Map<string, { id: string; committed: boolean }>>()
+interface RetentionRuntime {
+  queue: Promise<unknown>
+  volatile: Map<string, { base: StateEntry; committed: boolean }>
+}
+const runtimeKey = Symbol.for('abele.sync.removal-retention-runtime-v1')
+const shared = globalThis as unknown as Record<symbol, RetentionRuntime | undefined>
+const runtime = (shared[runtimeKey] ??= { queue: Promise.resolve(), volatile: new Map() })
+const volatile = runtime.volatile
 function exclusive<T>(work: () => Promise<T>): Promise<T> {
-  const result = queue.then(work, work)
-  queue = result.then(
+  const result = runtime.queue.then(work, work)
+  runtime.queue = result.then(
     () => {},
     () => {}
   )
@@ -119,6 +125,11 @@ export function decodeRetentionSnapshot(raw: unknown): RetainedRemoval[] {
 async function save(fs: FileSystem, rows: RetainedRemoval[]) {
   await fs.writeAtomic(SUMMARY, new TextEncoder().encode(JSON.stringify(rows)), Date.now())
 }
+function timestamp(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0)
+    throw new EngineError('protocol', 'invalid retention clock')
+  return value
+}
 async function version(fs: FileSystem, path: string): Promise<FileVersion | null> {
   const info = await fs.stat(path)
   if (!info) return null
@@ -179,6 +190,11 @@ export async function retainRemoval(
   op: ConditionalFileOperation,
   options: { id?: string; decision?: string; now?: number; clock?: () => number } = {}
 ): Promise<boolean> {
+  op = {
+    ...op,
+    expected: op.expected === null ? null : { ...op.expected },
+    effect: { ...op.effect },
+  }
   if (op.effect.kind !== 'remove') throw new EngineError('protocol', 'expected removal')
   return exclusive(async () => {
     const rows = await retentionSnapshot(fs)
@@ -195,18 +211,30 @@ export async function retainRemoval(
       id,
       path: op.path,
       victim: `.abele-sync/retained-removals/${id}/victim`,
-      capturedAt: options.clock?.() ?? options.now ?? Date.now(),
+      capturedAt: timestamp(options.clock?.() ?? options.now ?? Date.now()),
       expected: op.expected,
       phase: 'prepared',
       ...(options.decision ? { decision: options.decision } : {}),
     }
     rows.push(row)
     await save(fs, rows)
-    const captured = await fs.conditionalFile?.({
-      path: op.path,
-      expected: op.expected,
-      effect: { kind: 'move', to: row.victim },
-    })
+    let captured: boolean | undefined
+    try {
+      captured = await fs.conditionalFile?.({
+        path: op.path,
+        expected: op.expected,
+        effect: { kind: 'move', to: row.victim },
+      })
+    } catch (error) {
+      // An allocation with no transferred victim owns no bytes. The host's
+      // conditional journal still owns any interrupted internal capture.
+      if ((await fs.stat(row.victim)) === null)
+        await save(
+          fs,
+          rows.filter((one) => one.id !== id)
+        )
+      throw error
+    }
     if (!captured) {
       if ((await fs.stat(row.victim)) === null)
         await save(
@@ -219,7 +247,7 @@ export async function retainRemoval(
     const capturedIdentity = await fs.fileIdentity?.(row.victim)
     if (row.expected.identity === undefined && capturedIdentity)
       row.expected = { ...row.expected, identity: capturedIdentity }
-    row.capturedAt = options.clock?.() ?? options.now ?? Date.now()
+    row.capturedAt = timestamp(options.clock?.() ?? options.now ?? Date.now())
     await save(fs, rows)
     let accepted = false
     try {
@@ -251,6 +279,8 @@ export async function captureRemoval(
   capturedIdentity?: string | null,
   expected: FileVersion = base
 ): Promise<boolean> {
+  base = { ...base }
+  expected = { ...expected }
   if (!fs.conditionalFile) return false
   if (!(await authorize())) return false
   const id = crypto.randomUUID(),
@@ -268,20 +298,23 @@ export async function captureRemoval(
       authorize,
     })
   if (!state.getMeta || !state.setMeta) {
-    const owners = volatile.get(fs) ?? new Map<string, { id: string; committed: boolean }>()
-    volatile.set(fs, owners)
-    if (owners.has(JSON.stringify(base))) return false
-    owners.set(JSON.stringify(base), { id, committed: false })
-    return retainRemoval(
-      fs,
-      {
-        path: base.path,
-        expected: { ...expected, ...(identity ? { identity } : {}) },
-        effect: { kind: 'remove' },
-        authorize,
-      },
-      { id, decision: `volatile-removal:${id}`, now }
-    )
+    volatile.set(id, { base, committed: false })
+    let captured = false
+    try {
+      captured = await retainRemoval(
+        fs,
+        {
+          path: base.path,
+          expected: { ...expected, ...(identity ? { identity } : {}) },
+          effect: { kind: 'remove' },
+          authorize,
+        },
+        { id, decision: `volatile-removal:${id}`, now }
+      )
+      return captured
+    } finally {
+      if (!captured) volatile.delete(id)
+    }
   }
   const claimed = await exclusive(() =>
     transact(state, async (tx) => {
@@ -306,7 +339,7 @@ export async function captureRemoval(
     )
     return captured
   } finally {
-    if (!captured)
+    if (!captured && !(await retentionSnapshot(fs)).some((row) => row.id === id))
       await transact(state, async (tx) => {
         const raw = await tx.getMeta!(key)
         if (
@@ -371,6 +404,7 @@ export async function acknowledgePublication(
     let changed = false
     for (const row of rows)
       if (row.publication?.kind === publication.kind && row.publication.id === publication.id) {
+        if (row.phase === 'prepared') row.capturedAt = Date.now()
         row.phase = 'committed'
         delete row.publication
         changed = true
@@ -386,7 +420,16 @@ export async function commitRemoval(
   fs?: FileSystem
 ): Promise<void> {
   if (!state.getMeta || !state.setMeta) {
-    const owner = fs && volatile.get(fs)?.get(JSON.stringify(base))
+    const owners = fs
+      ? (await retentionSnapshot(fs)).flatMap((row) => {
+          const owner = volatile.get(row.id)
+          return row.decision === `volatile-removal:${row.id}` && owner && same(owner.base, base)
+            ? [owner]
+            : []
+        })
+      : []
+    if (owners.length > 1) throw new EngineError('conflict', 'ambiguous removal owner')
+    const owner = owners[0]
     if (owner)
       state.afterCommit?.(() => {
         owner.committed = true
@@ -409,28 +452,46 @@ export async function commitRemoval(
 export async function recoverRemovals(
   fs: FileSystem,
   state?: StateStore,
-  policy: RemovalRetentionPolicy = {}
+  policy: RemovalRetentionPolicy = {},
+  onlyPath?: string
 ): Promise<void> {
   await exclusive(async () => {
     let rows = await retentionSnapshot(fs)
-    const now = policy.now?.() ?? Date.now(),
+    const now = timestamp(policy.now?.() ?? Date.now()),
       cap = policy.maxBytes ?? 1024 * 1024 * 1024
     if (!Number.isSafeInteger(cap) || cap < 0)
       throw new EngineError('protocol', 'invalid retention byte limit')
+    // A crash can leave the durable claim before any filesystem allocation.
+    // No summary owner means no victim was transferred into this namespace.
+    for (const key of (await state?.metadataKeys?.('removal-decision:')) ?? []) {
+      const raw = await state!.getMeta!(key)
+      if (!raw) continue
+      const decision = JSON.parse(raw) as Decision
+      if (rows.some((row) => row.id === decision.id)) continue
+      if (onlyPath !== undefined && decision.base.path !== onlyPath) continue
+      await transact(state!, async (tx) => {
+        if ((await tx.getMeta!(key)) !== raw) return
+        await tx.setMeta!(key, null)
+        if ((await tx.getMeta!(pointerKey(decision.base))) === decision.id)
+          await tx.setMeta!(pointerKey(decision.base), null)
+      })
+    }
     for (const row of [...rows]) {
+      if (onlyPath !== undefined && row.path !== onlyPath) continue
       if (row.publication) {
         if (row.phase !== 'prepared' || (await fs.stat(row.victim)) !== null) continue
         row.phase = 'restored'
         delete row.publication
       }
       const ephemeral = row.decision?.startsWith('volatile-removal:')
-      const live = ephemeral
-        ? [...(volatile.get(fs)?.values() ?? [])].find((one) => one.id === row.id)
-        : undefined
+      const live = ephemeral ? volatile.get(row.id) : undefined
       if (row.decision && !state && !ephemeral) continue
       const raw = row.decision && !ephemeral ? await state!.getMeta?.(row.decision) : null
       const decision = raw ? (JSON.parse(raw) as Decision) : null
       if (row.phase !== 'committed' && row.phase !== 'restored') {
+        // Capture may have finished long after the allocation timestamp, then
+        // crashed before acknowledgement. Restart its conservative minimum age.
+        if (row.phase === 'prepared') row.capturedAt = now
         if (live?.committed || (decision?.id === row.id && decision.committed))
           row.phase = 'committed'
         else if (await restore(fs, row)) row.phase = 'restored'
@@ -446,9 +507,7 @@ export async function recoverRemovals(
         })
       }
       if (row.decision) {
-        if (ephemeral)
-          for (const [key, owner] of volatile.get(fs) ?? [])
-            if (owner.id === row.id) volatile.get(fs)!.delete(key)
+        if (ephemeral) volatile.delete(row.id)
         delete row.decision
         await save(fs, rows)
       }
@@ -463,6 +522,7 @@ export async function recoverRemovals(
       (a, b) => a.capturedAt - b.capturedAt || a.id.localeCompare(b.id)
     )) {
       if (
+        (onlyPath !== undefined && row.path !== onlyPath) ||
         row.phase !== 'committed' ||
         now - row.capturedAt < DAY ||
         (total <= cap && now - row.capturedAt < 7 * DAY)

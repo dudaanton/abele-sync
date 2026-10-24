@@ -137,7 +137,7 @@ describe.each(['remove', 'retain', 'defer'] as const)(
       const completedCalls = calls
       await attempt()
       expect(calls).toBe(completedCalls)
-      expect(await state.getCursor()).toBe(3)
+      expect(await state.getCursor(), `capture=${cut}; recovery=${recoveryCut}`).toBe(3)
       expect(await state.byFileId('file')).toBeNull()
       if (!retained) expect(await fs.stat(path)).toBeNull()
       return { cuts, recoveryCuts }

@@ -1,4 +1,4 @@
-import { captureRemoval, commitRemoval } from './removalRetention.js'
+import { captureRemoval, commitRemoval, recoverRemovals } from './removalRetention.js'
 import {
   AbeleError,
   decodeAccessToken,
@@ -527,6 +527,9 @@ export class V2EngineClient implements EngineClient {
         throw new Error('invalid departure supersession proof')
       return async (_tx: StateStore) => true
     }
+    // Standalone departure dispatch also replays after crashes, outside Cycle.
+    // Reconcile its previous reversible capture before acquiring a fresh owner.
+    if (base) await recoverRemovals(fs, state, {}, base.path)
     // Membership changes even when exclusion/retention blocks local cleanup.
     // Keep the owned obligation; this mark cannot acknowledge its effects.
     if (!this.departed.has(event.path)) {
