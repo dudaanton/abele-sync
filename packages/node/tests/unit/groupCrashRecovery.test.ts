@@ -620,7 +620,9 @@ for (const [caseOnly, fold] of [
     describe(`group ${mode} (${fold ? 'folding case-only' : 'native'}) converges after every lifecycle await and every nested recovery await`, () => {
       let count = 0
       const covered = new Set<number>()
-      const partitions = 64
+      // Retained publication ownership adds lifecycle awaits to writes. Keep
+      // every cut and the eight-cuts-per-test bound by adding partitions.
+      const partitions = mode === 'write' ? 80 : 64
       beforeAll(async () => {
         count = await run(0, '', mode, 0, false, false, caseOnly, fold)
         expect(count).toBeGreaterThan(0)
