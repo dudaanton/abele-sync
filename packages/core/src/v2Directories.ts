@@ -1,4 +1,4 @@
-import { hostPathRefusal } from './pathAdmission.js'
+import { hostPathRefusal, assertHostPath, HostPathAdmissionError } from './pathAdmission.js'
 import { ScanWork, parents } from './scanWork.js'
 import { replayAuthority } from './replayAuthority.js'
 import { transact } from './stateTransaction.js'
@@ -183,8 +183,11 @@ export async function waitingDirectories(
   const raw = await state.getMeta?.(KEY)
   if (raw == null) return []
   const doc = await parseDocument(raw)
+  const refusals = new Map(
+    doc.refused?.filter((row) => row.direction === 'pull').map((row) => [row.path, row])
+  )
   return (doc.incoming ?? []).flatMap((item) => {
-    const refusal = doc.refused?.find((row) => row.path === item.path && row.direction === 'pull')
+    const refusal = refusals.get(item.path)
     return refusal
       ? [
           {
@@ -337,10 +340,13 @@ export class V2Directories {
     }
     const target = inventory.resolve(item.path, 'directory')
     try {
+      assertHostPath(this.fs, target)
       await this.fs.mkdir(target)
     } catch (error) {
       if (!itemRefusal(error)) throw error
       this.refuse(doc, item.path, error, 'pull')
+      if (error instanceof HostPathAdmissionError)
+        doc.refused!.find((row) => row.path === item.path)!.host = true
       doc.incoming = [...(doc.incoming ?? []).filter((d) => d.file_id !== item.file_id), item]
       await this.save(doc)
       return

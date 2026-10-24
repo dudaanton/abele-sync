@@ -12,6 +12,43 @@ import { push } from '../../src/pusher.js'
 import { pathAdmission } from '../../src/pathAdmission.js'
 import { PendingPullWrites } from '../../src/pullWrite.js'
 
+it('rechecks directory admission after awaited inventory and before mkdir', async () => {
+  let allowed = true
+  class DirectoryFs extends MemoryFileSystem {
+    [pathAdmission]() {
+      return allowed
+        ? { allowed: true as const }
+        : { allowed: false as const, reason: 'unsupported-host-name: changed policy' }
+    }
+    async *listDirectories() {
+      allowed = false
+      yield* []
+    }
+    mkdir = vi.fn(async (_path: string) => {})
+  }
+  const fs = new DirectoryFs(),
+    state = new MemoryStateStore()
+  await new V2Directories(fs, state, () => true, vi.fn()).receive(
+    { file_id: 'dir', version_id: 'v1', path: 'a:b', kind: 'directory', mtime: 1 },
+    7
+  )
+  expect(fs.mkdir).not.toHaveBeenCalled()
+  const engine = new SyncEngine({
+    fs,
+    state,
+    client: {} as EngineClient,
+    selective: selectiveDefaults(),
+  })
+  expect(await engine.waitingFiles()).toEqual([
+    expect.objectContaining({
+      fileId: 'dir',
+      versionId: 'v1',
+      seq: 7,
+      reason: 'unsupported-host-name: changed policy',
+    }),
+  ])
+})
+
 async function feedFixture() {
   const fs = new MemoryFileSystem(),
     state = new MemoryStateStore()
