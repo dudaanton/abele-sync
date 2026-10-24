@@ -10,7 +10,10 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Linux takes about 56 minutes; the serial crash matrix alone takes 43.
+    # File/package sharding cannot split that file. Allow the complete matrix,
+    # setup/checks and the required SQL tier to finish with headroom.
+    timeout-minutes: 90
     services:
       postgres:
         image: postgres:16-bookworm@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4 # PostgreSQL 16
