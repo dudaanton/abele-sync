@@ -66,6 +66,33 @@ it.each(['add', 'drop'] as const)(
   }
 )
 
+it('binds concurrent decision writers to their own observed revision', async () => {
+  const f = await fixture()
+  const newer = JSON.stringify({
+    staged: [{ change: { ...f.item, version_id: 'newer' }, base: null }],
+  })
+  const get = f.state.getMeta.bind(f.state)
+  const older = await get('deferred-changes')
+  await f.state.setMeta('deferred-changes', newer)
+  let reads = 0
+  f.state.getMeta = async (key) => {
+    if (key === 'deferred-changes' && reads < 2) return ++reads === 1 ? older : newer
+    return get(key)
+  }
+  const staged = new StagedChanges(f.state, f.fs)
+  const results = await Promise.allSettled(
+    ['a', 'b'].map((id) =>
+      staged.stage([{ change: { ...f.item, file_id: id, path: `${id}.md` }, base: null }])
+    )
+  )
+  expect(results.map((result) => result.status)).toEqual(['rejected', 'fulfilled'])
+  const rows = JSON.parse((await get('deferred-changes'))!).staged
+  expect(
+    rows.find((row: { change: { file_id: string } }) => row.change.file_id === f.item.file_id)
+      .change.version_id
+  ).toBe('newer')
+})
+
 it('does not discard bytes before a raw outer transaction commits its retirement', async () => {
   const f = await fixture()
   await expect(

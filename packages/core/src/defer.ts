@@ -92,7 +92,7 @@ export async function readStaged(state: StateStore): Promise<ChangeItem[]> {
  */
 export class StagedChanges {
   private filed: Filed | null = null
-  private image: string | null = null
+  private readonly revisions = new WeakMap<Filed, string | null>()
 
   /** Durable state was reconciled after a server restore. */
   invalidate(): void {
@@ -106,8 +106,9 @@ export class StagedChanges {
 
   private async load(): Promise<Filed> {
     if (this.filed === null || (this.state.getMeta && this.state.setMeta)) {
-      this.image = this.state.getMeta ? await this.state.getMeta(DEFERRED_KEY) : null
-      this.filed = parse(this.image)
+      const image = this.state.getMeta ? await this.state.getMeta(DEFERRED_KEY) : null
+      this.filed = parse(image)
+      this.revisions.set(this.filed, image)
     }
     return this.filed
   }
@@ -125,12 +126,13 @@ export class StagedChanges {
   /** Publish the owner's next decision and stage retirement as one durable
    * transition. Physical cleanup may finish in recovery, without replaying the
    * host's discarded/replacement decision from memory. */
-  private async transition(next: Filed, retired: ChangeItem[]): Promise<void> {
+  private async transition(previous: Filed, next: Filed, retired: ChangeItem[]): Promise<void> {
     if (!this.state.getMeta || !this.state.setMeta) return this.save(next)
+    if (!this.revisions.has(previous)) throw new Error('missing deferred decision revision')
     const result = await new PendingPullWrites(this.state, this.fs).retireDecisions(
       retired,
       next,
-      this.image
+      this.revisions.get(previous)
     )
     this.filed = null
     if (result.held.length)
@@ -186,7 +188,7 @@ export class StagedChanges {
           : {}),
       })
     }
-    await this.transition({ ...filed, staged: [...byId.values()] }, retired)
+    await this.transition(filed, { ...filed, staged: [...byId.values()] }, retired)
     return fresh
   }
 
@@ -198,6 +200,7 @@ export class StagedChanges {
     const staged = filed.staged.filter((one) => !gone.has(one.change.file_id))
     if (staged.length === filed.staged.length) return
     await this.transition(
+      filed,
       { ...filed, staged },
       filed.staged.filter((one) => gone.has(one.change.file_id)).map((one) => one.change)
     )
