@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { encodeText, selectiveDefaults } from '@abele/sync-core'
+import { canonicalCrashIdentifiers, canonicalCrashMetadata } from '../helpers/crashImage.js'
 
 // Kill the process model after a completed filesystem await. All later I/O (including
 // catch/finally cleanup) fails until restart, so a thrown exception cannot undo the cut.
@@ -179,16 +180,18 @@ it('the process-crash model does not benchmark SQLite power-loss flushes', async
 // Equivalent durable images share a recovery trace. Replay each distinct image once,
 // while still cutting and checking every lifecycle await for all three operations.
 const recoveryImages = new Set<string>()
-const normal = (text: string) =>
-  text
-    .replace(/group-[a-zA-Z0-9]+/g, 'group-ID')
-    .replace(/[a-f0-9]{8}-[a-f0-9-]{27,}/g, 'UUID')
-    .replace(/[a-f0-9]{24,64}/g, 'HEX')
 
 async function recoverySnapshot(dir: string, state: SqliteStateStore, mode: string) {
   const raw = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
   const backup = await raw.mkdtemp(join(tmpdir(), 'group-image-'))
-  const entries: Array<{ path: string; directory: boolean; inode: string; data?: string }> = []
+  const entries: Array<{
+    path: string
+    directory: boolean
+    inode: string
+    identity?: string
+    data?: string
+  }> = []
+  const identities = new Map<string, string[]>()
   async function collect(folder = ''): Promise<void> {
     for (const entry of await raw.readdir(join(dir, folder), { withFileTypes: true })) {
       const path = folder ? `${folder}/${entry.name}` : entry.name
@@ -199,6 +202,12 @@ async function recoverySnapshot(dir: string, state: SqliteStateStore, mode: stri
         await collect(path)
       } else {
         if (!entry.isFile()) throw new Error('unexpected non-file in crash image')
+        const identity = await raw.lstat(join(dir, path), { bigint: true })
+        const identityKey = `${identity.dev}:${identity.ino}:${identity.birthtimeNs}`
+        // Distinct inodes need distinct symbols even when their UUID paths
+        // normalize to the same spelling. Entries and expected references share
+        // these symbols, preserving the complete ownership/alias graph.
+        if (!identities.has(identityKey)) identities.set(identityKey, [`inode#${identities.size}`])
         const bytes = await raw.readFile(join(dir, path))
         let data = bytes.toString('hex')
         if (path.endsWith('.json')) {
@@ -216,6 +225,7 @@ async function recoverySnapshot(dir: string, state: SqliteStateStore, mode: stri
           path,
           directory: false,
           inode: `${info.dev}:${info.ino}`,
+          identity: identities.get(identityKey)![0],
           data: path.includes('state.db') ? 'ledger' : data,
         })
         // Preserve inode identities and alias topology, including capture sentinels.
@@ -228,18 +238,23 @@ async function recoverySnapshot(dir: string, state: SqliteStateStore, mode: stri
   const aliases = new Map<string, string[]>()
   for (const entry of entries)
     if (!entry.directory)
-      aliases.set(entry.inode, [...(aliases.get(entry.inode) ?? []), normal(entry.path)])
+      aliases.set(entry.inode, [...(aliases.get(entry.inode) ?? []), entry.path])
   const metadata = state.metadataKeys('').map((key) => [key, state.getMeta(key)])
-  const signature = normal(
+  const signature = canonicalCrashIdentifiers(
     JSON.stringify([
       mode,
       metadata,
       entries.map((entry) => ({
         path: entry.path,
-        data: entry.data?.replace(
-          /"moveIdentity":"(\d+:\d+)"/g,
-          (_match, id: string) => `"moveIdentity":${JSON.stringify(aliases.get(id) ?? 'retired')}`
-        ),
+        identity: entry.identity,
+        data:
+          entry.data === undefined
+            ? undefined
+            : canonicalCrashMetadata(entry.path, entry.data, identities, Date.now()).replace(
+                /"moveIdentity":"(\d+:\d+)"/g,
+                (_match, id: string) =>
+                  `"moveIdentity":${JSON.stringify(aliases.get(id) ?? 'retired')}`
+              ),
         aliases: aliases.get(entry.inode),
       })),
     ])
