@@ -36,6 +36,7 @@ import { isFinalForBatch } from './commitErrors.js'
 import { rejectedOp } from './pushRefusal.js'
 import { requestReconciliation } from './reconciliation.js'
 import { isRecreatedTarget, sourceRecreation } from './sourceRecreation.js'
+import { ScanWork, scanScheduling } from './scanWork.js'
 export { batches } from './pushBatches.js'
 
 /**
@@ -567,8 +568,11 @@ class Pusher {
    * offers it again, to be turned away here again until its bytes or the cap change.
    */
   async sendable(ops: CommitOp[], checkPaths = true): Promise<CommitOp[]> {
+    const scheduling = scanScheduling(this.state)
+    const work = new ScanWork({ ...scheduling, signal: this.opts.signal ?? scheduling.signal })
     const kept: CommitOp[] = []
     for (const op of ops) {
+      await work.step()
       const path =
         (checkPaths && this.client.pathRefusal) || this.opts.retries || this.opts.retryRefused
           ? op.op === 'create'
