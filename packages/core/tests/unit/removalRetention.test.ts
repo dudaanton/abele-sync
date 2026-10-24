@@ -147,7 +147,11 @@ it('starts the minimum age at recovery when capture acknowledgement was interrup
   const move = fs.conditionalFile.bind(fs)
   fs.conditionalFile = async (op) => {
     const applied = await move(op)
-    if (applied && op.effect.kind === 'move') throw new Error('capture interrupted')
+    if (
+      applied &&
+      (op.effect.kind === 'move' || (op.effect.kind === 'remove' && op.effect.retainAt))
+    )
+      throw new Error('capture interrupted')
     return applied
   }
   await expect(captureRemoval(fs, state, base, async () => true, 0)).rejects.toThrow(

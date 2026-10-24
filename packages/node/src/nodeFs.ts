@@ -110,6 +110,7 @@ export interface NodeFileSystemOptions {
  */
 export class NodeFileSystem implements FileSystem {
   readonly conditionalOwnership = true as const
+  readonly conditionalCapture = true as const
   readonly pathKey: (path: string) => string
   private readonly admitName: (path: string) => PathAdmission;
   [pathAdmission](path: string): PathAdmission {
@@ -126,6 +127,18 @@ export class NodeFileSystem implements FileSystem {
     if (operation.effect.kind === 'move') assertHostPath(this, operation.effect.to)
     if (operation.effect.kind === 'remove') {
       this.checkEffect()
+      if (operation.effect.retainAt) {
+        assertHostPath(this, operation.effect.retainAt)
+        return conditionalFile(
+          this.base,
+          {
+            ...operation,
+            effect: { kind: 'move', to: operation.effect.retainAt },
+          },
+          () => this.checkEffect(),
+          this.retainCaptured.bind(this)
+        )
+      }
       if (operation.expected === null || (await this.stat(operation.path)) === null)
         return conditionalFile(this.base, { ...operation, expected: null }, () =>
           this.checkEffect()

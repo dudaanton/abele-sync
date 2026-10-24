@@ -19,6 +19,7 @@ export function stoppableFileEffects(
   const policy = {
     [pathAdmission]: 'read',
     conditionalOwnership: 'read',
+    conditionalCapture: 'read',
     pathKey: 'read',
     conditionalFile: 'effect',
     installedFile: 'read',

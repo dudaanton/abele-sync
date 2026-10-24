@@ -20,7 +20,7 @@ export interface ConditionalFileOperation {
    * a newer public occupant. The callback is not a durable replay permission. */
   authorize?: () => Promise<boolean>
   effect:
-    | { kind: 'remove' }
+    | { kind: 'remove'; retainAt?: string }
     | { kind: 'move'; to: string }
     | { kind: 'write'; bytes: Uint8Array; mtime: number; receipt?: string }
     | { kind: 'install'; stageId: string }
@@ -41,6 +41,9 @@ export interface FileSystem extends Partial<StreamingFileSystem> {
   [pathAdmission]?(path: string): PathAdmission
   /** conditionalFile enforces operation.authorize at its mutation boundary. */
   readonly conditionalOwnership?: true
+  /** Removal with retainAt atomically transfers the victim to that exclusive
+   * private name. It must never unlink the victim. */
+  readonly conditionalCapture?: true
   /** Optional durable object identity, stable across rename, different after
    * replacement even for equal bytes/stat. Hosts exposing this MUST enforce
    * expected.identity in conditionalFile at the captured-object boundary. */
@@ -149,6 +152,7 @@ export interface MemoryFileSystemOptions {
  */
 export class MemoryFileSystem implements FileSystem {
   readonly conditionalOwnership = true as const
+  readonly conditionalCapture = true as const
   private nextIdentity = 0
   async fileIdentity(path: string): Promise<string | null> {
     return this.files.get(this.fold(path))?.identity ?? null
@@ -172,7 +176,8 @@ export class MemoryFileSystem implements FileSystem {
   }
 
   async *list(): AsyncIterable<FileInfo> {
-    for (const entry of [...this.files.values()]) yield info(entry.path, entry)
+    for (const entry of [...this.files.values()])
+      if (!entry.path.startsWith('.abele-sync/')) yield info(entry.path, entry)
   }
 
   async read(path: string): Promise<Uint8Array> {
@@ -226,8 +231,14 @@ export class MemoryFileSystem implements FileSystem {
             op.expected.sha
     )
       return false
-    if (op.effect.kind === 'remove') this.files.delete(key)
-    else if (op.effect.kind === 'move') {
+    if (op.effect.kind === 'remove') {
+      if (op.effect.retainAt) {
+        const target = this.fold(op.effect.retainAt)
+        if (this.files.has(target) || !current) return false
+        this.files.set(target, { ...current, path: op.effect.retainAt })
+      }
+      this.files.delete(key)
+    } else if (op.effect.kind === 'move') {
       if (!current || (this.fold(op.effect.to) !== key && this.files.has(this.fold(op.effect.to))))
         return false
       this.files.delete(key)

@@ -227,7 +227,9 @@ export async function retainRemoval(
       captured = await fs.conditionalFile?.({
         path: op.path,
         expected: op.expected,
-        effect: { kind: 'move', to: row.victim },
+        effect: fs.conditionalCapture
+          ? { kind: 'remove', retainAt: row.victim }
+          : { kind: 'move', to: row.victim },
       })
     } catch (error) {
       // An allocation with no transferred victim owns no bytes. The host's
@@ -286,6 +288,7 @@ export async function captureRemoval(
   base = { ...base }
   expected = { ...expected }
   if (!fs.conditionalFile) return false
+  await recoverRemovals(fs, state, {}, base.path)
   if (!(await authorize())) return false
   const id = crypto.randomUUID(),
     key = decisionKey(id)
@@ -450,6 +453,9 @@ export async function commitRemoval(
   if (decision.id !== id || !same(decision.base, base))
     throw new EngineError('conflict', 'removal owner changed')
   await state.setMeta!(key, JSON.stringify({ ...decision, committed: true }))
+  // The immutable decision owns its capture after publication. The source
+  // selector must no longer bind a later version of the same file identity.
+  await state.setMeta!(pointerKey(base), null)
 }
 
 /** Root recovery, outside all transactions. Ownership transfers to the local
