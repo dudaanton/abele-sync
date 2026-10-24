@@ -129,3 +129,22 @@ it('exposes a failed restore when its original parent disappeared, without a ret
     await rm(root, { recursive: true, force: true })
   }
 })
+
+it('repairs an interrupted legacy completion marker without skipping adoption', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'removal-marker-'))
+  try {
+    const folder = join(root, '.abele-sync/retained-removals')
+    await mkdir(join(folder, 'legacy'), { recursive: true })
+    await writeFile(join(folder, 'legacy/a.md'), 'unique')
+    await writeFile(join(folder, 'summary.json'), '[]')
+    await writeFile(join(folder, 'legacy-migrated'), '')
+    const fs = new NodeFileSystem(root)
+    await fs.recoverConditionalFiles()
+    await fs.recoverConditionalFiles()
+    expect(await readFile(join(root, 'a.md'), 'utf8')).toBe('unique')
+    expect(await readFile(join(folder, 'legacy-migrated'), 'utf8')).toBe('1')
+    expect(retentionHandedOver(folder)).toBe(true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

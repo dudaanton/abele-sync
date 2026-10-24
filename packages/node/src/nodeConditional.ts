@@ -438,8 +438,13 @@ async function recoverVictim(root: string, path: string, victim: string, id: str
 export async function recoverLegacyRetention(root: string, check: () => void): Promise<void> {
   const directory = await containedIn(root, '.abele-sync/retained-removals')
   try {
-    await lstat(`${directory}/legacy-migrated`)
-    return
+    const marker = await lstat(`${directory}/legacy-migrated`)
+    if (!marker.isFile() || marker.isSymbolicLink())
+      throw new Error('invalid legacy migration marker')
+    if (marker.size === 1 && (await readFile(`${directory}/legacy-migrated`, 'utf8')) === '1')
+      return
+    // Creation can survive a crash before its byte does. An incomplete marker
+    // does not certify migration; replay adoption and repair it below.
   } catch (error) {
     if (!isMissing(error)) throw error
   }
@@ -461,7 +466,7 @@ export async function recoverLegacyRetention(root: string, check: () => void): P
     throw error
   }
   for (const id of ids) {
-    if (id === 'summary.json' || owned.has(id)) continue
+    if (id === 'summary.json' || id === 'legacy-migrated' || owned.has(id)) continue
     valid(id)
     const walk = async (relative: string): Promise<void> => {
       const folder = await containedIn(
