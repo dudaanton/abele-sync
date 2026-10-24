@@ -51,6 +51,29 @@ async function fixture() {
   return { fs, state, a, b, edit, base, change, placer }
 }
 
+it('rolls incoming publication back with its frontier and replays the durable installation', async () => {
+  const f = await fixture()
+  await f.state.setCursor(1)
+  const transaction = f.state.transaction.bind(f.state)
+  f.state.transaction = (work) =>
+    transaction(async (tx) => {
+      tx.setCursor = async () => {
+        throw new Error('frontier publication failed')
+      }
+      return work(tx)
+    })
+  const place = () => f.placer.place(f.change, f.change.sha!, f.base, new Map(), new Map())
+  await expect(place()).rejects.toThrow('frontier publication failed')
+  expect(await f.state.get(f.base.path)).toEqual(f.base)
+  expect(await f.state.getCursor()).toBe(1)
+  expect(await f.state.getMeta('pull-write:file')).not.toBeNull()
+  expect(await f.fs.read(f.base.path)).toEqual(f.b)
+  f.state.transaction = transaction
+  expect(await f.placer.adopt(f.change, f.base)).toBe(true)
+  expect((await f.state.get(f.base.path))?.versionId).toBe(f.change.version_id)
+  expect(await f.state.getMeta('pull-write:file')).toBeNull()
+})
+
 it('scope widening retains the missing source base protecting an offline rename/edit', async () => {
   const f = await fixture(),
     marks = new ScopeMarks(f.state)

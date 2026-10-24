@@ -976,16 +976,43 @@ export class PullPlacer {
         return 'held'
       }
       const intent = evictionKey(occupant.fileId)
-      await this.state.setMeta?.(intent, JSON.stringify(occupant))
-      if (!(await this.clearPath(occupant.path, occupant))) {
-        await this.state.setMeta?.(intent, null)
-        return 'held'
-      }
-      this.opts.expected.clear(occupant.path)
-      await transact(this.state, async (tx) => {
-        await tx.delete(occupant.path)
-        await tx.setMeta?.(intent, null)
-      })
+      const raw = JSON.stringify(occupant)
+      await this.state.setMeta?.(intent, raw)
+      if (!(await this.clearPath(occupant.path, occupant))) return 'held'
+      let recorded = false
+      await commitAppliedSettlement(
+        this.state,
+        async () => ({ reached: await this.state.getCursor(), firstUnresolved: null }),
+        async (tx) => {
+          if ((await tx.getMeta?.(intent)) !== raw) return
+          const current = await tx.byFileId(occupant.fileId)
+          if (
+            !replayAuthority(
+              occupant.fileId,
+              occupant,
+              current,
+              await pathOccupant(this.fs, tx, target, occupant.fileId)
+            ) ||
+            current === null ||
+            !(['path', 'wirePath', 'fileId', 'versionId', 'sha', 'size', 'mtime'] as const).every(
+              (field) => current[field] === occupant[field]
+            ) ||
+            (await new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client).refused(
+              occupant.fileId,
+              [target],
+              occupant
+            )) ||
+            (await this.fs.stat(occupant.path)) !== null
+          )
+            return
+          await tx.delete(occupant.path)
+          await tx.setMeta?.(intent, null)
+          if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
+          afterStateCommit(tx, () => this.opts.expected.clear(occupant.path))
+          recorded = true
+        }
+      )
+      if (!recorded) return 'held'
       // Our removal authorizes only an absent target. A file saved while the ledger
       // deletion awaited belongs to the user; it must not become our new baseline.
       return { free: null, removed: true }
@@ -1038,55 +1065,60 @@ export class PullPlacer {
     const have = await settledStat(this.fs, target, sha, wrote, this.hash)
     const stageId = await this.pending.stageId(change)
     const receiptId = await this.pending.receiptId(change)
-    const recorded = await transact(this.state, async (tx) => {
-      if (
-        !(await new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client).authorizes(
-          change,
-          base,
-          target
-        ))
-      )
-        return false
-      const current = await tx.byFileId(change.file_id)
-      if (this.sequenceKnown && (await olderPull(tx, change, current))) return false
-      let occupant = await pathOccupant(this.fs, tx, target, change.file_id)
-      // Only a fresh authoritative snapshot may replace a verified equal
-      // occupant. Saved intents cannot take this branch, even with equal bytes.
-      if (occupant !== null && occupant.fileId !== change.file_id && freshReplacement !== null) {
+    let recorded = false
+    await commitAppliedSettlement(
+      this.state,
+      async () => ({ reached: await this.state.getCursor(), firstUnresolved: null }),
+      async (tx) => {
         if (
-          occupant.path !== target ||
-          !replayAuthority(change.file_id, base, current, null) ||
-          !(['path', 'wirePath', 'fileId', 'versionId', 'sha', 'size', 'mtime'] as const).every(
-            (field) => occupant![field] === freshReplacement[field]
+          !(await new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client).authorizes(
+            change,
+            base,
+            target
+          ))
+        )
+          return
+        const current = await tx.byFileId(change.file_id)
+        if (this.sequenceKnown && (await olderPull(tx, change, current))) return
+        let occupant = await pathOccupant(this.fs, tx, target, change.file_id)
+        // Only a fresh authoritative snapshot may replace a verified equal
+        // occupant. Saved intents cannot take this branch, even with equal bytes.
+        if (occupant !== null && occupant.fileId !== change.file_id && freshReplacement !== null) {
+          if (
+            occupant.path !== target ||
+            !replayAuthority(change.file_id, base, current, null) ||
+            !(['path', 'wirePath', 'fileId', 'versionId', 'sha', 'size', 'mtime'] as const).every(
+              (field) => occupant![field] === freshReplacement[field]
+            )
           )
-        )
-          return false
-        await tx.delete(occupant.path)
-        occupant = await pathOccupant(this.fs, tx, target, change.file_id)
+            return
+          await tx.delete(occupant.path)
+          occupant = await pathOccupant(this.fs, tx, target, change.file_id)
+        }
+        if (!replayAuthority(change.file_id, base, current, occupant)) return
+        if (from !== null) await tx.delete(from)
+        await tx.put({
+          path: target,
+          wirePath: change.path,
+          fileId: change.file_id,
+          versionId: change.version_id,
+          sha,
+          size: have.size,
+          mtime: have.mtime,
+        })
+        if (this.sequenceKnown) await recordPull(tx, change)
+        else await tx.setMeta?.(pullHistoryKey(change.file_id), null)
+        await tx.setMeta?.(scanHintKey(target), null)
+        await tx.setMeta?.(`pull-base:${target}`, null)
+        if (from !== null) await tx.setMeta?.(scanHintKey(from), null)
+        if (stageId === undefined)
+          await new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client).clear(
+            change.file_id
+          )
+        if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
+        recorded = true
       }
-      if (!replayAuthority(change.file_id, base, current, occupant)) return false
-      if (from !== null) await tx.delete(from)
-      await tx.put({
-        path: target,
-        wirePath: change.path,
-        fileId: change.file_id,
-        versionId: change.version_id,
-        sha,
-        size: have.size,
-        mtime: have.mtime,
-      })
-      if (this.sequenceKnown) await recordPull(tx, change)
-      else await tx.setMeta?.(pullHistoryKey(change.file_id), null)
-      await tx.setMeta?.(scanHintKey(target), null)
-      await tx.setMeta?.(`pull-base:${target}`, null)
-      if (from !== null) await tx.setMeta?.(scanHintKey(from), null)
-      if (stageId === undefined)
-        await new PendingPullWrites(tx, this.fs, this.sequenceKnown, this.client).clear(
-          change.file_id
-        )
-      if (!this.drainCompletedSerial) checkCancellation(this.opts.signal)
-      return true
-    })
+    )
     if (!recorded) return false
     if (stageId !== undefined) {
       if (liveStage?.id === stageId) await liveStage.discard()

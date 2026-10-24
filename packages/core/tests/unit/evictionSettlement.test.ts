@@ -1,7 +1,9 @@
-import { expect, it } from 'vitest'
-import { MemoryFileSystem, MemoryStateStore, sha256 } from '../../src/index.js'
+import { expect, it, vi } from 'vitest'
+import { MemoryFileSystem, MemoryStateStore, ExpectedWrites, sha256 } from '../../src/index.js'
 import { evictionKey, recoverPullEvictions } from '../../src/pullEvictions.js'
 import { FileRetries } from '../../src/fileRetry.js'
+import { PullPlacer } from '../../src/pullPlace.js'
+import type { ChangeItem } from '@abele/sync-protocol'
 
 async function fixture() {
   const fs = new MemoryFileSystem({ caseInsensitive: true, normalizing: true })
@@ -31,6 +33,99 @@ async function fixture() {
   now = 10000
   return { fs, state, base, key, raw, retries }
 }
+
+async function liveFixture() {
+  const f = await fixture()
+  await f.fs.writeAtomic(f.base.path, new Uint8Array([1]), 1)
+  const bytes = new Uint8Array([2])
+  const change: ChangeItem = {
+    seq: 2,
+    file_id: 'incoming',
+    version_id: 'v2',
+    path: f.base.path,
+    prev_path: null,
+    op: 'create',
+    sha: await sha256(bytes),
+    size: 1,
+    mtime: 1,
+    kind: 'attachment',
+    actor: { kind: 'system', id: 'server', name: 'server' },
+    at: '',
+  }
+  const expected = new ExpectedWrites()
+  const clear = vi.spyOn(expected, 'clear')
+  let held = false
+  const placer = new PullPlacer(
+    {
+      getBlob: async () => bytes,
+      pathRefusal: () =>
+        held
+          ? {
+              path: f.base.path,
+              code: 'conflict',
+              message: 'held',
+              direction: 'pull',
+              evidence: true,
+            }
+          : undefined,
+    },
+    f.fs,
+    f.state,
+    { dirty: new Set(), expected, filter: { excluded: () => false } },
+    sha256
+  )
+  const place = () => placer.place(change, change.sha!, null, new Map(), new Map())
+  return {
+    ...f,
+    clear,
+    place,
+    hold: () => {
+      held = true
+    },
+  }
+}
+
+it.each(['owner', 'bytes', 'refused', 'hold', 'intent'] as const)(
+  'retains live eviction ownership when %s changes around conditional removal',
+  async (mode) => {
+    const f = await liveFixture()
+    const replacement = { ...f.base, fileId: 'replacement', versionId: 'new' }
+    const replacementIntent = JSON.stringify({ ...f.base, versionId: 'new' })
+    const conditional = f.fs.conditionalFile.bind(f.fs)
+    f.fs.conditionalFile = async (operation) => {
+      if (operation.effect.kind !== 'remove') return conditional(operation)
+      if (mode === 'refused') return false
+      const result = await conditional(operation)
+      if (mode === 'owner') await f.state.put(replacement)
+      else if (mode === 'hold') f.hold()
+      else if (mode === 'intent') await f.state.setMeta(f.key, replacementIntent)
+      else await f.fs.writeAtomic(f.base.path, new Uint8Array([9]), 1)
+      return result
+    }
+    expect(await f.place()).toBe(false)
+    expect(await f.state.get(f.base.path)).toEqual(mode === 'owner' ? replacement : f.base)
+    expect(await f.state.getMeta(f.key)).toBe(mode === 'intent' ? replacementIntent : f.raw)
+    expect(f.clear).not.toHaveBeenCalled()
+    if (mode === 'bytes') expect(await f.fs.read(f.base.path)).toEqual(new Uint8Array([9]))
+  }
+)
+
+it('rolls live eviction ledger and evidence back with its frontier without acknowledging memory', async () => {
+  const f = await liveFixture()
+  const transaction = f.state.transaction.bind(f.state)
+  f.state.transaction = (work) =>
+    transaction(async (tx) => {
+      tx.setCursor = async () => {
+        throw new Error('frontier failed')
+      }
+      return work(tx)
+    })
+  await expect(f.place()).rejects.toThrow('frontier failed')
+  expect(await f.state.get(f.base.path)).toEqual(f.base)
+  expect(await f.state.getMeta(f.key)).toBe(f.raw)
+  expect(await f.state.getCursor()).toBe(1)
+  expect(f.clear).not.toHaveBeenCalled()
+})
 
 it.each(['identity', 'version', 'case', 'unicode'])(
   'retains eviction evidence and retries when the %s owner changes before settlement',
