@@ -95,7 +95,8 @@ export class PendingPullWrites {
     return pathRefusal(
       this.client,
       this.state,
-      new Set(paths.filter((path): path is string => path != null))
+      new Set(paths.filter((path): path is string => path != null)),
+      admit ? destination : null
     )
   }
 

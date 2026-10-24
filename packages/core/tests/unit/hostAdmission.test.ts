@@ -140,6 +140,38 @@ it('does not advance the cursor if persisting a denied obligation fails', async 
   expect(f.getBlob).not.toHaveBeenCalled()
 })
 
+it.each(['rename', 'delete'] as const)(
+  'settles %s out of a host-denied parent without treating admission as source authority',
+  async (mode) => {
+    const f = await feedFixture()
+    f.change.path = 'blocked:/file'
+    const fs = Object.assign(f.fs, {
+      async mkdir(_path: string) {},
+      async *listDirectories() {
+        yield* []
+      },
+    })
+    await new V2Directories(fs, f.state, () => true, vi.fn()).receive(
+      { file_id: 'dir', version_id: 'dir-v1', path: 'blocked:', kind: 'directory', mtime: 1 },
+      1
+    )
+    await f.run()
+    f.feed.push({
+      ...f.change,
+      seq: 3,
+      version_id: 'v3',
+      op: mode === 'delete' ? 'delete' : 'move',
+      path: mode === 'delete' ? f.change.path : 'allowed',
+      prev_path: mode === 'delete' ? null : f.change.path,
+      ...(mode === 'delete' ? { sha: null, size: null, mtime: null } : {}),
+    })
+    await f.run()
+    expect(await f.state.getMeta('pull-refused:file')).toBeNull()
+    expect(f.getBlob).toHaveBeenCalledTimes(mode === 'delete' ? 0 : 1)
+    expect(await f.state.getMeta('v2-directories')).toContain('blocked:')
+  }
+)
+
 it('checks admission on deferred approval and pending placement without fetching', async () => {
   const f = await feedFixture()
   const result = await applyStaged(f.client, f.fs, f.state, [f.change], f.opts)

@@ -154,13 +154,20 @@ export async function hasStoredDirectoryRefusals(state: StateStore): Promise<boo
   return (await directoryRefusals(state)).size > 0
 }
 
-export async function storedDirectoryRefusal(state: StateStore, paths: Iterable<string>) {
+export async function storedDirectoryRefusal(
+  state: StateStore,
+  paths: Iterable<string>,
+  hostDestination?: string | null
+) {
   const refused = await directoryRefusals(state)
   for (const path of paths) {
     let parent = wirePath(path)
     for (;;) {
       const refusal = refused.get(parent)
-      if (refusal) return refusal
+      // Host admission constrains a destination, never a previous name or tombstone.
+      // Other directory refusals remain authority barriers for every touched path.
+      if (refusal && !(refusal.host && hostDestination !== undefined && path !== hostDestination))
+        return refusal
       const slash = parent.lastIndexOf('/')
       if (slash < 0) break
       parent = parent.slice(0, slash)
