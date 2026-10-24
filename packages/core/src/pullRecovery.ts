@@ -174,8 +174,11 @@ export async function recoverPendingPullWrites(
         report.held.push(change)
         continue
       }
+      if (intent.retiring) {
+        await placer.pending.recoverRetirement(fileId, raw)
+        continue
+      }
       await placer.pending.superseded(change)
-      if (intent.retiring) continue
       if (
         entry?.versionId === intent.versionId &&
         entry.wirePath === intent.wirePath &&

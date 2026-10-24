@@ -10,6 +10,28 @@ import { PullPlacer } from '../../src/pullPlace.js'
 import { PendingPullWrites } from '../../src/pullWrite.js'
 import { change } from './holdFixture.js'
 import { decorateStateTransactions } from '../helpers/stateTransactions.js'
+import { recoverPendingPullWrites } from '../../src/pullRecovery.js'
+
+it('reloads committed retirement without afterCommit and preserves raw outer rollback', async () => {
+  const f = await fixture()
+  decorateStateTransactions(f.state, (tx) => {
+    tx.afterCommit = undefined
+  })
+  await expect(
+    f.state.transaction(async (tx) => {
+      await new PendingPullWrites(tx, f.fs).settled(f.item)
+      throw new Error('rollback')
+    })
+  ).rejects.toThrow('rollback')
+  expect(f.discard).not.toHaveBeenCalled()
+  expect(await f.state.getMeta(f.key)).toBe(f.original)
+  await f.pending.settled(f.item)
+  expect(f.discard).not.toHaveBeenCalled()
+  expect(JSON.parse((await f.state.getMeta(f.key))!).retiring).toBe(true)
+  await recoverPendingPullWrites(f.fs, f.state, [f.item.file_id])
+  expect(f.discard).toHaveBeenCalledExactlyOnceWith('old-stage')
+  expect(await f.state.getMeta(f.key)).toBeNull()
+})
 
 it('keeps installation receipt evidence through raw outer rollback of successful cleanup', async () => {
   const f = await fixture()

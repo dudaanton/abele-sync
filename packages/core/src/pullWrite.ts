@@ -191,7 +191,8 @@ export class PendingPullWrites {
    * resumed, never interpreted as permission to install or fetch the old stage. */
   private async retire(
     pending: PendingPullWrite,
-    discard?: (id: string) => Promise<void>
+    discard?: (id: string) => Promise<void>,
+    reloaded?: string
   ): Promise<void> {
     if (await this.refused(pending.fileId)) return
     if (!this.fs && (pending.stageId || pending.receiptId))
@@ -199,6 +200,7 @@ export class PendingPullWrites {
     const original = JSON.stringify(pending)
     const retiring = JSON.stringify({ ...pending, retiring: true })
     let owned = false
+    let selected = false
     await commitAppliedSettlement(
       this.state,
       async () => ({ reached: await this.state.getCursor(), firstUnresolved: null }),
@@ -210,6 +212,7 @@ export class PendingPullWrites {
         )
           return
         await tx.setMeta?.(keyFor(pending.fileId), retiring)
+        selected = true
         // A caller may itself be inside a raw host transaction. Its rollback
         // must not lose private bytes; recovery finishes cleanup after commit.
         afterStateCommit(tx, () => {
@@ -217,7 +220,9 @@ export class PendingPullWrites {
         })
       }
     )
-    if (!owned) return
+    // Root recovery supplied an already committed image, not a read-your-writes
+    // observation from this transaction. Revalidate its exact ownership above.
+    if (!owned && !(selected && pending.retiring && reloaded === original)) return
     if (pending.stageId) {
       if (discard) await discard(pending.stageId)
       else await discardPullStage(this.fs!, pending.stageId)
@@ -236,6 +241,14 @@ export class PendingPullWrites {
         await tx.setMeta?.(keyFor(pending.fileId), null)
       }
     )
+  }
+
+  /** Root recovery only, before dispatch and outside any host transaction.
+   * The caller has reloaded this exact durable image after the prior run ended. */
+  async recoverRetirement(fileId: string, image: string): Promise<void> {
+    const pending = await this.read(fileId)
+    if (pending?.retiring && JSON.stringify(pending) === image)
+      await this.retire(pending, undefined, image)
   }
 
   async superseded(change: ChangeItem): Promise<void> {
