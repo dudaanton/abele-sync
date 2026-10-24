@@ -85,6 +85,24 @@ async function liveFixture() {
   }
 }
 
+it('does not remove the old path after its owner moved before conditional capture', async () => {
+  const f = await liveFixture()
+  const moved = { ...f.base, path: 'moved.md', wirePath: 'moved.md' }
+  const conditional = f.fs.conditionalFile.bind(f.fs)
+  f.fs.conditionalFile = async (operation) => {
+    if (operation.effect.kind === 'remove') {
+      await f.state.delete(f.base.path)
+      await f.state.put(moved)
+    }
+    return conditional(operation)
+  }
+  expect(await f.place()).toBe(false)
+  expect(await f.state.get(moved.path)).toEqual(moved)
+  expect(await f.fs.read(f.base.path)).toEqual(new Uint8Array([1]))
+  expect(await f.state.getMeta(f.key)).toBe(f.raw)
+  expect(f.clear).not.toHaveBeenCalled()
+})
+
 it.each(['owner', 'bytes', 'refused', 'hold', 'intent'] as const)(
   'retains live eviction ownership when %s changes around conditional removal',
   async (mode) => {

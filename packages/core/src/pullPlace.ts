@@ -369,19 +369,26 @@ export class PullPlacer {
   private async clearPath(
     path: string,
     base: StateEntry,
-    authorize = async () =>
-      replayAuthority(
-        base.fileId,
-        base,
-        await this.state.byFileId(base.fileId),
-        await pathOccupant(this.fs, this.state, path, base.fileId)
-      ) && !(await this.pending.refused(base.fileId, [path], base))
+    authorize = async () => {
+      const current = await this.state.byFileId(base.fileId)
+      return (
+        current?.path === path &&
+        replayAuthority(
+          base.fileId,
+          base,
+          current,
+          await pathOccupant(this.fs, this.state, path, base.fileId)
+        ) &&
+        !(await this.pending.refused(base.fileId, [path], base))
+      )
+    }
   ): Promise<boolean> {
     try {
       const identity = await this.fs.fileIdentity?.(path)
-      const expected = { ...base, ...(identity != null ? { identity } : {}) }
+      const expected =
+        identity === null ? null : { ...base, ...(identity !== undefined ? { identity } : {}) }
       if (!(await authorize())) return false
-      if (this.fs.conditionalOwnership)
+      if (this.fs.conditionalOwnership && identity !== undefined)
         return await this.effect({ path, expected, authorize, effect: { kind: 'remove' } })
       // Older hosts cannot enforce ledger authority at capture. Keep the captured
       // bytes as an ordinary, visible conflict copy, including on success. Such a

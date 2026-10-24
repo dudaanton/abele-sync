@@ -328,7 +328,7 @@ a newer public occupant (a visible conflict copy is valid retention). A callback
 is live authority only, never a durable recovery permission. Hosts must also enforce
 `expected.identity` when they provide `fileIdentity`. The final host mutation
 interval retains the limits of the conditional implementation described below.
-Hosts without `conditionalOwnership` remain supported: core uses an exclusive move
+Hosts without `conditionalOwnership` or object identity remain supported: core uses an exclusive move
 to a visible `path.sync-conflict-<uuid>` copy and rechecks ownership afterward.
 These hosts retain even successful removals; core never automatically deletes those
 copies. This conservative fallback avoids assuming an older adapter implements a
