@@ -15,6 +15,7 @@ it('ships only deployment and current-state reference documents', () => {
     'operator.md',
     'protocol-v2.md',
     'protocol.md',
+    'removal-safety.md',
     'restored-vault-reconciliation.md',
     'schema.md',
     'security.md',
