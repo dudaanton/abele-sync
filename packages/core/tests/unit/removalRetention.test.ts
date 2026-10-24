@@ -224,6 +224,18 @@ it('reads only the summary for young handed-over captures on startup', async () 
   expect(list).not.toHaveBeenCalled()
 })
 
+it('reconciles standalone departure ownership without overriding the host reclamation policy', async () => {
+  const { fs, state, base } = await fixture()
+  await captureRemoval(fs, state, base, async () => true, 0)
+  await state.transaction(async (tx) => {
+    await commitRemoval(tx, base)
+    await tx.delete(base.path)
+  })
+  await recoverRemovals(fs, state, { now: () => 8 * DAY, maxBytes: 0 }, base.path)
+  expect((await retentionSnapshot(fs))[0]?.phase).toBe('committed')
+  expect(await fs.stat(base.path)).toBeNull()
+})
+
 it('serializes summary ownership through distinct wrappers of the same host', async () => {
   const { fs, state, base } = await fixture()
   const other = { ...base, path: 'b.md', wirePath: 'b.md', fileId: 'b' }

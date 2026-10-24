@@ -524,12 +524,14 @@ export async function recoverRemovals(
         await save(fs, rows)
       }
     }
+    // Standalone departure replay owns recovery of its capture, not the host's
+    // reclamation policy. Cycle/host maintenance supplies that policy separately.
+    if (onlyPath !== undefined) return
     let total = rows.reduce((sum, row) => sum + row.expected.size, 0)
     for (const row of [...rows].sort(
       (a, b) => a.capturedAt - b.capturedAt || a.id.localeCompare(b.id)
     )) {
       if (
-        (onlyPath !== undefined && row.path !== onlyPath) ||
         row.phase !== 'committed' ||
         now - row.capturedAt < DAY ||
         (total <= cap && now - row.capturedAt < 7 * DAY)
