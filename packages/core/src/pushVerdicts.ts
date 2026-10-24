@@ -252,7 +252,9 @@ export class VerdictPlanner {
       fetched: new Map(),
       runs,
       wanted,
-      local: await shaIndex(this.state),
+      // An acknowledged push of our own bytes needs no content-source scan.
+      // In particular, pause must still let that issued commit settle.
+      local: wanted.size ? await shaIndex(this.state) : new Map(),
       stale,
       writes,
       bad,

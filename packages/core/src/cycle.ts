@@ -646,11 +646,14 @@ export class SyncCycle {
       )
         await this.retries.succeeded(row.path, row.phase)
     }
-    await recoverRemovals(fs, state, {
-      ...this.ctx.opts.removalRetention,
-      log,
-      signal: this.ctx.signal?.(),
-    })
+    // An issued push may have settled after pause. Return its acknowledged
+    // report without starting a new retention pass; resume owns that work.
+    if (!this.ctx.signal?.().aborted)
+      await recoverRemovals(fs, state, {
+        ...this.ctx.opts.removalRetention,
+        log,
+        signal: this.ctx.signal?.(),
+      })
     return {
       pull: before,
       push: pushed,
