@@ -288,6 +288,39 @@ it('resets only exact selected retry schedules and retains durable owners', asyn
   expect(await state.getMeta('pull-refused:a')).toBe('immutable obligation')
 })
 
+it('preserves a selected cache reset when the requested sync fails before attempting the push', async () => {
+  const f = await fixture()
+  f.client.changes = async () => ({ items: [], next_since: 1, head_seq: 1 })
+  const state = async () =>
+    ({ head_seq: 1, settings: { max_file_bytes: 1e9, quota_bytes: null } }) as Awaited<
+      ReturnType<EngineClient['state']>
+    >
+  f.client.state = state
+  for (const path of ['broken.bin', 'healthy.bin'])
+    await f.fs.writeAtomic(path, new Uint8Array([2]), 1)
+  f.client.hasBlob = async () => false
+  const upload = vi.fn(async () => {
+    throw new AbeleError('too_large', 'denied')
+  })
+  f.client.putBlob = upload
+  const engine = new SyncEngine(f.options)
+  try {
+    await engine.sync()
+    expect(upload).toHaveBeenCalledTimes(1)
+    f.client.state = async () => {
+      throw new Error('offline before push')
+    }
+    await expect(engine.retryPaths(['broken.bin'])).rejects.toThrow('offline before push')
+    f.client.state = state
+    await engine.sync()
+    expect(upload).toHaveBeenCalledTimes(2)
+    await engine.sync()
+    expect(upload).toHaveBeenCalledTimes(2) // a fresh refusal is not reopened
+  } finally {
+    await engine.stop()
+  }
+})
+
 it('queues symbol selective retry behind the active run and snapshots caller paths', async () => {
   const f = await fixture()
   let release!: () => void, entered!: () => void

@@ -100,7 +100,7 @@ export class SyncCycle {
   /** Set by `rescan`: the next run winds the cursor back to 0 before it pulls. */
   rewind = false
   retryRefusedDirectories = false
-  retryRefusedPaths: ReadonlySet<string> | undefined
+  private readonly retryRefused = new Map<string, ReadonlyMap<string, Refusal>>()
   /** Set once a run has started or ended with the cursor above 0: no preference is sent again. */
   private joined = false
   /** Only a batch this live engine just sent is known not to originate in a restored profile. */
@@ -252,6 +252,7 @@ export class SyncCycle {
       await this.retries.load()
       this.staging.records.invalidate()
       this.refused.clear()
+      this.retryRefused.clear()
       this.kept.clear()
       this.unsettled.clear()
       this.unscanned = true
@@ -288,7 +289,7 @@ export class SyncCycle {
       expected: this.ctx.expected,
       onApplied: this.ctx.opts.onApplied,
       refused: this.refused,
-      retryRefusedPaths: this.retryRefusedPaths,
+      retryRefused: this.retryRefused,
       maxFileBytes: undefined as number | undefined,
       filter: this.filter,
       // A push answered with the server's bytes for a staged path stages them, as a pull would
@@ -706,12 +707,20 @@ export class SyncCycle {
         `push: the cap or the quota changed; ${this.refused.size} refused files get another try`
       )
       this.refused.clear()
+      this.retryRefused.clear()
     }
     this.refusedUnder = under
   }
 
   /** Explicit host retry may probe a refusal again; an unrelated due timer may not. */
-  retryFileRefusals(): void {
+  retryFileRefusals(paths?: readonly string[]): void {
+    if (paths !== undefined) {
+      if (!paths.length) return
+      const observed = new Map(this.refused)
+      for (const path of paths) this.retryRefused.set(path, observed)
+      return
+    }
+    this.retryRefused.clear()
     this.refused.clear()
   }
 

@@ -302,12 +302,8 @@ export class SyncEngine implements ExclusiveOperationPort {
       await this.cycle.retries.retryPaths(selected)
       await this.opts.client.loadPathRefusals?.(this.opts.fs, this.opts.state)
       await this.opts.client.retryRefusedDirectories?.(selected)
-      this.cycle.retryRefusedPaths = new Set(selected)
-      try {
-        return await this.beginRun()
-      } finally {
-        this.cycle.retryRefusedPaths = undefined
-      }
+      this.cycle.retryFileRefusals(selected)
+      return this.beginRun()
     })
   }
 

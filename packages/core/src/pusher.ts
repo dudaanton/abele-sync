@@ -133,8 +133,8 @@ export interface ResumeOptions {
    * refusal; the engine owns the map and empties it when the cap or the quota changes.
    */
   refused?: Map<string, Refusal>
-  /** One explicit attempt for these paths against the cached refusal observed at push start. */
-  retryRefusedPaths?: ReadonlySet<string>
+  /** Explicit per-path resets of exact cached verdicts, retained across an offline run. */
+  retryRefused?: ReadonlyMap<string, ReadonlyMap<string, Refusal>>
   /** Last learned server file ceiling, for refusals whose response omits details. */
   maxFileBytes?: number
   /**
@@ -438,7 +438,6 @@ class Pusher {
   private readonly hash: (bytes: Uint8Array) => Promise<string>
   private readonly concurrency: number
   private readonly refused: Map<string, Refusal>
-  private readonly retryRefusals: Map<string, Refusal>
   /**
    * sha → the server's word that other uploads of the vault fill its quota for now
    * (`quota_waiting`). Left out of this push like a refusal, but for this push only: the next
@@ -461,7 +460,6 @@ class Pusher {
     this.transferBudget = opts.transferBudget ?? new TransferBudget()
     this.concurrency = opts.concurrency ?? DEFAULT_CONCURRENCY
     this.refused = opts.refused ?? new Map()
-    this.retryRefusals = opts.retryRefusedPaths?.size ? new Map(this.refused) : new Map()
     const disk = new PushDisk(fs, state, opts, this.hash, diskPaths)
     this.planner = new VerdictPlanner(client, fs, state, opts, this.hash, this.concurrency, disk)
     this.recorder = new VerdictRecorder(fs, state, opts, report, this.hash, this.refused, disk)
@@ -572,7 +570,7 @@ class Pusher {
     const kept: CommitOp[] = []
     for (const op of ops) {
       const path =
-        (checkPaths && this.client.pathRefusal) || this.opts.retries || this.opts.retryRefusedPaths
+        (checkPaths && this.client.pathRefusal) || this.opts.retries || this.opts.retryRefused
           ? op.op === 'create'
             ? op.path
             : op.op === 'move'
@@ -582,10 +580,9 @@ class Pusher {
       const cached = 'sha' in op ? this.refused.get(op.sha) : undefined
       const retryCached =
         path !== undefined &&
-        this.opts.retryRefusedPaths?.has(path) &&
         'sha' in op &&
         cached !== undefined &&
-        this.retryRefusals.get(op.sha) === cached
+        this.opts.retryRefused?.get(path)?.get(op.sha) === cached
       const refusal =
         (path === undefined ? undefined : this.client.pathRefusal?.(path)) ??
         (retryCached ? undefined : cached)
