@@ -5,10 +5,8 @@ export const FILE_KINDS = ['note', 'canvas', 'script', 'settings', 'attachment']
 
 export type FileKind = (typeof FILE_KINDS)[number]
 
-/** Characters no vault path may carry, on any platform we sync to. */
-const FORBIDDEN = /[\\:*?"<>|\u0000-\u001f\u007f]/
-/** Windows device names, with or without an extension. */
-const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i
+/** Wire syntax protections; host-specific restrictions belong to admission. */
+const FORBIDDEN = /[\\\u0000-\u001f\u007f]/
 
 const MAX_RAW_BYTES = 4096
 const MAX_PATH_BYTES = 1024
@@ -85,11 +83,9 @@ export function validatePath(path: string): void {
   for (const [index, seg] of path.split('/').entries()) {
     if (seg.length === 0) return fail('empty segment')
     if (seg === '.' || seg === '..') return fail('dot segment')
-    if (seg !== seg.trim()) return fail('leading or trailing space')
+    if (seg.trimStart() !== seg) return fail('leading space')
     if (seg.startsWith('.') && !(index === 0 && (seg === '.obsidian' || seg === '.trash')))
       return fail('leading dot')
-    if (seg.endsWith('.')) return fail('trailing dot')
-    if (RESERVED.test(seg)) return fail('reserved name')
     if (utf8Length(seg) > MAX_SEGMENT_BYTES) return fail('segment too long')
   }
 }

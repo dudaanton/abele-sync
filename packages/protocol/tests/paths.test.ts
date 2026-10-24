@@ -23,25 +23,13 @@ describe('normalisePath', () => {
 describe('validatePath', () => {
   const bad = [
     '',
-    'a:b.md',
-    'a*b',
-    'a?b',
-    'a"b',
-    'a<b',
-    'a>b',
-    'a|b',
     'a/../b',
     '../a',
     'a//b',
     ' a.md',
-    'a.md ',
-    'a./b',
     '.private/file.md',
     'folder/.secret.md',
     'a/.',
-    'CON',
-    'x/prn.txt',
-    'com1/a.md',
     'a\u0000b',
     'a\tb',
     'x'.repeat(256) + '.md',
@@ -51,7 +39,20 @@ describe('validatePath', () => {
       expect(() => validatePath(p)).toThrowError(expect.objectContaining({ code: 'invalid_path' }))
     })
   }
+  // D-011 moves platform name policy to the host.
   const good = [
+    'a:b.md',
+    'a*b',
+    'a?b',
+    'a"b',
+    'a<b',
+    'a>b',
+    'a|b',
+    'a.md ',
+    'a./b',
+    'CON',
+    'x/prn.txt',
+    'com1/a.md',
     'a.md',
     'Folder/Sub/note.md',
     '.obsidian/app.json',
@@ -164,8 +165,8 @@ describe('validatePath boundaries', () => {
     )
   })
   it('reports path and reason in details', () => {
-    expect(() => validatePath('a:b.md')).toThrowError(
-      expect.objectContaining({ details: { path: 'a:b.md', reason: 'forbidden character' } })
+    expect(() => validatePath('a\u0000b.md')).toThrowError(
+      expect.objectContaining({ details: { path: 'a\u0000b.md', reason: 'forbidden character' } })
     )
   })
   it('accepts a 255-byte segment and rejects 256', () => {

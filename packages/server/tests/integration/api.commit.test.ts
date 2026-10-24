@@ -90,7 +90,7 @@ describe('commit, changes, manifest', () => {
     await putBlob(tok, 'y')
     await commit(tok, [create('Dup.md', 'x')])
     const r = await commit(tok, [
-      create('a:b.md', 'x'),
+      create('a\tb.md', 'x'),
       create('ok.md', 'x'),
       create('dup.MD', 'y', 0),
     ])
@@ -623,7 +623,7 @@ describe('commit, changes, manifest', () => {
 
   it('writes one audit row per op', async () => {
     await putBlob(tok, 'audit')
-    const r = await commit(tok, [create('audit.md', 'audit'), create('a:b', 'audit')])
+    const r = await commit(tok, [create('audit.md', 'audit'), create('a\tb', 'audit')])
     const rows = await t.db
       .selectFrom('audit')
       .select(['action', 'result', 'path', 'actor_kind'])
@@ -631,11 +631,11 @@ describe('commit, changes, manifest', () => {
       .orderBy('at', 'desc')
       .orderBy('id')
       .execute()
-    const mine = rows.filter((row) => row.path === 'audit.md' || row.path === 'a:b')
+    const mine = rows.filter((row) => row.path === 'audit.md' || row.path === 'a\tb')
     expect(mine).toEqual(
       expect.arrayContaining([
         { action: 'create', result: 'applied', path: 'audit.md', actor_kind: 'device' },
-        { action: 'create', result: 'rejected:invalid_path', path: 'a:b', actor_kind: 'device' },
+        { action: 'create', result: 'rejected:invalid_path', path: 'a\tb', actor_kind: 'device' },
       ])
     )
     expect(r.results).toHaveLength(2)

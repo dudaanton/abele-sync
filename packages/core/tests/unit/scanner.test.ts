@@ -537,15 +537,15 @@ describe('scan', () => {
   })
 
   it('skips a path the wire will not take, with the reason', async () => {
-    await vault.write('a:b.md', 'ay')
+    await vault.write('a\tb.md', 'ay')
     await vault.write('a.md', 'ay')
 
     const log: string[] = []
     const result = await scan(vault.fs, vault.state, ALL, { log: (m) => log.push(m) })
 
-    expect(result.skipped).toEqual([{ path: 'a:b.md', reason: 'forbidden character' }])
+    expect(result.skipped).toEqual([{ path: 'a\tb.md', reason: 'forbidden character' }])
     expect(result.ops.map((op) => op.op)).toEqual(['create'])
-    expect(log.join('\n')).toContain('a:b.md')
+    expect(log.join('\n')).toContain('a\tb.md')
   })
 
   it('keeps the ordinal-lowest of two disk paths that mean the same wire path', async () => {

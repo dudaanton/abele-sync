@@ -37,6 +37,39 @@ for (const dialect of ['sqlite', 'pg'] as const) {
         directory: mkdir.results[0]!,
       }
     }
+    it('D-011 stores host-specific file and directory names unchanged on the wire', async () => {
+      const { owner } = await setup()
+      const names = [
+        'a:b',
+        'a*b',
+        'a?b',
+        'a"b',
+        'a<b',
+        'a>b',
+        'a|b',
+        'tail.',
+        'tail ',
+        'CON',
+        'prn.txt',
+      ]
+      for (const name of names) {
+        expect((await owner.create(`Shared/${name}`, 'bytes')).status).toBe('applied')
+        expect(
+          (await owner.commit([{ op: 'mkdir', path: `Other/${name}` }])).results[0]?.status
+        ).toBe('applied')
+      }
+      const manifest = await owner.manifest()
+      for (const name of names) {
+        expect(manifest.items.some((item) => item.path === `Shared/${name}`)).toBe(true)
+        expect(
+          manifest.items.some((item) => item.path === `Other/${name}` && item.kind === 'directory')
+        ).toBe(true)
+      }
+      const paths = (await server!.db.selectFrom('files').select('path').execute()).map(
+        (row) => row.path
+      )
+      for (const name of names) expect(paths).toContain(`Shared/${name}`)
+    })
     it('005/006/035/036/037/042/043/053/069 root and folder use one API, preserve paths and empty directories, folder contains all bytes', async () => {
       const { owner, guest } = await setup()
       await owner.commit([{ op: 'mkdir', path: 'Shared/Empty/Child' }])
