@@ -50,9 +50,9 @@ async function fingerprint(path: string, limit: number) {
   }
 }
 
-/** Final bounded content proof, including writes which preserve rounded stat fields.
- * POSIX has no compare-and-unlink: the caller must unlink immediately after this
- * resolves and preserve the capture on any mismatch or I/O uncertainty. */
+/** Bounded content proof, including writes which preserve rounded stat fields.
+ * This does not freeze writable descriptors or grant disposal authority. A
+ * displaced object transfers to retention; mismatches preserve its bytes. */
 export async function matchesVictim(path: string, expected: FileVersion): Promise<boolean> {
   if (expected.identity !== undefined && (await fileObjectIdentity(path)) !== expected.identity)
     return false
@@ -151,8 +151,8 @@ export type RetainVictim = (
 ) => Promise<void>
 
 /** Never rename over a public name. Capture first, validate the displaced inode,
- * publish/restore exclusively. Victims are dropped on success or restored and retired
- * on refusal; publication receipts own only the newly installed data. */
+ * publish/restore exclusively. Replacement victims transfer to retention; a
+ * successful move drops only a private alias of its durable destination. */
 export async function conditionalFile(
   root: string,
   op: ConditionalFileOperation,

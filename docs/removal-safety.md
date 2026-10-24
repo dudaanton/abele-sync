@@ -22,32 +22,33 @@ not inferred from content equality or from an asynchronous boolean callback.
 
 ## One operation owner
 
-Use an immutable operation id and one authoritative decision record. Its identity
-includes the connection/generation, entry point, exact source ledger tuple,
-source path and observed object identity when available. The record also names
-the host capture receipt, expected content, creation time, accounted bytes and
-phase. Unknown identity must remain unknown, not be inferred from equal bytes.
+Use an immutable operation id and one authoritative decision record in the
+connection state store, bound to the exact source ledger tuple. The filesystem
+summary joins that id to the source path, expected content, captured object
+identity when available, creation time, accounted bytes and phase. Unknown
+identity remains unknown; equal bytes do not establish object identity.
 
-Phases are prepared, captured, committed, restoring, retained and retiring.
-The host's fsynced capture journal describes filesystem progress for that same
-operation id; it does not grant independent ledger authority. Recovery joins the
-two records by id. Neither an orphan journal nor a matching hash grants deletion
-permission. There must be no second independently reusable removal intent.
+Summary phases are prepared, held, committed and restored. A conditional host
+journal owns an interrupted rename until it transfers the object to the summary
+victim path; it does not grant ledger authority. Neither an orphan journal nor
+a matching hash grants deletion permission. The decision and summary are joined
+by id, and only the ledger transaction can commit that decision.
 
-Keep per-operation records and a transactional metadata summary/index of pending
-ids, phases, timestamps and byte totals. Normal startup reads the summary, then
-only unresolved records; it does not hash or recursively enumerate retained
-content. Allocation debris and legacy directories require a one-time, resumable
-reconciliation, with progress recorded. Malformed or foreign evidence fails
-closed. Do not rewrite a whole retained-content inventory per removal.
+The implementation atomically replaces one metadata-only JSON summary of owners;
+it does not enumerate retained content during normal startup. This is linear in
+the number of retained operations when mutating the summary. Existing conditional
+journals handle interrupted capture; old unowned directories receive a one-time
+conservative restoration pass before creating the summary. Malformed or foreign
+evidence fails closed. Stores without metadata-key enumeration discover pre-summary
+claims through their ledger entries, without walking filesystem content.
 
 ## Capture and commit protocol
 
 1. Persist prepared ownership before touching the source. Allocate an exclusive
    private directory on the same filesystem. Atomically rename the public victim
    into it, then fsync both parents. Never unlink a public path based on earlier
-   stat/hash results. The capture result must distinguish absence, capture,
-   refusal and uncertain I/O, rather than return one success boolean.
+   stat/hash results. The durable summary distinguishes capture from absence; false reports a
+   refusal and uncertain I/O throws, preserving its recovery evidence.
 2. Compare the captured object with the expected object/content. A replacement
    captured before the rename is refused; a replacement created at the public
    name after the rename is never touched. Persist the captured receipt before
@@ -66,10 +67,10 @@ closed. Do not rewrite a whole retained-content inventory per removal.
 5. A refused or rolled-back decision restores exclusively. For regular files,
    Node's existing link-if-absent, fsync-parent, unlink-private sequence is the
    available no-overwrite move equivalent; ordinary rename would overwrite.
-   Occupied originals keep the capture as a private conflict copy under the same
-   owner id. Never silently discard it because the occupant has equal bytes.
-6. Mark retiring before byte cleanup, then remove the owner/index entry only
-   after cleanup is durably complete. Repeating any step must be idempotent.
+   Occupied originals receive a visible conflict copy beside them, named
+   with the capture owner id. Never silently discard it because the occupant has equal bytes.
+6. Keep the committed owner during byte cleanup, then remove its summary row
+   only after cleanup is durably complete. Repeating any step is idempotent.
 
 Capture is reversible and may precede the transaction; destruction may not.
 If a public save lands after the committed decision, it belongs to the next

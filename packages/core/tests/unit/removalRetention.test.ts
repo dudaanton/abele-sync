@@ -37,17 +37,21 @@ it('restarts the minimum age when publication capture acknowledgement was interr
   }
 })
 
-it('retires a decision allocation interrupted before summary creation', async () => {
-  const { fs, state, base } = await fixture()
-  await state.setMeta('removal-source:a', 'allocated')
-  await state.setMeta(
-    'removal-decision:allocated',
-    JSON.stringify({ id: 'allocated', base, committed: false })
-  )
-  await recoverRemovals(fs, state)
-  expect(await state.getMeta('removal-source:a')).toBeNull()
-  expect(await captureRemoval(fs, state, base, async () => true)).toBe(true)
-})
+it.each([true, false])(
+  'retires a decision allocation interrupted before summary creation (enumeration=%s)',
+  async (enumeration) => {
+    const { fs, state, base } = await fixture()
+    if (!enumeration) Object.defineProperty(state, 'metadataKeys', { value: undefined })
+    await state.setMeta('removal-source:a', 'allocated')
+    await state.setMeta(
+      'removal-decision:allocated',
+      JSON.stringify({ id: 'allocated', base, committed: false })
+    )
+    await recoverRemovals(fs, state)
+    expect(await state.getMeta('removal-source:a')).toBeNull()
+    expect(await captureRemoval(fs, state, base, async () => true)).toBe(true)
+  }
+)
 
 it('shares retention serialization with the host package copy of core', async () => {
   const { fs, base } = await fixture()

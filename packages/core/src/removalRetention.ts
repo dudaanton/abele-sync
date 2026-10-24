@@ -463,7 +463,14 @@ export async function recoverRemovals(
       throw new EngineError('protocol', 'invalid retention byte limit')
     // A crash can leave the durable claim before any filesystem allocation.
     // No summary owner means no victim was transferred into this namespace.
-    for (const key of (await state?.metadataKeys?.('removal-decision:')) ?? []) {
+    const allocations = new Set((await state?.metadataKeys?.('removal-decision:')) ?? [])
+    if (state?.getMeta && !state.metadataKeys)
+      for await (const base of state.all()) {
+        if (onlyPath !== undefined && base.path !== onlyPath) continue
+        const id = await state.getMeta(pointerKey(base))
+        if (id) allocations.add(decisionKey(id))
+      }
+    for (const key of allocations) {
       const raw = await state!.getMeta!(key)
       if (!raw) continue
       const decision = JSON.parse(raw) as Decision
