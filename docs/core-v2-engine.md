@@ -322,7 +322,10 @@ These are automated core/server observations, not live Obsidian or phone evidenc
 Core supports two implementations of `FileSystem.conditionalFile`. The host
 chooses the implementation behind the existing port.
 
-File removals use an owned private capture through the conditional move primitive.
+File removals use an owned private capture. Hosts advertising `conditionalCapture`
+accept a removal with `retainAt`: transfer the verified victim to that exclusive
+private destination, never unlink it. Hosts without this capability use the
+conditional move primitive. The logical removal and its retained bytes have one owner.
 The exact removal decision commits with its ledger transition; an asynchronous
 authorization callback alone never grants reclamation authority. Older hosts
 without object identity use the same lifecycle, rather than accumulating anonymous
@@ -336,6 +339,16 @@ visible conflict copy. D-163 accepts descriptors held beyond final reclamation.
 Installation/stage retirement acknowledges displaced publication victims only
 after the owning decision commits. See [removal safety](removal-safety.md) for
 recovery, metadata-only enumeration and connection handover.
+
+Successful pull placement transfers stage/receipt cleanup into `pull-cleanup:*`
+records in the same transaction as its ledger update. `pull-cleanup-head` links
+these owners, including on stores without metadata enumeration. The old pull-write
+intent disappears in that transaction; it cannot authorize another installation.
+Byte cleanup waits for the outer commit acknowledgement, or for root recovery to
+reload the committed owner. Completed owners retire in one batch per pull.
+Connection retirement must preserve this chain until cleanup drains; it must not
+drop these records merely because no installation intent remains. Cancellation
+defers cleanup while still acknowledging already-issued file placements.
 
 1. **Exclusive or checked conditional effects.** Exclusive hosts compare the
    displaced regular file at the mutation boundary and publish into an exclusive
