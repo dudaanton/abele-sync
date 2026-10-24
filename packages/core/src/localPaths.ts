@@ -1,4 +1,4 @@
-import { ScanWork, type ScanScheduling } from './scanWork.js'
+import { ScanWork, scanScheduling, type ScanScheduling } from './scanWork.js'
 import { transact } from './stateTransaction.js'
 import { AbeleError, caseKey, validatePath } from '@abele/sync-protocol'
 import type { FileSystem } from './fs.js'
@@ -88,6 +88,7 @@ const mayHaveAliases = (path: string): boolean => /[^\x00-\x7f]|[K;`]/.test(path
 export class LocalPaths {
   private readonly entries = new Map<string, Candidate[]>()
   private readonly heldDirectories: Array<{ path: string; wirePath: string; with: string }> = []
+  private readonly directoryIdentities = new Map<string, Map<string, Candidate>>()
   /** Cache portable preflight enumeration for one pull, never the final write recheck. */
   static filePass(fs: FileSystem, state: StateStore): (path: string) => Promise<LocalPaths> {
     let inventory: Promise<LocalPaths> | undefined
@@ -110,6 +111,12 @@ export class LocalPaths {
       existing.identity ??= entry.identity
     } else candidates.push(entry)
     this.entries.set(key, candidates)
+    if (entry.kind === 'directory' && entry.identity) {
+      const identityKey = JSON.stringify([caseKey(entry.path), entry.identity])
+      const group = this.directoryIdentities.get(identityKey) ?? new Map<string, Candidate>()
+      group.set(entry.path, existing ?? entry)
+      this.directoryIdentities.set(identityKey, group)
+    }
   }
   /** File spelling needs raw enumeration only when a canonical alias is possible. */
   static async forFile(fs: FileSystem, path: string, state?: StateStore): Promise<LocalPaths> {
@@ -129,9 +136,13 @@ export class LocalPaths {
     if (!fs.listChildren) return LocalPaths.read(fs, state)
     const result = new LocalPaths()
     const segments = wirePath(path).split('/')
+    const work = new ScanWork(state ? scanScheduling(state) : {})
     let parent = ''
     for (let n = 0; n < segments.length; n++) {
-      for (const child of await fs.listChildren(parent)) result.add(child)
+      for (const child of await fs.listChildren(parent)) {
+        await work.step()
+        result.add(child)
+      }
       const prefix = segments.slice(0, n + 1).join('/')
       const matches = result.entries.get(prefix) ?? []
       if (matches.length !== 1 || matches[0]!.kind !== 'directory') break
@@ -150,21 +161,15 @@ export class LocalPaths {
       ?.find((c) => c.path === path && c.kind === 'directory')
   }
   directoryCaseAlias(path: string, identity: string): Candidate | undefined {
-    const matches = [...this.entries.values()]
-      .flat()
-      .filter(
-        (entry) =>
-          entry.kind === 'directory' &&
-          entry.identity === identity &&
-          caseKey(entry.path) === caseKey(path)
-      )
-    return matches.length === 1 ? matches[0] : undefined
+    const matches = this.directoryIdentities.get(JSON.stringify([caseKey(path), identity]))
+    return matches?.size === 1 ? matches.values().next().value : undefined
   }
   static async read(
     fs: FileSystem,
     state?: StateStore,
     opts: ScanScheduling = {}
   ): Promise<LocalPaths> {
+    opts = { ...(state ? scanScheduling(state) : {}), ...opts }
     const result = new LocalPaths()
     const work = new ScanWork(opts)
     const parents = (path: string) => {
@@ -187,6 +192,7 @@ export class LocalPaths {
     return result
   }
   private async loadDirectoryHolds(state: StateStore, opts: ScanScheduling = {}) {
+    opts = { ...scanScheduling(state), ...opts }
     const work = new ScanWork(opts)
     const holds = DirectoryHoldSchema.parse(
       JSON.parse((await state.getMeta?.('normalization-directory-collisions')) ?? '[]')
@@ -206,6 +212,7 @@ export class LocalPaths {
   }
   /** A tracked physical directory never yields its canonical subtree to a former twin. */
   async rememberDirectories(state: StateStore, opts: ScanScheduling = {}) {
+    opts = { ...scanScheduling(state), ...opts }
     const work = new ScanWork(opts)
     const previous = DirectoryHoldSchema.parse(
       JSON.parse((await state.getMeta?.('normalization-directory-collisions')) ?? '[]')
@@ -239,11 +246,15 @@ export class LocalPaths {
     await state.setMeta?.('normalization-directory-collisions', JSON.stringify([...holds.values()]))
   }
   /** Directory aliases (including file/directory aliases) protect the whole subtree. */
-  directoryCollisions(): Array<{ path: string; wirePath: string; with: string }> {
+  async directoryCollisions(
+    opts: ScanScheduling = {}
+  ): Promise<Array<{ path: string; wirePath: string; with: string }>> {
+    const work = new ScanWork(opts)
     const result: Array<{ path: string; wirePath: string; with: string }> = [
       ...this.heldDirectories,
     ]
-    for (const [key, candidates] of this.entries)
+    for (const [key, candidates] of this.entries) {
+      await work.step()
       if (candidates.length > 1 && candidates.some((c) => c.kind === 'directory'))
         for (const candidate of candidates)
           result.push({
@@ -251,6 +262,7 @@ export class LocalPaths {
             wirePath: key,
             with: candidates.find((c) => c !== candidate)!.path,
           })
+    }
     return result
   }
   blocked(path: string): boolean {

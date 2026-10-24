@@ -25,7 +25,7 @@ export async function pathOccupant(
   const key = hostKey(fs)
   const target = key(path)
   let own: StateEntry | null = null
-  const work = new ScanWork()
+  const work = new ScanWork(scanScheduling(state))
   for await (const entry of state.pathCandidates?.(path, key) ?? state.all()) {
     await work.step()
     if (key(entry.path) !== target) continue
@@ -34,4 +34,4 @@ export async function pathOccupant(
   }
   return own
 }
-import { ScanWork } from './scanWork.js'
+import { ScanWork, scanScheduling } from './scanWork.js'

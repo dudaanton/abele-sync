@@ -11,7 +11,7 @@ import {
   type EngineStatus,
   type SyncReport,
 } from './engineTypes.js'
-import { guarded, stoppableClient, stoppableFileEffects } from './guard.js'
+import { guarded, stoppableClient, stoppableFileEffects, scheduledState } from './guard.js'
 import {
   exclusiveOperationPort,
   type ExclusiveOperationOptions,
@@ -137,6 +137,10 @@ export class SyncEngine implements ExclusiveOperationPort {
           })
     this.opts = {
       ...hands,
+      state: scheduledState(hands.state, () => ({
+        signal: this.activeCycle ? this.cancellation.signal : undefined,
+        yieldTask: opts.yieldTask,
+      })),
       fs: fileErrors(
         stoppableFileEffects(hands.fs, () =>
           this.activeCycle ? this.cancellation.signal : undefined

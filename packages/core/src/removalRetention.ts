@@ -5,10 +5,13 @@ import { sha256 } from './hash.js'
 import { EngineError } from './errors.js'
 import { transact } from './stateTransaction.js'
 import { MAX_CHUNK_BYTES } from './streaming.js'
+import { checkCancellation } from './cancellation.js'
+import { stoppableFileEffects } from './guard.js'
+import { ScanWork, type ScanScheduling } from './scanWork.js'
 
 const SUMMARY = '.abele-sync/retained-removals/summary.json'
 const DAY = 86400000
-export interface RemovalRetentionPolicy {
+export interface RemovalRetentionPolicy extends ScanScheduling {
   maxBytes?: number
   now?: () => number
   log?: (message: string) => void
@@ -283,12 +286,14 @@ export async function captureRemoval(
   authorize: () => Promise<boolean>,
   now?: number,
   capturedIdentity?: string | null,
-  expected: FileVersion = base
+  expected: FileVersion = base,
+  signal?: AbortSignal
 ): Promise<boolean> {
   base = { ...base }
   expected = { ...expected }
   if (!fs.conditionalFile) return false
-  await recoverRemovals(fs, state, {}, base.path)
+  await recoverRemovals(fs, state, { signal }, base.path)
+  checkCancellation(signal)
   if (!(await authorize())) return false
   const id = crypto.randomUUID(),
     key = decisionKey(id)
@@ -466,9 +471,16 @@ export async function recoverRemovals(
   policy: RemovalRetentionPolicy = {},
   onlyPath?: string
 ): Promise<void> {
+  fs = stoppableFileEffects(fs, () => policy.signal)
   await exclusive(async () => {
+    checkCancellation(policy.signal)
     let rows = await retentionSnapshot(fs)
-    const work = new ScanWork()
+    const work = new ScanWork(policy)
+    const ownedIds = new Set<string>()
+    for (const row of rows) {
+      await work.step()
+      ownedIds.add(row.id)
+    }
     const now = timestamp(policy.now?.() ?? Date.now()),
       cap = policy.maxBytes ?? 1024 * 1024 * 1024
     if (!Number.isSafeInteger(cap) || cap < 0)
@@ -488,16 +500,20 @@ export async function recoverRemovals(
       const raw = await state!.getMeta!(key)
       if (!raw) continue
       const decision = JSON.parse(raw) as Decision
-      if (rows.some((row) => row.id === decision.id)) continue
+      if (ownedIds.has(decision.id)) continue
       if (onlyPath !== undefined && decision.base.path !== onlyPath) continue
       await transact(state!, async (tx) => {
         if ((await tx.getMeta!(key)) !== raw) return
+        checkCancellation(policy.signal)
         await tx.setMeta!(key, null)
-        if ((await tx.getMeta!(pointerKey(decision.base))) === decision.id)
+        if ((await tx.getMeta!(pointerKey(decision.base))) === decision.id) {
+          checkCancellation(policy.signal)
           await tx.setMeta!(pointerKey(decision.base), null)
+        }
       })
     }
     for (const row of [...rows]) {
+      await work.step()
       if (onlyPath !== undefined && row.path !== onlyPath) continue
       if (row.publication) {
         if (row.phase !== 'prepared' || (await fs.stat(row.victim)) !== null) continue
@@ -534,9 +550,12 @@ export async function recoverRemovals(
       if (row.decision && raw) {
         await transact(state!, async (tx) => {
           if ((await tx.getMeta?.(row.decision!)) !== raw) return
+          checkCancellation(policy.signal)
           await tx.setMeta!(row.decision!, null)
-          if ((await tx.getMeta?.(pointerKey(decision!.base))) === row.id)
+          if ((await tx.getMeta?.(pointerKey(decision!.base))) === row.id) {
+            checkCancellation(policy.signal)
             await tx.setMeta!(pointerKey(decision!.base), null)
+          }
         })
       }
       if (row.decision) {
@@ -557,6 +576,7 @@ export async function recoverRemovals(
     for (const row of [...rows].sort(
       (a, b) => a.capturedAt - b.capturedAt || a.id.localeCompare(b.id)
     )) {
+      await work.step()
       if (
         row.phase !== 'committed' ||
         now - row.capturedAt < DAY ||
@@ -581,4 +601,3 @@ export async function recoverRemovals(
       )
   })
 }
-import { ScanWork } from './scanWork.js'

@@ -53,7 +53,7 @@ export function runsWithin<T>(items: T[], sizeOf: (item: T) => number, budget: n
 /** One synced file per sha, so bytes already on this disk are found without a walk each time. */
 export async function shaIndex(state: StateStore): Promise<Map<string, StateEntry>> {
   const index = new Map<string, StateEntry>()
-  const work = new ScanWork()
+  const work = new ScanWork(scanScheduling(state))
   for await (const entry of state.all()) {
     await work.step()
     if (!index.has(entry.sha)) index.set(entry.sha, entry)
@@ -244,4 +244,4 @@ export async function pool<T>(
   await Promise.all(workers)
   if (failed) throw firstError
 }
-import { ScanWork } from './scanWork.js'
+import { ScanWork, scanScheduling } from './scanWork.js'

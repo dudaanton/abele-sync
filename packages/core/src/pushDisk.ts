@@ -158,7 +158,8 @@ export class PushDisk {
                 ),
               undefined,
               undefined,
-              expected
+              expected,
+              this.opts.signal
             )) &&
             !retainOldCopy
           )

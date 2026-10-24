@@ -1,6 +1,7 @@
 import { EngineError } from './errors.js'
 import { caseKey } from '@abele/sync-protocol'
 import type { Journal, StateEntry, StateStore } from './state.js'
+import { ScanWork, bindScanScheduling, scanScheduling } from './scanWork.js'
 
 export type StateMutation =
   | { kind: 'put'; entry: StateEntry }
@@ -29,7 +30,9 @@ export class StateTransaction implements StateStore {
     private readonly parent: StateStore,
     /** Hosts with unique fileId/wirePath rows supply indexed clash lookup. */
     private readonly clashes?: (entry: StateEntry) => Promise<StateEntry[]>
-  ) {}
+  ) {
+    bindScanScheduling(this, () => scanScheduling(parent))
+  }
   close(): void {
     this.active = false
     this.acknowledgements = []
@@ -73,23 +76,29 @@ export class StateTransaction implements StateStore {
   }
   async *all(): AsyncIterable<StateEntry> {
     this.check()
+    const work = new ScanWork(scanScheduling(this))
     for await (const entry of this.parent.all()) {
+      await work.step()
       this.check()
       if (!this.entries.has(entry.path)) yield entry
     }
     for (const entry of this.entries.values()) {
+      await work.step()
       this.check()
       if (entry !== null) yield { ...entry }
     }
   }
   async *pathCandidates(path: string, pathKey = caseKey): AsyncIterable<StateEntry> {
     this.check()
+    const work = new ScanWork(scanScheduling(this))
     const key = pathKey(path)
     for await (const entry of this.parent.pathCandidates?.(path, pathKey) ?? this.parent.all()) {
+      await work.step()
       this.check()
       if (!this.entries.has(entry.path) && pathKey(entry.path) === key) yield entry
     }
     for (const entry of this.entries.values()) {
+      await work.step()
       this.check()
       if (entry !== null && pathKey(entry.path) === key) yield { ...entry }
     }

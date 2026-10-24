@@ -1,4 +1,4 @@
-import { ScanWork, type ScanScheduling } from './scanWork.js'
+import { ScanWork, scanScheduling, type ScanScheduling } from './scanWork.js'
 import { transact } from './stateTransaction.js'
 import { isFileFailure, type FileRetries } from './fileRetry.js'
 import type { FileInfo, FileSystem } from './fs.js'
@@ -16,7 +16,10 @@ import { checkCancellation } from './cancellation.js'
 import { authoredJournal } from './journalOrigin.js'
 import { scanHintEpoch, readScanHint, writeScanHint } from './scanHints.js'
 
-async function stagedPaths(state: StateStore, work = new ScanWork()): Promise<Set<string>> {
+async function stagedPaths(
+  state: StateStore,
+  work = new ScanWork(scanScheduling(state))
+): Promise<Set<string>> {
   const paths = new Set<string>()
   for (const record of await new StagedChanges(state).list()) {
     await work.step()

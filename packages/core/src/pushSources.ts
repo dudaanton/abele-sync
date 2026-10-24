@@ -6,6 +6,7 @@ import type { StateStore } from './state.js'
 import type { ChunkSource } from './streaming.js'
 import { LocalPaths, resolveLocalFile } from './localPaths.js'
 import { scanHintKey } from './scanHints.js'
+import { ScanWork, scanScheduling } from './scanWork.js'
 
 /**
  * Where an upload finds the bytes it wants on this disk: where the scan found each sha, or, for
@@ -45,6 +46,7 @@ export async function sourcesFromOps(
   state: StateStore,
   ops: CommitOp[]
 ): Promise<Sources> {
+  const work = new ScanWork(scanScheduling(state))
   const moved = new Map<string, string>()
   for (const op of ops) if (op.op === 'move') moved.set(op.file_id, op.to_path)
 
@@ -59,11 +61,14 @@ export async function sourcesFromOps(
     if (at !== undefined) paths.set(op.sha, at)
   }
   for (const [sha, entry] of await shaIndex(state)) {
+    await work.step()
     if (!paths.has(sha)) paths.set(sha, entry.path)
   }
   const inventory = await LocalPaths.read(fs, state)
-  for (const [sha, local] of paths)
+  for (const [sha, local] of paths) {
+    await work.step()
     paths.set(sha, await resolveLocalFile(fs, state, local.normalize('NFC'), local, inventory))
+  }
   return sourcesAt(fs, paths)
 }
 

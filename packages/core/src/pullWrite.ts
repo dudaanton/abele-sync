@@ -185,6 +185,9 @@ export class PendingPullWrites {
   }
   async settled(change: ChangeItem, discard?: (id: string) => Promise<void>): Promise<void> {
     if (await this.refused(change.file_id, [change.path, change.prev_path])) return
+    // Publication already landed. Leave durable cleanup owners for reload
+    // instead of aborting the caller before it acknowledges that placement.
+    if (this.signal?.aborted) return
     for (const cleanup of this.cleanups.get(change.file_id) ?? []) {
       if (
         cleanup.pending.fileId !== change.file_id ||
@@ -230,6 +233,7 @@ export class PendingPullWrites {
 
   /** One acknowledgement batch per pull, never two extra commits per file. */
   async flushCleanup(): Promise<void> {
+    if (this.signal?.aborted) return
     const done = new Map<string, PendingPullWrite>()
     const work = new ScanWork({ signal: this.signal })
     for (const group of this.cleanups.values()) {

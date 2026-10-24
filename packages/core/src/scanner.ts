@@ -396,7 +396,7 @@ export async function scan(
   const inventory = await LocalPaths.read(fs, state, opts)
   checkCancellation(opts.signal)
   if (!opts.readOnly) await inventory.rememberDirectories(state)
-  const collisions: CaseCollision[] = inventory.directoryCollisions()
+  const collisions: CaseCollision[] = await inventory.directoryCollisions(opts)
   const remembered = await rememberedCollisions(state)
   const files = await walkTree(
     fs,

@@ -1,4 +1,4 @@
-import { ScanWork, type ScanScheduling } from './scanWork.js'
+import { ScanWork, scanScheduling, type ScanScheduling } from './scanWork.js'
 import { checkCancellation } from './cancellation.js'
 import type { FileSystem } from './fs.js'
 import { IgnoreRules } from './ignore.js'
@@ -205,7 +205,11 @@ export class ScopeMarks {
     return serially(this.state, async () => {
       const marks = await this.load()
       let changed = false
-      for (const id of fileIds) changed = marks.delete(id) || changed
+      const work = new ScanWork(scanScheduling(this.state))
+      for (const id of fileIds) {
+        await work.step()
+        changed = marks.delete(id) || changed
+      }
       if (changed) await this.save(marks)
     })
   }
@@ -309,7 +313,9 @@ export class AsideMarks {
     return serially(this.state, async () => {
       const marks = await this.load()
       let changed = false
+      const work = new ScanWork(scanScheduling(this.state))
       for (const [path, wire] of paths) {
+        await work.step()
         if (marks.get(path) === wire) continue
         marks.set(path, wire)
         changed = true
@@ -330,13 +336,16 @@ export class AsideMarks {
       if (marks.size === 0) return false
       let walk = false
       let changed = false
+      const work = new ScanWork(scanScheduling(this.state))
       for (const [path, wire] of [...marks]) {
+        await work.step()
         const have = await fs.stat(path)
         if (have !== null && filter.excluded(wire, have.size)) continue
         if (have === null) walk = true
         marks.delete(path)
         changed = true
       }
+      checkCancellation(scanScheduling(this.state).signal)
       if (walk) await this.state.setCursor(0)
       if (changed) await this.save(marks)
       return walk

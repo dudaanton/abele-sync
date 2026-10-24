@@ -42,7 +42,7 @@ export class DeleteGate {
    */
   async judge(ops: CommitOp[], confirmed: ReadonlySet<string>): Promise<CommitOp[]> {
     const entries: StateEntry[] = []
-    const work = new ScanWork()
+    const work = new ScanWork(scanScheduling(this.ctx.state))
     for await (const entry of this.ctx.state.all()) {
       await work.step()
       entries.push(entry)
@@ -134,4 +134,4 @@ export class DeleteGate {
     this.ctx.rewind()
   }
 }
-import { ScanWork } from './scanWork.js'
+import { ScanWork, scanScheduling } from './scanWork.js'

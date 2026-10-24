@@ -389,7 +389,16 @@ export class PullPlacer {
   ): Promise<boolean> {
     try {
       checkCancellation(this.opts.signal)
-      return await captureRemoval(this.fs, this.state, base, authorize)
+      return await captureRemoval(
+        this.fs,
+        this.state,
+        base,
+        authorize,
+        undefined,
+        undefined,
+        base,
+        this.opts.signal
+      )
     } catch (error) {
       if (!this.inTheWay(error)) throw error
       this.opts.log?.(`pull: ${path} cannot be removed: ${(error as Error).message}`)

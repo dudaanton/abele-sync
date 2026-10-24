@@ -29,7 +29,11 @@ export function scanSnapshot(
             })()
             snapshots.set(key, snapshot)
           }
-          yield* await snapshot
+          const work = new ScanWork({ ...opts, signal: signal() })
+          for (const item of await snapshot) {
+            await work.step()
+            yield item
+          }
         }
       return (value as (...args: unknown[]) => unknown).bind(target)
     },

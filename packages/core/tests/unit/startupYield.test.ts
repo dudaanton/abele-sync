@@ -16,7 +16,6 @@ import { reconcileGeneration } from '../../src/restoreGeneration.js'
 import { scanSnapshot } from '../../src/scanSnapshot.js'
 import { V2EngineClient } from '../../src/v2Client.js'
 import { encodeAccessToken } from '@abele/sync-protocol'
-
 const filter = { excluded: () => false }
 const scope = { selective: selectiveDefaults(), scriptsFolder: 'Scripts' }
 it('yields on the time budget even before 256 paths', async () => {

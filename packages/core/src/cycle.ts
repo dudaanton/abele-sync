@@ -271,7 +271,11 @@ export class SyncCycle {
       )
     await fs.recoverConditionalFiles?.()
     await recoverPullEvictions(fs, state, this.ctx.signal?.(), this.retries, client)
-    await recoverRemovals(fs, state, { ...this.ctx.opts.removalRetention, log })
+    await recoverRemovals(fs, state, {
+      ...this.ctx.opts.removalRetention,
+      log,
+      signal: this.ctx.signal?.(),
+    })
     const pendingFiles = new Set(
       ((await state.metadataKeys?.('pull-write:')) ?? []).map((key) =>
         key.slice('pull-write:'.length)
@@ -642,7 +646,11 @@ export class SyncCycle {
       )
         await this.retries.succeeded(row.path, row.phase)
     }
-    await recoverRemovals(fs, state, { ...this.ctx.opts.removalRetention, log })
+    await recoverRemovals(fs, state, {
+      ...this.ctx.opts.removalRetention,
+      log,
+      signal: this.ctx.signal?.(),
+    })
     return {
       pull: before,
       push: pushed,

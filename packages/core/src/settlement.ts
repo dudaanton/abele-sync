@@ -1,6 +1,7 @@
 import type { StateStore } from './state.js'
 import { transact } from './stateTransaction.js'
 import { firstSettlementSequence } from './settlementIndex.js'
+import { settlementReads } from './guard.js'
 
 export interface AppliedFrontier {
   reached: number
@@ -19,6 +20,7 @@ export async function commitAppliedSettlement(
   publish: (tx: StateStore) => Promise<void>
 ): Promise<number> {
   return transact(state, async (tx) => {
+    tx = settlementReads(tx)
     await publish(tx)
     const { reached, firstUnresolved } = await frontier()
     const departure = await firstSettlementSequence(tx)

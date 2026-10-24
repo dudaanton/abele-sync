@@ -1,7 +1,8 @@
 import { hostPathRefusal, assertHostPath, HostPathAdmissionError } from './pathAdmission.js'
-import { ScanWork, parents } from './scanWork.js'
+import { ScanWork, parents, scanScheduling, type ScanScheduling } from './scanWork.js'
 import { replayAuthority } from './replayAuthority.js'
 import { transact } from './stateTransaction.js'
+import { checkCancellation } from './cancellation.js'
 import {
   AbeleError,
   caseKey,
@@ -112,12 +113,14 @@ interface Document {
 
 /** Scheduling refusals may be reset before a run can prepare. Keep the last
  * reason bound to the immutable incoming identity, independently of eligibility. */
-function rememberIncomingReasons(doc: Document) {
+async function rememberIncomingReasons(doc: Document, scheduling: ScanScheduling = {}) {
+  const work = new ScanWork(scheduling)
   const refusals = new Map(
     doc.refused?.filter((row) => row.direction === 'pull').map((row) => [row.path, row])
   )
   const reasons: NonNullable<Document['incomingReasons']> = {}
   for (const item of doc.incoming ?? []) {
+    await work.step()
     const refusal = refusals.get(item.path),
       previous = doc.incomingReasons?.[`i:${item.file_id}`]
     if (refusal)
@@ -133,7 +136,7 @@ function rememberIncomingReasons(doc: Document) {
   else delete doc.incomingReasons
 }
 
-async function parseDocument(raw: string): Promise<Document> {
+async function parseDocument(raw: string, scheduling: ScanScheduling = {}): Promise<Document> {
   const value: unknown = JSON.parse(raw)
   if (
     !value ||
@@ -142,13 +145,47 @@ async function parseDocument(raw: string): Promise<Document> {
     !Array.isArray(value.directories)
   )
     return DocumentSchema.parse(value) as Document
-  // Validate the envelope strictly, then validate every directory in bounded
-  // chunks. Thousands of cold Zod parses must not form one renderer task.
-  const doc = DocumentSchema.parse({ ...value, directories: [] }) as Document
-  const work = new ScanWork()
-  for (const row of value.directories) {
-    doc.directories.push(DocumentSchema.shape.directories.element.parse(row))
-    await work.step()
+  // Preserve the strict envelope while validating every potentially vault-wide
+  // collection with the same cancellation/time budget.
+  const arrays = {
+    directories: DocumentSchema.shape.directories.element,
+    incoming: DocumentSchema.shape.incoming.unwrap().element,
+    tombstones: DocumentSchema.shape.tombstones.unwrap().element,
+    refused: DocumentSchema.shape.refused.unwrap().element,
+    removals: DocumentSchema.shape.removals.element,
+  }
+  const records = {
+    incomingReasons: DocumentSchema.shape.incomingReasons.unwrap().valueType,
+    incomingSeq: DocumentSchema.shape.incomingSeq.unwrap().valueType,
+  }
+  const rawFields = value as Record<string, unknown>,
+    envelope = { ...rawFields }
+  for (const key of Object.keys(arrays)) if (Array.isArray(rawFields[key])) envelope[key] = []
+  for (const key of Object.keys(records))
+    if (rawFields[key] && typeof rawFields[key] === 'object' && !Array.isArray(rawFields[key]))
+      envelope[key] = {}
+  const doc = DocumentSchema.parse(envelope) as Document
+  const parsed = doc as unknown as Record<string, unknown>
+  const work = new ScanWork(scheduling)
+  for (const [key, schema] of Object.entries(arrays)) {
+    const rows = rawFields[key]
+    if (!Array.isArray(rows)) continue
+    const result: unknown[] = []
+    for (const row of rows) {
+      await work.step()
+      result.push(schema.parse(row))
+    }
+    parsed[key] = result
+  }
+  for (const [key, schema] of Object.entries(records)) {
+    const rows = rawFields[key]
+    if (!rows || typeof rows !== 'object' || Array.isArray(rows)) continue
+    const result: Record<string, unknown> = Object.create(null)
+    for (const [id, row] of Object.entries(rows)) {
+      await work.step()
+      result[id] = schema.parse(row)
+    }
+    parsed[key] = result
   }
   return doc
 }
@@ -173,7 +210,8 @@ async function directoryRefusals(state: StateStore) {
   const raw = (await state.getMeta?.(KEY)) ?? null
   let cached = placementRefusals.get(state)
   if (!cached || cached.raw !== raw) {
-    const rows = raw === null ? [] : ((await parseDocument(raw)).refused ?? [])
+    const rows =
+      raw === null ? [] : ((await parseDocument(raw, scanScheduling(state))).refused ?? [])
     cached = { raw, paths: new Map(rows.map((row) => [row.path, row])) }
     placementRefusals.set(state, cached)
   }
@@ -210,7 +248,7 @@ export async function storedDirectoryRefusal(
 export async function heldDirectoryPaths(state: StateStore): Promise<Set<string>> {
   const raw = await state.getMeta?.(KEY)
   if (raw == null) return new Set()
-  const doc = await parseDocument(raw)
+  const doc = await parseDocument(raw, scanScheduling(state))
   return new Set(doc.refused?.filter((row) => row.evidence).map((row) => row.path))
 }
 
@@ -219,7 +257,7 @@ export async function waitingDirectories(
 ): Promise<import('./fileRetry.js').WaitingFile[]> {
   const raw = await state.getMeta?.(KEY)
   if (raw == null) return []
-  const doc = await parseDocument(raw)
+  const doc = await parseDocument(raw, scanScheduling(state))
   const refusals = new Map(
     doc.refused?.filter((row) => row.direction === 'pull').map((row) => [row.path, row])
   )
@@ -277,29 +315,37 @@ export class V2Directories {
   ) {}
   private async read(): Promise<Document> {
     const raw = await this.state.getMeta!(KEY)
-    const doc = raw === null ? { directories: [], removals: [] } : await parseDocument(raw)
+    const doc =
+      raw === null
+        ? { directories: [], removals: [] }
+        : await parseDocument(raw, { ...scanScheduling(this.state), signal: this.signal })
     if (doc.tombstones?.length) {
       const cursor = await this.state.getCursor()
       doc.tombstones = doc.tombstones.filter((row) => row.seq > cursor)
       if (!doc.tombstones.length) delete doc.tombstones
     }
-    this.indexRefusals(doc.refused ?? [])
+    await this.indexRefusals(doc.refused ?? [])
     return doc
   }
-  private save(doc: Document, state: StateStore = this.state) {
-    rememberIncomingReasons(doc)
+  private async save(doc: Document, state: StateStore = this.state) {
+    const work = new ScanWork({ ...scanScheduling(this.state), signal: this.signal })
+    await rememberIncomingReasons(doc, { ...scanScheduling(this.state), signal: this.signal })
     if (doc.incomingSeq) {
       const ids = new Set(doc.incoming?.map((item) => item.file_id))
-      for (const id of Object.keys(doc.incomingSeq)) if (!ids.has(id)) delete doc.incomingSeq[id]
+      for (const id of Object.keys(doc.incomingSeq)) {
+        await work.step()
+        if (!ids.has(id)) delete doc.incomingSeq[id]
+      }
     }
     doc.schemaVersion = 2
-    this.indexRefusals(doc.refused ?? [])
+    await this.indexRefusals(doc.refused ?? [])
+    checkCancellation(this.signal)
     return state.setMeta!(KEY, JSON.stringify(doc))
   }
   async loadRefusals(retry = false, paths?: readonly string[]): Promise<void> {
     const doc = await this.read()
     if (retry && doc.refused?.length) {
-      rememberIncomingReasons(doc)
+      await rememberIncomingReasons(doc, { ...scanScheduling(this.state), signal: this.signal })
       doc.refused = doc.refused.filter(
         (item) => item.evidence || (paths !== undefined && !paths.includes(item.path))
       )
@@ -317,10 +363,14 @@ export class V2Directories {
       path = path.slice(0, slash)
     }
   }
-  private indexRefusals(items: DirectoryRefusal[]) {
+  private async indexRefusals(items: DirectoryRefusal[]) {
+    const work = new ScanWork({ ...scanScheduling(this.state), signal: this.signal })
     this.refused = items
     this.refusedPaths.clear()
-    for (const item of items) this.refusedPaths.set(item.path, item)
+    for (const item of items) {
+      await work.step()
+      this.refusedPaths.set(item.path, item)
+    }
   }
   refusals(): readonly DirectoryRefusal[] {
     return this.refused
@@ -344,7 +394,7 @@ export class V2Directories {
     const previousIncoming = doc.incoming?.find((directory) => directory.file_id === item.file_id)
     if (previousIncoming && previousIncoming.path !== item.path) {
       doc.refused = doc.refused?.filter((entry) => entry.path !== previousIncoming.path)
-      this.indexRefusals(doc.refused ?? [])
+      await this.indexRefusals(doc.refused ?? [])
     }
     const previousRefusal = this.refusalFor(item.path)
     if (
@@ -466,11 +516,13 @@ export class V2Directories {
   async finishPull() {
     if (!this.fs.removeDirectory) return
     const doc = await this.read()
+    const work = new ScanWork({ ...scanScheduling(this.state), signal: this.signal })
     const localPath = (removal: Document['removals'][number]) =>
       typeof removal === 'string' ? removal : removal.localPath
     for (const removal of [...doc.removals].sort(
       (a, b) => localPath(b).length - localPath(a).length
     )) {
+      await work.step()
       this.signal?.throwIfAborted()
       const path = localPath(removal)
       if (
@@ -494,6 +546,7 @@ export class V2Directories {
       if (identity !== undefined && identity !== removal.identity) continue
       if (inventory.resolve(removal.path, 'directory') !== path && identity !== undefined) continue
       try {
+        checkCancellation(this.signal)
         await this.fs.removeDirectory(path, removal.identity)
       } catch (error) {
         // Empty-only cleanup is best effort when unsent/local-only children remain.
@@ -508,8 +561,12 @@ export class V2Directories {
     if (!this.fs.listDirectories) return
     let doc = await this.read()
     if (await this.retireRecreatedDelete(doc)) return
+    const work = new ScanWork({ ...scanScheduling(this.state), signal: this.signal })
     if (doc.incoming?.length) {
-      for (const item of doc.incoming) if (item.kind === 'directory') await this.receive(item)
+      for (const item of doc.incoming) {
+        await work.step()
+        if (item.kind === 'directory') await this.receive(item)
+      }
       doc = await this.read()
     }
     const beforeReplay = await LocalPaths.read(this.fs, this.state)
@@ -648,7 +705,6 @@ export class V2Directories {
       !(pending.op.op === 'mkdir' && this.refusalFor(pending.op.path))
     )
       return
-    const work = new ScanWork()
     const local: Array<{ path: string; identity: string; mtime: number }> = []
     const inventory = beforeReplay
     for await (const dir of this.fs.listDirectories()) {
@@ -689,6 +745,7 @@ export class V2Directories {
     const previousEvidence = (doc.refused ?? []).filter((row) => row.evidence)
     const evidenceBySource = new Map<string, DirectoryRefusal[]>()
     for (const row of previousEvidence) {
+      await work.step()
       const source = row.source ?? row.path
       const rows = evidenceBySource.get(source) ?? []
       rows.push(row)
@@ -839,11 +896,11 @@ export class V2Directories {
       const retained: DirectoryRefusal[] | undefined = doc.refused
       if (moved) {
         doc.refused = doc.refused?.filter((row) => !row.evidence || row.source !== old.path)
-        this.indexRefusals(doc.refused ?? [])
+        await this.indexRefusals(doc.refused ?? [])
       }
       if (blockedTree(old.path) || (moved && blockedTree(moved.path))) {
         doc.refused = retained
-        this.indexRefusals(doc.refused ?? [])
+        await this.indexRefusals(doc.refused ?? [])
         continue
       }
       if (moved && wirePath(moved.path) === old.path) {
@@ -881,17 +938,18 @@ export class V2Directories {
       if (!(await record(doc.pending))) return
       // Descendant versions are supplied by the following feed; don't send stale bases.
       if (moved) {
-        for (const child of doc.directories)
+        for (const child of doc.directories) {
+          await work.step()
           if (child.path.startsWith(old.path + '/'))
             child.path = wirePath(moved.path) + child.path.slice(old.path.length)
+        }
       } else doc.directories = doc.directories.filter((d) => !d.path.startsWith(old.path + '/'))
       await this.save(doc)
     }
     const published = new Set(doc.directories.map((dir) => dir.path))
     for (const dir of local.sort((a, b) => a.path.length - b.path.length)) {
-      this.signal?.throwIfAborted()
-      if (this.refusalFor(dir.path)) continue
       await work.step()
+      if (this.refusalFor(dir.path)) continue
       const path = wirePath(dir.path)
       if (published.has(path)) continue
       doc.pending = {
@@ -944,6 +1002,7 @@ export class V2Directories {
       (item) => !within(typeof item === 'string' ? item : item.path)
     )
     await transact(this.state, async (tx) => {
+      checkCancellation(this.signal)
       await tx.setMeta!(
         'v2-directory-review',
         JSON.stringify([
@@ -955,9 +1014,15 @@ export class V2Directories {
           },
         ])
       )
-      for (const entry of entries) await tx.delete(entry.path)
+      for (const entry of entries) {
+        await work.step()
+        await tx.delete(entry.path)
+      }
+      checkCancellation(this.signal)
       await tx.setCursor(0)
+      checkCancellation(this.signal)
       await tx.setMeta!('pull-manifest-progress', null)
+      checkCancellation(this.signal)
       await tx.setMeta!('pull-manifest-page', null)
       await this.save(doc, tx)
     })

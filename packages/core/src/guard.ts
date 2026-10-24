@@ -5,6 +5,92 @@ import type { StateStore } from './state.js'
 import type { ChunkSource } from './streaming.js'
 import { checkCancellation } from './cancellation.js'
 import { pathAdmission } from './pathAdmission.js'
+import { ScanWork, bindScanScheduling, type ScanScheduling } from './scanWork.js'
+
+const settlementView = Symbol('settlement-read-view')
+/** An issued filesystem effect still needs its exact ledger acknowledgement.
+ * Only its transaction's reads ignore cancellation; all write ports keep their
+ * original capability and public filesystem/request fences remain unchanged. */
+export function settlementReads(state: StateStore): StateStore {
+  const source = (state as StateStore & { [settlementView]?: () => StateStore })[settlementView]?.()
+  if (!source) return state
+  const proxy = new Proxy(state, {
+    get(target, key) {
+      const owner = key === 'all' || key === 'pathCandidates' ? source : target
+      const value = Reflect.get(owner, key)
+      return typeof value === 'function' ? value.bind(owner) : value
+    },
+  })
+  targets.set(proxy, state)
+  return proxy
+}
+
+/** Carry the cycle's scheduling through raw host and nested transaction
+ * iterators. This does not fence settlement writes for already-issued effects. */
+export function scheduledState(state: StateStore, scheduling: () => ScanScheduling): StateStore {
+  const proxies = new WeakMap<StateStore, StateStore>()
+  const wrap = (target: StateStore): StateStore => {
+    const known = proxies.get(target)
+    if (known) return known
+    const proxy = new Proxy(target, {
+      get(obj, key) {
+        if (key === settlementView)
+          return () => {
+            const options = () => ({ yieldTask: scheduling().yieldTask })
+            if (target !== state) bindScanScheduling(target, options)
+            return scheduledState(target, options)
+          }
+        const value = Reflect.get(obj, key)
+        if (typeof value !== 'function') return value
+        if (key === 'all' || key === 'pathCandidates')
+          return (...args: unknown[]) => {
+            const options = scheduling()
+            checkCancellation(options.signal)
+            const work = new ScanWork(options)
+            const iterator = value.apply(obj, args)[Symbol.asyncIterator]()
+            const failed = (error: unknown) =>
+              Promise.resolve(iterator.return?.()).then(() => {
+                throw error
+              })
+            return {
+              [Symbol.asyncIterator]() {
+                return this
+              },
+              next() {
+                try {
+                  checkCancellation(options.signal)
+                  return iterator.next().then((result: IteratorResult<unknown>) => {
+                    try {
+                      checkCancellation(options.signal)
+                      const pause = result.done ? undefined : work.step()
+                      return pause ? pause.then(() => result, failed) : result
+                    } catch (error) {
+                      return failed(error)
+                    }
+                  }, failed)
+                } catch (error) {
+                  return failed(error)
+                }
+              },
+              return(value?: unknown) {
+                return iterator.return?.(value) ?? Promise.resolve({ done: true, value })
+              },
+            }
+          }
+        if (key === 'transaction')
+          return (work: (tx: StateStore) => Promise<unknown>) =>
+            value.call(obj, (tx?: StateStore) => work(tx === undefined ? tx! : wrap(tx)))
+        return value.bind(obj)
+      },
+    })
+    proxies.set(target, proxy)
+    targets.set(proxy, target)
+    bindScanScheduling(proxy, scheduling)
+    if (target !== state) bindScanScheduling(target, scheduling)
+    return proxy
+  }
+  return wrap(state)
+}
 
 /** Check at the port boundary, after any awaited inspection or intent save.
  * An operation already entered may finish; its ledger writes must still settle.

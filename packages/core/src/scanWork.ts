@@ -6,6 +6,14 @@ export interface ScanScheduling {
   signal?: AbortSignal
 }
 
+const scheduling = new WeakMap<object, () => ScanScheduling>()
+export function bindScanScheduling(target: object, options: () => ScanScheduling): void {
+  scheduling.set(target, options)
+}
+export function scanScheduling(target: object): ScanScheduling {
+  return scheduling.get(target)?.() ?? {}
+}
+
 /** Message tasks avoid the browser's nested-timer clamp. Close both ports after
  * delivery: an idle SDK must not keep a renderer/Node process alive. */
 function hostTask(): Promise<void> {
@@ -26,9 +34,12 @@ export class ScanWork {
   private count = 0
   private started = performance.now()
   constructor(private readonly opts: ScanScheduling = {}) {}
-  async step() {
+  step(): Promise<void> | undefined {
     checkCancellation(this.opts.signal)
     if (++this.count < 256 && performance.now() - this.started < 8) return
+    return this.yield()
+  }
+  private async yield() {
     await (this.opts.yieldTask?.() ?? hostTask())
     checkCancellation(this.opts.signal)
     this.count = 0
