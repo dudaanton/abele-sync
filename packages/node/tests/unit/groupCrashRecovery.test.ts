@@ -691,6 +691,9 @@ for (const [caseOnly, fold] of [
       })
     })
 
+// This checks total allocation over the full nested trace, not disk throughput.
+// The trace took 21s on Linux and exceeded 60s on a loaded Studio. Keep every
+// recovery cut and the 16 MiB assertion, with margin for host I/O scheduling.
 it('publication recovery bounds scratch buffers for an eight-byte victim', async ({ signal }) => {
   recoveryImages.clear() // Exercise the nested trace even when the matrix ran first.
   let allocated = 0
@@ -707,4 +710,4 @@ it('publication recovery bounds scratch buffers for an eight-byte victim', async
   } finally {
     spy.mockRestore()
   }
-}, 60000)
+}, 180000)
