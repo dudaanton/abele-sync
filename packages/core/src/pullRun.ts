@@ -43,6 +43,7 @@ import type { StateEntry, StateStore } from './state.js'
 import { checkCancellation } from './cancellation.js'
 import { MAX_CHUNK_BYTES } from './streaming.js'
 import { GENERATION_KEY } from './restoreGeneration.js'
+import { expiredManifestCursor } from './continuation.js'
 
 import { PullHolds, importLegacyPullHolds } from './pullHolds.js'
 interface TakeAttempt {
@@ -450,7 +451,7 @@ export class Puller {
           return
         }
       }
-      do {
+      for (;;) {
         checkCancellation(this.opts.signal)
         const page: ManifestResponse & { membershipPaths?: string[] } =
           progress?.page ?? (await this.client.manifest(cursor, MANIFEST_PAGE))
@@ -516,7 +517,29 @@ export class Puller {
         cursor = page.next
         if (cursor !== null) {
           checkCancellation(this.opts.signal)
-          const next = await this.client.manifest(cursor, MANIFEST_PAGE)
+          let next: ManifestResponse
+          try {
+            next = await this.client.manifest(cursor, MANIFEST_PAGE)
+          } catch (error) {
+            if (!expiredManifestCursor(error)) throw error
+            checkCancellation(this.opts.signal)
+            // Retain the earliest feed boundary, including across a crash in
+            // this restart. Completed files keep their exact durable ledgers.
+            this.heldHead = Math.min(this.heldHead ?? Infinity, head ?? 0)
+            await this.commit(async (tx) => {
+              await tx.setMeta?.(MANIFEST_PROGRESS, null)
+              await tx.setMeta?.(MANIFEST_PAGE_DATA, null)
+            })
+            cursor = null
+            head = null
+            progress = null
+            ahead = null
+            this.bootstrapContext = null
+            this.feedCache = null
+            this.latestSnapshot = false
+            this.seen.clear()
+            continue
+          }
           progress = {
             page: next,
             generation,
@@ -532,8 +555,8 @@ export class Puller {
             await tx.setMeta?.(MANIFEST_PAGE_DATA, progressPage(progress!, next))
             await tx.setMeta?.(MANIFEST_PROGRESS, progressHeader(progress!))
           })
-        }
-      } while (cursor !== null)
+        } else break
+      }
     } finally {
       this.walking = false
     }

@@ -1,3 +1,4 @@
+import { expiredManifestCursor } from './continuation.js'
 import { captureRemoval, commitRemoval, recoverRemovals } from './removalRetention.js'
 import {
   AbeleError,
@@ -739,10 +740,19 @@ export class V2EngineClient implements EngineClient {
     let file = this.byteSources.get(sha)
     if (!file) {
       let cursor: string | null = null
-      do {
-        const page = await this.manifest(cursor, undefined, signal)
+      for (;;) {
+        let page
+        try {
+          page = await this.manifest(cursor, undefined, signal)
+        } catch (error) {
+          if (cursor === null || !expiredManifestCursor(error)) throw error
+          signal?.throwIfAborted()
+          cursor = null
+          continue
+        }
         cursor = page.next
-      } while (cursor)
+        if (cursor === null) break
+      }
       file = this.byteSources.get(sha)
     }
     if (!file) throw new AbeleError('not_found', 'no authorized file version for these bytes')
@@ -777,26 +787,46 @@ export class V2EngineClient implements EngineClient {
       await this.http.send('PUT', path, { bytes, signal })
       return
     }
-    const upload = await this.http.json(UploadBeginResponseSchema, 'POST', path + '/begin', {
-      json: { size: bytes.length },
-      signal,
-    })
-    const parts = Math.ceil(bytes.length / upload.part_size)
-    if (parts !== upload.parts) throw new EngineError('protocol', 'invalid multipart layout')
-    const base = `${path}/${encodeURIComponent(upload.upload_id)}`
-    for (let part = 0; part < parts; part++) {
+    await this.multipart(sha, signal, async () => {
+      const upload = await this.http.json(UploadBeginResponseSchema, 'POST', path + '/begin', {
+        json: { size: bytes.length },
+        signal,
+      })
+      const parts = Math.ceil(bytes.length / upload.part_size)
+      if (parts !== upload.parts) throw new EngineError('protocol', 'invalid multipart layout')
+      const base = `${path}/${encodeURIComponent(upload.upload_id)}`
+      for (let part = 0; part < parts; part++) {
+        signal?.throwIfAborted()
+        if (!(upload.received ?? []).includes(part))
+          await this.http.send('PUT', `${base}/${part}`, {
+            signal,
+            bytes: bytes.subarray(
+              part * upload.part_size,
+              Math.min((part + 1) * upload.part_size, bytes.length)
+            ),
+          })
+      }
       signal?.throwIfAborted()
-      if (!(upload.received ?? []).includes(part))
-        await this.http.send('PUT', `${base}/${part}`, {
-          signal,
-          bytes: bytes.subarray(
-            part * upload.part_size,
-            Math.min((part + 1) * upload.part_size, bytes.length)
-          ),
-        })
+      await this.http.send('POST', base + '/complete', { signal })
+    })
+  }
+  /** A swept session is a normal restart, never a reason to resend a completed blob. */
+  private async multipart(
+    sha: string,
+    signal: AbortSignal | undefined,
+    run: () => Promise<void>
+  ): Promise<void> {
+    for (let retry = 0; ; retry++) {
+      signal?.throwIfAborted()
+      try {
+        await run()
+        return
+      } catch (error) {
+        signal?.throwIfAborted()
+        if (!(error instanceof AbeleError && error.code === 'not_found') || retry >= 2) throw error
+        if (await this.hasBlob(sha, signal)) return
+      }
     }
-    signal?.throwIfAborted()
-    await this.http.send('POST', base + '/complete', { signal })
   }
   /** Owns source until both passes and the server acknowledgement finish. */
   async putBlobSource(
@@ -846,64 +876,67 @@ export class V2EngineClient implements EngineClient {
         await source.assertUnchanged()
         return
       }
-      const upload = await this.http.json(UploadBeginResponseSchema, 'POST', path + '/begin', {
-        json: { size: expected.size, max_part_bytes: maxChunkBytes },
-        ...(signal === undefined ? {} : { signal }),
-      })
-      const parts = Math.ceil(source.size / upload.part_size)
-      if (
-        upload.part_size > maxChunkBytes ||
-        parts !== upload.parts ||
-        (upload.received ?? []).some((part) => part < 0 || part >= parts)
-      )
-        throw new EngineError('protocol', 'invalid bounded multipart layout')
-      const second = incrementalSha256.create()
-      const base = `${path}/${encodeURIComponent(upload.upload_id)}`
-      const received = new Set(upload.received ?? [])
-      for (let part = 0; part < parts; part++) {
-        const offset = part * upload.part_size
-        const bytes = await read(offset, Math.min(upload.part_size, source.size - offset))
-        second.update(bytes)
-        if (!received.has(part)) {
-          for (let attempt = 0; ; attempt++) {
-            try {
-              await this.http.sendChunk('PUT', `${base}/${part}`, bytes, signal)
-              break
-            } catch (error) {
-              signal?.throwIfAborted()
-              if (!(error instanceof EngineError && error.code === 'offline') || attempt >= 2)
-                throw error
-              if (await this.hasBlob(expected.sha, signal)) {
-                await source.assertUnchanged()
-                return
-              }
-              const resumed = await this.http.json(
-                UploadBeginResponseSchema,
-                'POST',
-                path + '/begin',
-                {
-                  json: { size: expected.size, max_part_bytes: maxChunkBytes },
-                  signal,
+      await this.multipart(expected.sha, signal, async () => {
+        const upload = await this.http.json(UploadBeginResponseSchema, 'POST', path + '/begin', {
+          json: { size: expected.size, max_part_bytes: maxChunkBytes },
+          ...(signal === undefined ? {} : { signal }),
+        })
+        const parts = Math.ceil(source.size / upload.part_size)
+        if (
+          upload.part_size > maxChunkBytes ||
+          parts !== upload.parts ||
+          (upload.received ?? []).some((part) => part < 0 || part >= parts)
+        )
+          throw new EngineError('protocol', 'invalid bounded multipart layout')
+        const second = incrementalSha256.create()
+        const base = `${path}/${encodeURIComponent(upload.upload_id)}`
+        const received = new Set(upload.received ?? [])
+        for (let part = 0; part < parts; part++) {
+          const offset = part * upload.part_size
+          const bytes = await read(offset, Math.min(upload.part_size, source.size - offset))
+          second.update(bytes)
+          if (!received.has(part)) {
+            for (let attempt = 0; ; attempt++) {
+              try {
+                await this.http.sendChunk('PUT', `${base}/${part}`, bytes, signal)
+                break
+              } catch (error) {
+                signal?.throwIfAborted()
+                if (!(error instanceof EngineError && error.code === 'offline') || attempt >= 2)
+                  throw error
+                if (await this.hasBlob(expected.sha, signal)) {
+                  await source.assertUnchanged()
+                  return
                 }
-              )
-              if (
-                resumed.upload_id !== upload.upload_id ||
-                resumed.part_size !== upload.part_size ||
-                resumed.parts !== parts ||
-                (resumed.received ?? []).some((part) => part < 0 || part >= parts)
-              )
-                throw new EngineError('protocol', 'upload changed during part recovery')
-              for (const accepted of resumed.received ?? []) received.add(accepted)
-              if (received.has(part)) break
+                const resumed = await this.http.json(
+                  UploadBeginResponseSchema,
+                  'POST',
+                  path + '/begin',
+                  {
+                    json: { size: expected.size, max_part_bytes: maxChunkBytes },
+                    signal,
+                  }
+                )
+                if (resumed.upload_id !== upload.upload_id)
+                  throw new AbeleError('not_found', 'upload session was replaced')
+                if (
+                  resumed.part_size !== upload.part_size ||
+                  resumed.parts !== parts ||
+                  (resumed.received ?? []).some((part) => part < 0 || part >= parts)
+                )
+                  throw new EngineError('protocol', 'upload changed during part recovery')
+                for (const accepted of resumed.received ?? []) received.add(accepted)
+                if (received.has(part)) break
+              }
             }
           }
         }
-      }
-      if (digest(second) !== expected.sha)
-        throw new AbeleError('hash_mismatch', 'source changed during upload')
-      await source.assertUnchanged()
-      signal?.throwIfAborted()
-      await this.http.send('POST', base + '/complete', signal === undefined ? {} : { signal })
+        if (digest(second) !== expected.sha)
+          throw new AbeleError('hash_mismatch', 'source changed during upload')
+        await source.assertUnchanged()
+        signal?.throwIfAborted()
+        await this.http.send('POST', base + '/complete', signal === undefined ? {} : { signal })
+      })
     } finally {
       await source.close()
     }
