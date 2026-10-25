@@ -641,12 +641,12 @@ for (const [caseOnly, fold] of [
   for (const mode of ['write', 'remove', 'move'] as const)
     describe(`group ${mode} (${fold ? 'folding case-only' : 'native'}) converges after every lifecycle await and every nested recovery await`, () => {
       let count = 0
-      const recoveryPartitions = mode === 'write' ? 8 : 1
+      const recoveryPartitions = mode === 'move' ? 1 : 8
       const covered = Array.from({ length: recoveryPartitions }, () => new Set<number>())
-      // Completed retained-write recovery traces are deeper than removal/move
-      // traces. Split their work further, retaining every cut and the original
-      // wall-clock timeout. A single folding write cut can itself exceed that
-      // budget, so partition its nested replay too. Every lifecycle cut runs in
+      // Completed retained-write traces need finer lifecycle partitions. Both
+      // write and removal nested traces can exceed one test's wall-clock budget
+      // on a busy filesystem, so partition their nested replay too, retaining
+      // every cut and the original timeout. Every lifecycle cut runs in
       // every recovery partition; their disjoint ranges cover the entire trace.
       const partitions = mode === 'write' ? 512 : 64
       const maxCuts = mode === 'write' ? 2 : 8
