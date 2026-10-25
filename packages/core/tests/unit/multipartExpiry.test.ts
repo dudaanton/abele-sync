@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { encodeAccessToken } from '@abele/sync-protocol'
+import { AbeleError, encodeAccessToken } from '@abele/sync-protocol'
 import { V2EngineClient } from '../../src/v2Client.js'
 import { sha256 } from '../../src/hash.js'
 
@@ -69,3 +69,54 @@ it.each(['buffered-part', 'buffered-complete', 'stream-part', 'stream-complete']
     expect(closed).toBe(mode.startsWith('buffered') ? 0 : 1)
   }
 )
+
+it('validates a changed source before accepting a recovery HEAD shortcut', async () => {
+  const bytes = new Uint8Array([1, 2, 3, 4]),
+    sha = await sha256(bytes)
+  let changed = false,
+    closed = 0,
+    heads = 0,
+    checks = 0
+  const client = new V2EngineClient(
+    encodeAccessToken({
+      v: 1,
+      address: 'https://synthetic.test',
+      key: 'k'.repeat(43),
+      scope: { kind: 'folder', id: 'root', path: '/' },
+    }),
+    {
+      simpleUploadBytes: 0,
+      fetch: async (_url, init) => {
+        if (init?.method === 'HEAD')
+          return new Response(null, { status: ++heads === 1 ? 404 : 200 })
+        if (init?.method === 'PUT') {
+          changed = true
+          return Response.json(
+            { error: { code: 'not_found', message: 'session expired' } },
+            { status: 404 }
+          )
+        }
+        return Response.json({ upload_id: 'expired', part_size: 2, parts: 2, received: [] })
+      },
+    }
+  )
+  await expect(
+    client.putBlobSource(
+      { sha, size: bytes.length },
+      {
+        size: bytes.length,
+        read: async (at, length) => bytes.slice(at, at + length),
+        assertUnchanged: async () => {
+          checks++
+          if (changed) throw new AbeleError('hash_mismatch', 'source changed')
+        },
+        close: async () => {
+          closed++
+        },
+      }
+    )
+  ).rejects.toMatchObject({ code: 'hash_mismatch' })
+  expect(heads).toBe(2)
+  expect(checks).toBe(2)
+  expect(closed).toBe(1)
+})

@@ -937,6 +937,9 @@ export class V2EngineClient implements EngineClient {
         signal?.throwIfAborted()
         await this.http.send('POST', base + '/complete', signal === undefined ? {} : { signal })
       })
+      // A recovered session can finish via HEAD before the second pass ends.
+      // The source must still match the identity verified before admission.
+      await source.assertUnchanged()
     } finally {
       await source.close()
     }
