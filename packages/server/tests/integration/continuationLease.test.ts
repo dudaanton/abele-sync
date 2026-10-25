@@ -1,6 +1,7 @@
-import { expect, it, describe } from 'vitest'
+import { expect, it, describe, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import { createUser } from '../../src/access/tokens.js'
+import { manifestWithToken } from '../../src/access/reads.js'
 import { createUploadManager } from '../../src/blobs/uploads.js'
 import { v2Server } from '../helpers/v2Server.js'
 import { V2SyncClient } from '../helpers/v2SyncClient.js'
@@ -28,6 +29,66 @@ for (const dialect of ['sqlite', 'pg'] as const)
         },
       }
     }
+    it('bounds hot-path renewal writes across repeated pages and upload lookups', async () => {
+      const f = await fixture()
+      try {
+        await f.client.create('a.bin', 'a')
+        await f.client.create('b.bin', 'b')
+        const first = await f.client.manifest('?limit=1')
+        const sha = createHash('sha256').update('parts').digest('hex')
+        const manager = createUploadManager({ ...f.t, now: f.now })
+        const upload = await manager.begin(sha, 5)
+        const snapshotId = JSON.parse(Buffer.from(first.next!, 'base64url').toString()).id as string
+        const expiry = async () =>
+          (
+            await f.t.db
+              .selectFrom('scope_snapshots')
+              .select('expires_at')
+              .where('id', '=', snapshotId)
+              .executeTakeFirstOrThrow()
+          ).expires_at
+        const initialExpiry = await expiry()
+        let snapshotWrites = 0
+        const observedDb = f.t.db.withPlugin({
+          transformQuery({ node }) {
+            if (node.kind === 'UpdateQueryNode') snapshotWrites++
+            return node
+          },
+          async transformResult({ result }) {
+            return result
+          },
+        })
+        const updates = vi.spyOn(f.t.db, 'updateTable')
+        const probe = async () => {
+          for (let n = 0; n < 20; n++) {
+            await manifestWithToken(
+              { db: observedDb, pepper: f.t.config.tokenPepper, dialect, now: f.now },
+              f.client.key,
+              1,
+              first.next!
+            )
+            await manager.describe(upload.upload_id)
+          }
+        }
+        const renewals = () =>
+          updates.mock.calls.filter(([table]) => table === 'uploads' || table === 'scope_snapshots')
+        await probe()
+        expect(renewals()).toHaveLength(0)
+        expect(snapshotWrites).toBe(0)
+        expect(await expiry()).toBe(initialExpiry)
+        f.advance(31 * 60000)
+        await probe()
+        expect(renewals()).toHaveLength(0)
+        expect(snapshotWrites).toBe(1)
+        expect(Date.parse(await expiry()) - Date.parse(initialExpiry)).toBe(31 * 60000)
+        f.advance(12 * HOUR)
+        for (let n = 0; n < 20; n++) await manager.describe(upload.upload_id)
+        expect(renewals()).toHaveLength(1)
+        updates.mockRestore()
+      } finally {
+        await f.t.close()
+      }
+    })
     it('renews active snapshots while abandoned snapshots expire, preserving frozen membership', async () => {
       const f = await fixture()
       try {

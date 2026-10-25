@@ -121,11 +121,15 @@ export async function manifestWithToken(
       Date.parse(created) + SNAPSHOT_MAX_MS
     )
     if (expires <= Date.parse(now)) throw invalidPage()
-    await deps.db
-      .updateTable('scope_snapshots')
-      .set({ created_at: created, expires_at: new Date(expires).toISOString() })
-      .where('id', '=', snapshotId)
-      .execute()
+    if (
+      Date.parse(snapshot.expires_at) - Date.parse(now) <= SNAPSHOT_IDLE_MS / 2 &&
+      expires > Date.parse(snapshot.expires_at)
+    )
+      await deps.db
+        .updateTable('scope_snapshots')
+        .set({ created_at: created, expires_at: new Date(expires).toISOString() })
+        .where('id', '=', snapshotId)
+        .execute()
     const rows = await deps.db
       .selectFrom('scope_snapshot_items')
       .select(['file_id', 'item'])

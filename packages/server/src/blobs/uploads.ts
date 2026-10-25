@@ -99,7 +99,7 @@ export class UploadManager {
           throw new AbeleError('too_large', 'file exceeds the space limit')
         const earlier = await trx
           .selectFrom('uploads')
-          .select(['id', 'size', 'part_size'])
+          .select(['id', 'size', 'part_size', 'created_at', 'last_active_at'])
           .where('vault_id', '=', owner.vaultId)
           .where('device_id', '=', owner.deviceId)
           .where('sha', '=', sha)
@@ -111,11 +111,12 @@ export class UploadManager {
         if (same !== undefined && same.part_size !== partBytes)
           throw new AbeleError('conflict', 'cannot resume an upload with a different part layout')
         if (same !== undefined) {
-          await trx
-            .updateTable('uploads')
-            .set({ last_active_at: this.now().toISOString() })
-            .where('id', '=', same.id)
-            .execute()
+          if (this.needsRenewal(same))
+            await trx
+              .updateTable('uploads')
+              .set({ last_active_at: this.now().toISOString() })
+              .where('id', '=', same.id)
+              .execute()
           return { same, replaced: [] as string[] }
         }
         const ids = earlier.map((upload) => upload.id)
@@ -425,12 +426,21 @@ export class UploadManager {
     ) {
       throw new AbeleError('not_found', `no upload ${uploadId}`)
     }
-    await this.db
-      .updateTable('uploads')
-      .set({ last_active_at: this.now().toISOString() })
-      .where('id', '=', uploadId)
-      .execute()
+    if (this.needsRenewal(upload))
+      await this.db
+        .updateTable('uploads')
+        .set({ last_active_at: this.now().toISOString() })
+        .where('id', '=', uploadId)
+        .execute()
     return upload
+  }
+
+  // Retention is 24 hours. Reuse the row already read instead of issuing an UPDATE
+  // (even a conditional one) on every describe, part or completion request.
+  private needsRenewal(upload: { created_at: string; last_active_at: string | null }): boolean {
+    return (
+      this.now().getTime() - Date.parse(upload.last_active_at ?? upload.created_at) >= 12 * 3600000
+    )
   }
 }
 

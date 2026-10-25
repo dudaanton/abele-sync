@@ -392,8 +392,10 @@ updates its descendants atomically. Deleting a folder selector permits draining
 its genuine final deletes, then leaves the connection unavailable; a replacement
 at the same path cannot revive that identity.
 
-Snapshots are durable and bound to the effective scope. Each page renews a
-one-hour inactivity lease, up to seven days after snapshot creation. Their cursor
+Snapshots are durable and bound to the effective scope. Pages renew a
+one-hour lease when at most half its lifetime remains, up to seven days after
+snapshot creation. Renewal is lazy: a client should resume within 30 minutes
+of its last page to guarantee continuity. Their cursor
 is fixed across pages, including across restart. If a continuation expires, clients
 restart the inventory from a fresh snapshot, retain installed content and replay
 the feed from the earliest unfinished snapshot cursor. A pull stops restarting if
@@ -417,7 +419,9 @@ conflict outputs. Credential and inherited-boundary checks precede receipt repla
 | `GET/HEAD /v2/files/:id/content?version_id=<id>` | Current content by default; range/HEAD supported; no arbitrary blob-by-hash reads                      |
 
 Multipart sessions expire after 24 hours of inactivity. Resuming a session,
-uploading a part or completing it renews its activity time. Active sessions remain
+uploading a part or completing it renews its activity time when at least 12 hours
+have elapsed since the last recorded activity. Resume within 12 hours of the
+last request to guarantee continuity. Active sessions remain
 bounded by the existing upload quota and size limits. Clients reopen a missing
 session and resend its parts; a completed blob is reused after a successful HEAD.
 
