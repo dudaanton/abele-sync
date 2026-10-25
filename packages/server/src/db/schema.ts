@@ -69,6 +69,7 @@ export interface UploadsTable {
   /** JSON: the part numbers received so far. */
   parts_received: string
   created_at: string
+  last_active_at: import('kysely').Generated<string | null>
   /** The vault and device the upload is for (`006_upload_owners`); null on older rows. */
   vault_id: string | null
   device_id: string | null

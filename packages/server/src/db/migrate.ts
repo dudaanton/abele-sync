@@ -2,6 +2,7 @@ import { PostgresAdapter, sql, type Kysely } from 'kysely'
 import { Migrator, type MigrationProvider } from 'kysely/migration'
 import type { Database } from './schema.js'
 import * as items from './migrations/018_token_items.js'
+import * as leases from './migrations/019_continuation_leases.js'
 import * as activity from './migrations/016_activity.js'
 import * as generation from './migrations/017_generation.js'
 import * as readOnly from './migrations/015_read_only.js'
@@ -24,6 +25,7 @@ export const migrationChain = Object.freeze([
   '008_activity',
   '009_generation',
   '010_token_items',
+  '011_continuation_leases',
 ])
 const provider: MigrationProvider = {
   getMigrations: async () => ({
@@ -37,6 +39,7 @@ const provider: MigrationProvider = {
     '008_activity': { up: activity.up },
     '009_generation': { up: generation.up },
     '010_token_items': { up: items.up },
+    '011_continuation_leases': { up: leases.up },
   }),
 }
 export async function runMigrations(

@@ -35,7 +35,8 @@ or old credential support exists. The unused test stand is to be recreated.
 - `scope_changes`: ordered content/removal/delete events at engine/directory
   sequences, recorded with the commit.
 - `scope_snapshots` / `scope_snapshot_items`: scope-bound fixed-cursor pages,
-  durable across restart; snapshots expire after one hour.
+  durable across restart; each page renews a one-hour inactivity lease, capped at
+  seven days from `created_at`.
 
 Issuance follows stable directory ancestry. Group equality and root-to-existing
 note issuance are available; nested group membership is a later-stage graph

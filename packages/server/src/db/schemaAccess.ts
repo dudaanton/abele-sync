@@ -94,6 +94,12 @@ export interface AccessDatabase {
     type: 'content' | 'removal' | 'delete'
     event: string
   }
-  scope_snapshots: { id: string; scope_id: string; cursor: number; expires_at: string }
+  scope_snapshots: {
+    id: string
+    scope_id: string
+    cursor: number
+    expires_at: string
+    created_at: Generated<string | null>
+  }
   scope_snapshot_items: { snapshot_id: string; file_id: string; item: string }
 }

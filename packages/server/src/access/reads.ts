@@ -40,6 +40,8 @@ export async function withToken<T>(
   })
 }
 const invalidPage = () => new AbeleError('invalid_request', 'invalid or expired page cursor')
+const SNAPSHOT_IDLE_MS = 60 * 60 * 1000
+const SNAPSHOT_MAX_MS = 7 * 24 * SNAPSHOT_IDLE_MS
 export async function manifestWithToken(
   deps: AccessDeps,
   key: string,
@@ -87,7 +89,8 @@ export async function manifestWithToken(
             id: snapshotId,
             scope_id: p.scope.id,
             cursor,
-            expires_at: new Date(Date.parse(now) + 60 * 60 * 1000).toISOString(),
+            created_at: now,
+            expires_at: new Date(Date.parse(now) + SNAPSHOT_IDLE_MS).toISOString(),
           })
           .execute()
         await deps.db
@@ -110,6 +113,19 @@ export async function manifestWithToken(
       .where('expires_at', '>', now)
       .executeTakeFirst()
     if (!snapshot) throw invalidPage()
+    const created =
+      snapshot.created_at ??
+      new Date(Date.parse(snapshot.expires_at) - SNAPSHOT_IDLE_MS).toISOString()
+    const expires = Math.min(
+      Date.parse(now) + SNAPSHOT_IDLE_MS,
+      Date.parse(created) + SNAPSHOT_MAX_MS
+    )
+    if (expires <= Date.parse(now)) throw invalidPage()
+    await deps.db
+      .updateTable('scope_snapshots')
+      .set({ created_at: created, expires_at: new Date(expires).toISOString() })
+      .where('id', '=', snapshotId)
+      .execute()
     const rows = await deps.db
       .selectFrom('scope_snapshot_items')
       .select(['file_id', 'item'])

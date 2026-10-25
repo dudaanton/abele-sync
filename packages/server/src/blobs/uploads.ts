@@ -83,6 +83,7 @@ export class UploadManager {
       part_size: partBytes,
       parts_received: writeJson([]),
       created_at: this.now().toISOString(),
+      last_active_at: this.now().toISOString(),
       vault_id: owner?.vaultId ?? null,
       device_id: owner?.deviceId ?? null,
       completing_at: null,
@@ -109,7 +110,14 @@ export class UploadManager {
         const same = earlier.find((upload) => Number(upload.size) === size)
         if (same !== undefined && same.part_size !== partBytes)
           throw new AbeleError('conflict', 'cannot resume an upload with a different part layout')
-        if (same !== undefined) return { same, replaced: [] as string[] }
+        if (same !== undefined) {
+          await trx
+            .updateTable('uploads')
+            .set({ last_active_at: this.now().toISOString() })
+            .where('id', '=', same.id)
+            .execute()
+          return { same, replaced: [] as string[] }
+        }
         const ids = earlier.map((upload) => upload.id)
         if (ids.length > 0) await trx.deleteFrom('uploads').where('id', 'in', ids).execute()
         await hasRoom(trx, owner.vaultId, sha, size, this.authorizeOwner === undefined)
@@ -336,25 +344,19 @@ export class UploadManager {
     return { sha, size: Number(size) }
   }
 
-  /** Drop uploads begun before `olderThan`, with their parts. Answers how many went. */
+  /** Drop inactive uploads, with their parts. Active uploads remain quota-accounted. */
   async sweep(olderThan: Date): Promise<number> {
     const stale = await this.db
-      .selectFrom('uploads')
-      .select('id')
-      .where('created_at', '<', olderThan.toISOString())
+      .deleteFrom('uploads')
+      .where((sql) =>
+        sql(sql.fn.coalesce('last_active_at', 'created_at'), '<', olderThan.toISOString())
+      )
+      .returning('id')
       .execute()
     await this.sweepStrays()
     if (stale.length === 0) return 0
 
     for (const { id } of stale) await rm(this.dirFor(id), { recursive: true, force: true })
-    await this.db
-      .deleteFrom('uploads')
-      .where(
-        'id',
-        'in',
-        stale.map((row) => row.id)
-      )
-      .execute()
     return stale.length
   }
 
@@ -423,6 +425,11 @@ export class UploadManager {
     ) {
       throw new AbeleError('not_found', `no upload ${uploadId}`)
     }
+    await this.db
+      .updateTable('uploads')
+      .set({ last_active_at: this.now().toISOString() })
+      .where('id', '=', uploadId)
+      .execute()
     return upload
   }
 }

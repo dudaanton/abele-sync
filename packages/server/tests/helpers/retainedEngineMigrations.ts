@@ -11,9 +11,11 @@ import * as uploadOwners from '../legacy/src/db/migrations/006_upload_owners.js'
 import * as versionRetentionClass from '../legacy/src/db/migrations/007_version_retention_class.js'
 import * as versionPaths from '../legacy/src/db/migrations/010_version_path_keys.js'
 import * as conflicts from '../../src/db/migrations/011_conflict_divergences.js'
+import { uploadsUp } from '../../src/db/migrations/019_continuation_leases.js'
 
 /** Test-only old transport bootstrap for independent engine regressions, not an upgrade path. */
 const migrations = {
+  '014_test_upload_lease': { up: uploadsUp },
   '001_init': init,
   '002_versions_vault_sha': versionsVaultSha,
   '003_wide_numbers': wideNumbers,

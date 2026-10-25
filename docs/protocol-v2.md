@@ -392,8 +392,11 @@ updates its descendants atomically. Deleting a folder selector permits draining
 its genuine final deletes, then leaves the connection unavailable; a replacement
 at the same path cannot revive that identity.
 
-Snapshots are stored durably for one hour, bound to the effective scope. Their
-cursor is fixed across pages, including across restart. Feed pages use an opaque
+Snapshots are durable and bound to the effective scope. Each page renews a
+one-hour inactivity lease, up to seven days after snapshot creation. Their cursor
+is fixed across pages, including across restart. If a continuation expires, clients
+restart the inventory from a fresh snapshot, retain installed content and replay
+the feed from the earliest unfinished snapshot cursor. Feed pages use an opaque
 `next` string (currently the last emitted space-local sequence as a decimal
 string); use it unchanged. Members, version-time visibility and content/leave/
 delete events are recorded inside the engine transaction, including merge and
@@ -409,6 +412,11 @@ conflict outputs. Credential and inherited-boundary checks precede receipt repla
 | `PUT /v2/uploads/:sha/:id/:part`                 | Raw part bytes, 204; upload is bound to token, space and digest                                        |
 | `POST /v2/uploads/:sha/:id/complete`             | 201 `{sha,size}` after verifying all parts and their hash                                              |
 | `GET/HEAD /v2/files/:id/content?version_id=<id>` | Current content by default; range/HEAD supported; no arbitrary blob-by-hash reads                      |
+
+Multipart sessions expire after 24 hours of inactivity. Resuming a session,
+uploading a part or completing it renews its activity time. Active sessions remain
+bounded by the existing upload quota and size limits. Clients reopen a missing
+session and resend its parts; a completed blob is reused after a successful HEAD.
 
 A commit may name bytes uploaded by its own token or a version currently readable
 through its scope. Knowing another file's digest cannot authorize content or a
