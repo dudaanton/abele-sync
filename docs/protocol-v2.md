@@ -396,7 +396,10 @@ Snapshots are durable and bound to the effective scope. Each page renews a
 one-hour inactivity lease, up to seven days after snapshot creation. Their cursor
 is fixed across pages, including across restart. If a continuation expires, clients
 restart the inventory from a fresh snapshot, retain installed content and replay
-the feed from the earliest unfinished snapshot cursor. Feed pages use an opaque
+the feed from the earliest unfinished snapshot cursor. A pull stops restarting if
+an attempt sees no new file versions, or after eight restarts, and returns its
+partial result with an incomplete checkpoint for the next pull. Held versions
+are not downloaded again within that inventory walk. Feed pages use an opaque
 `next` string (currently the last emitted space-local sequence as a decimal
 string); use it unchanged. Members, version-time visibility and content/leave/
 delete events are recorded inside the engine transaction, including merge and

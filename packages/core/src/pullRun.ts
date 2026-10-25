@@ -54,6 +54,7 @@ interface TakeAttempt {
 }
 const MANIFEST_PROGRESS = 'pull-manifest-progress'
 const MANIFEST_PAGE_DATA = 'pull-manifest-page'
+const MAX_MANIFEST_RESTARTS = 8
 interface ManifestProgress {
   generation: string | null
   scope: string | null
@@ -280,6 +281,13 @@ export class Puller {
     }
     const checkpoint = await this.state.getMeta?.(MANIFEST_PROGRESS)
     if (checkpoint || this.report.cursor === 0) await this.bootstrap()
+    if (!this.inventoryComplete) {
+      // An expired inventory may yield its partial result. Neither following
+      // the feed nor rechecking unseen files can prove coverage of its tail.
+      this.syncHeld()
+      await this.placer.pending.flushCleanup()
+      return
+    }
     if (!this.followedCheckpoint) {
       await this.follow()
       if (await this.retryObligations()) await this.save()
@@ -396,6 +404,11 @@ export class Puller {
     let cursor: string | null = null
     let head: number | null = null
     let ahead: ChangeItem[] | null = null
+    const handled = new Set<string>()
+    const identity = (item: ManifestItem | ChangeItem) =>
+      JSON.stringify([item.file_id, item.version_id])
+    let restarts = 0,
+      handledAtRestart = 0
     this.walking = true
     try {
       const generation = (await this.state.getMeta?.(GENERATION_KEY)) ?? null
@@ -498,7 +511,12 @@ export class Puller {
         // A later feed page must not acknowledge an intermediate offline edit.
         this.latestSnapshot = this.feedCache?.complete === true && ahead.length === 0
         await this.page(
-          pending.filter((item) => !completed.has(item.file_id) && !laterFiles.has(item.file_id)),
+          pending.filter(
+            (item) =>
+              !completed.has(item.file_id) &&
+              !laterFiles.has(item.file_id) &&
+              !handled.has(identity(item))
+          ),
           async (change) => {
             if (this.heldFiles.get(change.file_id) !== change) {
               checkpoint.completed.push(change.file_id)
@@ -508,6 +526,7 @@ export class Puller {
             })
           }
         )
+        for (const item of page.items) handled.add(identity(item))
         checkpoint.heldChanges = []
         checkpoint.seen = [...this.seen].filter((id) => this.opts.recheck?.has(id))
         await this.commit(async (tx) => {
@@ -526,6 +545,15 @@ export class Puller {
             // Retain the earliest feed boundary, including across a crash in
             // this restart. Completed files keep their exact durable ledgers.
             this.heldHead = Math.min(this.heldHead ?? Infinity, head ?? 0)
+            if (handled.size === handledAtRestart || restarts >= MAX_MANIFEST_RESTARTS) {
+              // Keep the incomplete checkpoint and its holds for the next pull.
+              // A bad cursor or endlessly changing inventory cannot monopolize
+              // this invocation, even when every attempt sees new identities.
+              await this.commit()
+              return
+            }
+            handledAtRestart = handled.size
+            restarts++
             await this.commit(async (tx) => {
               await tx.setMeta?.(MANIFEST_PROGRESS, null)
               await tx.setMeta?.(MANIFEST_PAGE_DATA, null)
@@ -1193,7 +1221,7 @@ export class Puller {
         const sha = change.sha
         if (sha === null || change.op === 'delete') continue
         if (this.fs.beginAtomicWrite && this.fs.reopenStage && this.client.openVersion) continue
-        if (seen.has(sha) || local.has(sha)) continue
+        if (seen.has(sha) || local.has(sha) || this.placer.lying.has(sha)) continue
         if (this.passedOver(change)) continue
         const entry = await this.state.byFileId(change.file_id)
         if (entry?.versionId === change.version_id || entry?.sha === sha) continue
