@@ -16,6 +16,7 @@
     "test:watch": "vitest",
     "test:sql": "node scripts/test-sql.mjs",
     "test:sql:disposable": "bash scripts/test-sql-disposable.sh",
+    "bench:lease-cost": "npm run build && vitest run --config scripts/lease-cost.config.ts --maxWorkers=2 --testTimeout=7200000",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },

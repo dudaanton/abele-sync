@@ -46,6 +46,8 @@ it('ships one compose example with a digest-pinned PostgreSQL image', () => {
 
 it('keeps only scripts used by package commands or automated tests', () => {
   expect(readdirSync(resolve(root, 'scripts')).sort()).toEqual([
+    'lease-cost.bench.ts',
+    'lease-cost.config.ts',
     'query-cost-analysis.d.mts',
     'query-cost-analysis.mjs',
     'test-sql-disposable.sh',
@@ -53,4 +55,7 @@ it('keeps only scripts used by package commands or automated tests', () => {
     'validate-cost-report.d.mts',
     'validate-cost-report.mjs',
   ])
+  const { scripts } = JSON.parse(read('package.json'))
+  expect(scripts['bench:lease-cost']).toContain('--config scripts/lease-cost.config.ts')
+  expect(read('scripts/lease-cost.config.ts')).toContain("include: ['scripts/lease-cost.bench.ts']")
 })
