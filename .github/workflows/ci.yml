@@ -8,11 +8,10 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  test:
+  checks:
     runs-on: ubuntu-latest
-    # Linux takes about 56 minutes; the serial crash matrix alone takes 43.
-    # File/package sharding cannot split that file. Allow the complete matrix,
-    # setup/checks and the required SQL tier to finish with headroom.
+    # The exhaustive crash matrix runs in its own group shards below. Keep the
+    # other suites, ancillary recovery regressions and required SQL tier together.
     timeout-minutes: 90
     services:
       postgres:
@@ -30,14 +29,66 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+      - name: Runner capacity
+        run: node -e 'const os=require("node:os"),v8=require("node:v8"); console.log(JSON.stringify({node:process.version,arch:process.arch,parallelism:os.availableParallelism(),models:[...new Set(os.cpus().map(c=>c.model))],memoryGiB:os.totalmem()/2**30,heapMiB:v8.getHeapStatistics().heap_size_limit/2**20},null,2))'
       - run: npm ci
       - run: npm run types
       - run: node --test tests/packaging/*.mjs
       # Prettier is this repository's lint/format gate; no ESLint config exists.
       - run: npm run format:check
-      - run: npm test
+      - run: npm test -- --maxWorkers=2 --exclude '**/groupCrashRecovery.test.ts'
         env:
           ABELE_REQUIRE_NORMALIZATION_SENSITIVE: '1'
+      - name: Crash recovery regressions and allocation bound
+        run: npx vitest run packages/node/tests/unit/groupCrashRecovery.test.ts --maxWorkers=2 --testNamePattern "$CRASH_ANCILLARY"
+        env:
+          CRASH_ANCILLARY: '^(?!.*converges after every lifecycle await and every nested recovery await)'
       - run: npm run test:sql
         env:
           ABELE_TEST_PG_URL: postgres://postgres:synthetic-test-only@127.0.0.1:5432/postgres
+  crash_recovery:
+    name: crash recovery (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: write-native
+            pattern: 'group write \(native\) converges after every lifecycle await and every nested recovery await'
+          - name: write-folding
+            pattern: 'group write \(folding case-only\) converges after every lifecycle await and every nested recovery await'
+          - name: remove-native
+            pattern: 'group remove \(native\) converges after every lifecycle await and every nested recovery await'
+          - name: remove-folding
+            pattern: 'group remove \(folding case-only\) converges after every lifecycle await and every nested recovery await'
+          - name: move-native
+            pattern: 'group move \(native\) converges after every lifecycle await and every nested recovery await'
+          - name: move-folding
+            pattern: 'group move \(folding case-only\) converges after every lifecycle await and every nested recovery await'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Runner capacity
+        run: node -e 'const os=require("node:os"),v8=require("node:v8"); console.log(JSON.stringify({node:process.version,arch:process.arch,parallelism:os.availableParallelism(),models:[...new Set(os.cpus().map(c=>c.model))],memoryGiB:os.totalmem()/2**30,heapMiB:v8.getHeapStatistics().heap_size_limit/2**20},null,2))'
+      - run: npx vitest run packages/node/tests/unit/groupCrashRecovery.test.ts --maxWorkers=2 --testNamePattern "$CRASH_GROUP"
+        env:
+          CRASH_GROUP: ${{ matrix.pattern }}
+  # Preserve the existing required status: it cannot turn green while a matrix
+  # entry failed, was cancelled or was skipped.
+  test:
+    if: always()
+    needs: [checks, crash_recovery]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every CI shard
+        env:
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          RECOVERY_RESULT: ${{ needs.crash_recovery.result }}
+        run: test "$CHECKS_RESULT" = success && test "$RECOVERY_RESULT" = success
