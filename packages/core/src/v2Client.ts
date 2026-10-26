@@ -43,7 +43,7 @@ import type { FileSystem } from './fs.js'
 import { fingerprintFile } from './fs.js'
 import type { StateStore } from './state.js'
 import { sha256 } from './hash.js'
-import { V2Directories } from './v2Directories.js'
+import { V2Directories, type DirectoryReadback } from './v2Directories.js'
 import { z } from 'zod'
 import { sha256 as incrementalSha256 } from '@noble/hashes/sha256'
 import { MAX_CHUNK_BYTES, type ChunkSource, type ContentIdentity } from './streaming.js'
@@ -379,7 +379,11 @@ export class V2EngineClient implements EngineClient {
       },
     }
   }
-  private async fileItem(item: V2ManifestItem, seq: number): Promise<ManifestItem | null> {
+  private async fileItem(
+    item: V2ManifestItem,
+    seq: number,
+    readback?: DirectoryReadback
+  ): Promise<ManifestItem | null> {
     if (
       this.ports &&
       (await predatesDeparture(
@@ -392,9 +396,10 @@ export class V2EngineClient implements EngineClient {
     )
       return null
     if (item.kind === 'directory') {
-      await this.directories?.receive(item, seq)
+      if (!readback?.matches(item)) await this.directories?.receive(item, seq)
       return null
     }
+    readback?.invalidate(item.file_id)
     this.departed.delete(item.path)
     this.files.set(item.path, item)
     this.byteSources.set(item.sha, item)
@@ -430,9 +435,12 @@ export class V2EngineClient implements EngineClient {
       signal,
     })
     const items: ManifestItem[] = []
+    const readback = page.items.some((item) => item.kind === 'directory')
+      ? await this.directories?.readback()
+      : undefined
     for (const item of page.items) {
       signal?.throwIfAborted()
-      const file = await this.fileItem(item, page.cursor)
+      const file = await this.fileItem(item, page.cursor, readback)
       if (file) items.push(file)
     }
     return {
@@ -451,6 +459,11 @@ export class V2EngineClient implements EngineClient {
     const departures: DepartureEvent[] = []
     const memberships: MembershipEvent[] = []
     const departing = new Map<string, DepartureEvent>()
+    const readback = page.items.some(
+      (event) => event.type === 'content' && event.item.kind === 'directory'
+    )
+      ? await this.directories?.readback()
+      : undefined
     for (const event of page.items) {
       signal?.throwIfAborted()
       if (event.type === 'content') {
@@ -462,7 +475,7 @@ export class V2EngineClient implements EngineClient {
         const departure = departing.get(event.file_id)
         if (departure && departure.event.cursor < event.cursor) departure.supersededBy = event
         if (event.prev_path) this.files.delete(event.prev_path)
-        const file = await this.fileItem(event.item, event.cursor)
+        const file = await this.fileItem(event.item, event.cursor, readback)
         if (!file) continue
         items.push({
           ...file,
@@ -472,6 +485,7 @@ export class V2EngineClient implements EngineClient {
           at: event.at,
         })
       } else {
+        readback?.invalidate(event.file_id)
         if (event.type === 'removal') {
           const departure = {
             connection: this.connectionInfo!.token_id,

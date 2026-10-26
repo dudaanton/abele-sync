@@ -95,6 +95,10 @@ const DocumentSchema = z
   })
   .strict()
 type DirectoryItem = Extract<V2ManifestItem, { kind: 'directory' }>
+export interface DirectoryReadback {
+  matches(item: DirectoryItem): boolean
+  invalidate(fileId: string): void
+}
 interface LocalDirectory extends DirectoryItem {
   identity: string
   localPath?: string
@@ -380,6 +384,39 @@ export class V2Directories {
       ...(doc.refused ?? []).filter((item) => item.path !== path),
       { path, code: error.code, message: error.message, direction },
     ]
+  }
+  /** One immutable ledger read per wire page. Exact versions already recorded by
+   * a commit receipt need neither placement nor another durable directory image.
+   * A mismatch/departure revokes the page-local proof for that identity, so a
+   * later re-entry cannot reuse a baseline changed earlier in this page. */
+  async readback(): Promise<DirectoryReadback> {
+    const doc = await this.read()
+    const known = new Map<string, LocalDirectory>()
+    const work = new ScanWork({ ...scanScheduling(this.state), signal: this.signal })
+    for (const directory of doc.directories) {
+      await work.step()
+      known.set(directory.file_id, directory)
+    }
+    for (const item of doc.incoming ?? []) {
+      await work.step()
+      known.delete(item.file_id)
+    }
+    return {
+      matches(item) {
+        const old = known.get(item.file_id)
+        if (
+          old?.version_id === item.version_id &&
+          old.path === item.path &&
+          old.mtime === item.mtime
+        )
+          return true
+        known.delete(item.file_id)
+        return false
+      },
+      invalidate(fileId) {
+        known.delete(fileId)
+      },
+    }
   }
   async receive(item: DirectoryItem, seq?: number) {
     this.signal?.throwIfAborted()
