@@ -3,7 +3,8 @@ import { chmodSync, existsSync, readFileSync, utimesSync, writeFileSync } from '
 import { mkdtemp, rm } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { performance } from 'node:perf_hooks'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EngineError, selectiveDefaults } from '@abele/sync-core'
 import { writeConfig, type DaemonConfig } from '../../src/config.js'
 import {
@@ -227,15 +228,34 @@ describe('holding the lock', () => {
     'keeps beating after a read that failed',
     async () => {
       const lost: string[] = []
-      const release = await acquireLock(dir, { ...FAST, onLost: (why) => lost.push(why) })
-      chmodSync(lockFile(), 0o000)
-      await sleep(40)
-      chmodSync(lockFile(), 0o600)
-      const after = identity().beat as number
-      await sleep(40)
-      expect(identity().beat as number).toBeGreaterThan(after)
-      expect(lost).toEqual([])
-      release()
+      // Exercise a transient read failure within the give-up interval. Real sleeps
+      // can resume after that interval on a busy host, when losing the lock is correct.
+      vi.useFakeTimers({
+        toFake: ['Date', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'],
+      })
+      const wall = Date.now(),
+        monotonic = performance.now()
+      const clock = vi
+        .spyOn(performance, 'now')
+        .mockImplementation(() => monotonic + Date.now() - wall)
+      let release: Awaited<ReturnType<typeof acquireLock>> | undefined
+      try {
+        release = await acquireLock(dir, { ...FAST, onLost: (why) => lost.push(why) })
+        chmodSync(lockFile(), 0o000)
+        expect(() => readFileSync(lockFile(), 'utf8')).toThrow()
+        await vi.advanceTimersByTimeAsync(40)
+        chmodSync(lockFile(), 0o600)
+        const after = identity().beat as number
+        await vi.advanceTimersByTimeAsync(40)
+        expect(identity().beat as number).toBeGreaterThan(after)
+        expect(lost).toEqual([])
+        expect(release.held()).toBe(true)
+      } finally {
+        if (existsSync(lockFile())) chmodSync(lockFile(), 0o600)
+        release?.()
+        clock.mockRestore()
+        vi.useRealTimers()
+      }
     }
   )
 
